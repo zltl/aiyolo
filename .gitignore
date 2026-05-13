@@ -1,1 +1,9 @@
 .env*
+/aiyolo.private.yaml
+/kubeconfig*
+node_modules/
+dist/
+.next/
+coverage/
+.turbo/
+*.tsbuildinfo
