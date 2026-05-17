@@ -1,0 +1,160 @@
+{{define "providers"}}
+{{template "layout-start" .}}
+{{template "providers-content" .}}
+{{template "layout-end" .}}
+{{end}}
+
+{{define "providers-content"}}
+<div id="providers-content" class="stack">
+  {{if .Notice}}
+  <div class="flash flash-success" role="status">{{.Notice}}</div>
+  {{end}}
+  <section class="split-panel">
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <p class="section-kicker">{{msg .Locale "渠道配置" "Channel config"}}</p>
+          <h2>{{msg .Locale "接入新的上游 Provider" "Connect a new upstream provider"}}</h2>
+        </div>
+      </div>
+      <form method="post" action="/console/providers" class="form-grid" hx-post="/console/providers" hx-target="#providers-content" hx-swap="outerHTML" hx-disabled-elt="find button">
+        <label class="field">
+          <span class="field-label">Provider ID</span>
+          <input name="id">
+          <span class="field-help">{{msg .Locale "稳定 ID，会被模型路由、Usage 和 Audit 直接引用。" "Stable identifier used directly by model routes, usage, and audit records."}}</span>
+        </label>
+        <label class="field">
+          <span class="field-label">{{msg .Locale "显示名称" "Display name"}}</span>
+          <input name="name">
+          <span class="field-help">{{msg .Locale "后台中显示给管理员看的名称。" "Human-readable name shown to administrators in the console."}}</span>
+        </label>
+        <label class="field span-2">
+          <span class="field-label">Base URL</span>
+          <input name="base_url" type="url">
+          <span class="field-help">{{msg .Locale "填写上游兼容 API 的基础地址；需要 /v1 时请带上。" "Enter the upstream compatible API base URL, including /v1 when required."}}</span>
+        </label>
+        <label class="field">
+          <span class="field-label">{{msg .Locale "协议" "Protocol"}}</span>
+          <select name="protocol">
+            <option value="openai">openai</option>
+            <option value="anthropic">anthropic</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">{{msg .Locale "默认代理" "Default proxy"}}</span>
+          <select name="default_proxy_id">
+            <option value="">direct</option>
+            {{range .Proxies}}<option value="{{.ID}}">{{.Name}} · {{.ID}}</option>{{end}}
+          </select>
+          <span class="field-help">{{msg .Locale "不选时保持直连，选中后会作为该 Provider 的默认网络出口。" "Leave empty for direct traffic, or select a profile to make it the provider default egress."}}</span>
+        </label>
+        <label class="field span-2">
+          <span class="field-label">{{msg .Locale "上游 Master Key" "Upstream master key"}}</span>
+          <input name="master_key" type="password" autocomplete="new-password">
+          <span class="field-help">{{msg .Locale "系统级密钥只保存在服务端，不会暴露给终端用户。" "System-level credentials stay on the server and are never exposed to client users."}}</span>
+        </label>
+        <label class="field">
+          <span class="field-label">{{msg .Locale "超时秒数" "Timeout seconds"}}</span>
+          <input name="timeout_seconds" type="number" min="0" value="90">
+        </label>
+        <label class="field">
+          <span class="field-label">{{msg .Locale "状态" "Status"}}</span>
+          <select name="status">
+            <option value="enabled" selected>{{msg .Locale "启用" "Enabled"}}</option>
+            <option value="disabled">{{msg .Locale "停用" "Disabled"}}</option>
+          </select>
+        </label>
+        <div class="field span-2">
+          <button class="primary-button" type="submit">{{msg .Locale "保存 Provider" "Save provider"}}</button>
+        </div>
+      </form>
+    </section>
+
+    <aside class="stack">
+      <section class="panel" style="background: var(--surface-2); border-color: var(--accent);">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Quick Start</p>
+            <h2>{{msg .Locale "一键接入 OpenRouter" "One-click OpenRouter sync"}}</h2>
+          </div>
+        </div>
+        <form method="post" action="/console/providers/openrouter" class="form-grid" hx-post="/console/providers/openrouter" hx-target="#providers-content" hx-swap="outerHTML" hx-disabled-elt="find button">
+          <p class="panel-copy" style="grid-column: span 2;">{{msg .Locale "填入" "Paste your"}} <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">OpenRouter</a> API Key，{{msg .Locale "自动为您导入所有可用模型。" "then import every available model automatically."}}</p>
+          <label class="field span-2">
+            <span class="field-label">API Key</span>
+            <input type="password" name="master_key" autocomplete="new-password" required>
+            <span class="field-help">{{msg .Locale "保存后会创建 openrouter Provider，并同步当前账号可见的模型列表。" "Saving will create the openrouter provider and sync the models visible to this account."}}</span>
+          </label>
+          <div class="field span-2">
+            <button class="primary-button" type="submit" style="width: 100%;">{{msg .Locale "同步所有模型" "Sync all models"}}</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">{{msg .Locale "架构说明" "Design note"}}</p>
+            <h2>{{msg .Locale "架构提示" "Architecture notes"}}</h2>
+          </div>
+        </div>
+        <ul class="note-list">
+          <li>{{msg .Locale "一个供应商可以挂多条渠道，用 priority 与 weight 承载灰度和容灾。" "One provider can expose multiple channels, using priority and weight for gradual rollout and failover."}}</li>
+          <li>{{msg .Locale "终端用户发出的请求通过 API Key 映射内部身份，真正的上游系统令牌留在网关端。" "Client requests map to internal identities via API keys while real upstream tokens stay on the gateway."}}</li>
+        </ul>
+      </section>
+    </aside>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <div>
+        <p class="section-kicker">{{msg .Locale "已配置渠道" "Configured channels"}}</p>
+        <h2>{{msg .Locale "已配置 Providers" "Configured providers"}}</h2>
+      </div>
+      <span class="badge tone-neutral">{{len .Providers}} {{msg .Locale "条" "channels"}}</span>
+    </div>
+    {{if .Providers}}
+    <div class="collection-grid">
+      {{range .Providers}}
+      <article class="resource-card">
+        <div class="activity-top">
+          <strong>{{.Name}}</strong>
+          <span class="{{statusClass .Status}}">{{statusText $.Locale .Status}}</span>
+        </div>
+        <p class="panel-copy">{{.BaseURL}}</p>
+        <dl class="kv-grid">
+          <div>
+            <dt>ID</dt>
+            <dd><span class="mono">{{.ID}}</span></dd>
+          </div>
+          <div>
+            <dt>{{msg $.Locale "协议" "Protocol"}}</dt>
+            <dd>{{protocolLabel .Protocol}}</dd>
+          </div>
+          <div>
+            <dt>{{msg $.Locale "默认代理" "Default proxy"}}</dt>
+            <dd>{{if .DefaultProxyID}}{{.DefaultProxyID}}{{else}}direct{{end}}</dd>
+          </div>
+          <div>
+            <dt>Timeout</dt>
+            <dd>{{.TimeoutSeconds}}s</dd>
+          </div>
+        </dl>
+        {{if isOpenRouterProvider .}}
+        <form method="post" action="/console/providers/{{.ID}}/sync-models" hx-post="/console/providers/{{.ID}}/sync-models" hx-target="#providers-content" hx-swap="outerHTML" hx-disabled-elt="find button">
+          <button class="ghost-button" type="submit">{{msg $.Locale "重新导入模型" "Re-import models"}}</button>
+        </form>
+        {{end}}
+      </article>
+      {{end}}
+    </div>
+    {{else}}
+    <div class="empty-state">
+      <h3>{{msg .Locale "还没有 Provider" "No providers yet"}}</h3>
+      <p>{{msg .Locale "先接入一个 OpenAI 或 Anthropic 兼容上游，模型路由和计费页面才会真正运转起来。" "Connect an OpenAI- or Anthropic-compatible upstream first so model routing and spend views can start working."}}</p>
+    </div>
+    {{end}}
+  </section>
+</div>
+{{end}}

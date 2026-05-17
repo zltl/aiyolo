@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,15 +35,15 @@ func (factory *TransportFactory) HTTPClient(_ context.Context, provider domain.P
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	switch strings.ToLower(profile.Type) {
-	case "", "direct":
+	case "", domain.ProxyTypeDirect:
 		transport.Proxy = nil
-	case "http", "https":
+	case domain.ProxyTypeHTTP:
 		proxyURL, err := url.Parse(profile.Endpoint)
 		if err != nil {
 			return nil, err
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
-	case "socks5", "xray", "v2ray":
+	case domain.ProxyTypeSOCKS5:
 		dialer, err := socksDialer(profile)
 		if err != nil {
 			return nil, err
@@ -57,6 +58,8 @@ func (factory *TransportFactory) HTTPClient(_ context.Context, provider domain.P
 			}
 			return dialer.Dial(network, address)
 		}
+	default:
+		return nil, fmt.Errorf("unsupported proxy profile type %q", profile.Type)
 	}
 	return &http.Client{Transport: transport, Timeout: timeout}, nil
 }

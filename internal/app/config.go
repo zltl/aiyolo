@@ -21,9 +21,6 @@ type Config struct {
 	ReadTimeout    time.Duration
 	WriteTimeout   time.Duration
 	IdleTimeout    time.Duration
-	OpenRouterKey  string
-	DefaultBaseURL string
-	DefaultModel   string
 }
 
 func LoadConfig(v *viper.Viper) (Config, error) {
@@ -39,9 +36,6 @@ func LoadConfig(v *viper.Viper) (Config, error) {
 		ReadTimeout:    durationOr(v.GetString("app.read_timeout"), 30*time.Second),
 		WriteTimeout:   durationOr(v.GetString("app.write_timeout"), 0),
 		IdleTimeout:    durationOr(v.GetString("app.idle_timeout"), 120*time.Second),
-		OpenRouterKey:  v.GetString("providers.openrouter.api_key"),
-		DefaultBaseURL: firstNonEmpty(v.GetString("providers.openrouter.default_base_url"), "https://openrouter.ai/api/v1"),
-		DefaultModel:   firstNonEmpty(v.GetString("providers.openrouter.default_model"), "openrouter/auto"),
 	}
 	if cfg.DatabaseURL == "" {
 		return cfg, fmt.Errorf("database.url or AIYOLO_DATABASE_URL is required")

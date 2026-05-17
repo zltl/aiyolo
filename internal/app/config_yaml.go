@@ -52,9 +52,6 @@ func bindEnvKeys(v *viper.Viper) {
 		"database.schema":                       "AIYOLO_DATABASE_SCHEMA",
 		"database.sslmode":                      "AIYOLO_DATABASE_SSLMODE",
 		"database.prefer_external":              "AIYOLO_DATABASE_PREFER_EXTERNAL",
-		"providers.openrouter.api_key":          "AIYOLO_OPENROUTER_KEY",
-		"providers.openrouter.default_base_url": "AIYOLO_DEFAULT_BASE_URL",
-		"providers.openrouter.default_model":    "AIYOLO_DEFAULT_MODEL",
 	}
 	for key, envVar := range bindings {
 		_ = v.BindEnv(key, envVar)
@@ -73,9 +70,6 @@ func BindStringFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 		"read-timeout":     "app.read_timeout",
 		"write-timeout":    "app.write_timeout",
 		"idle-timeout":     "app.idle_timeout",
-		"openrouter-key":   "providers.openrouter.api_key",
-		"default-base-url": "providers.openrouter.default_base_url",
-		"default-model":    "providers.openrouter.default_model",
 	}
 	for flagName, key := range bindings {
 		if err := v.BindPFlag(key, flags.Lookup(flagName)); err != nil {
@@ -126,8 +120,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("app.read_timeout", "30s")
 	v.SetDefault("app.write_timeout", "0s")
 	v.SetDefault("app.idle_timeout", "120s")
-	v.SetDefault("providers.openrouter.default_base_url", "https://openrouter.ai/api/v1")
-	v.SetDefault("providers.openrouter.default_model", "openrouter/auto")
 	v.SetDefault("database.name", "bbflow")
 	v.SetDefault("database.schema", "aiyolo")
 	v.SetDefault("database.sslmode", "disable")
@@ -139,7 +131,7 @@ func AddConfigFlags(flags *pflag.FlagSet) {
 	flags.String("http-addr", "", "HTTP listen address")
 	flags.String("database-url", "", "PostgreSQL connection URL")
 	flags.Bool("auto-migrate", false, "Run database migrations before serving")
-	flags.Bool("seed-from-env", false, "Seed default provider and API key settings before serving")
+	flags.Bool("seed-from-env", false, "Seed built-in defaults and API key settings before serving")
 	flags.String("seed-api-key", "", "Seed a local API key at startup")
 	flags.String("secret-key", "", "Application secret key")
 	flags.String("admin-email", "", "Console admin email")
@@ -147,9 +139,6 @@ func AddConfigFlags(flags *pflag.FlagSet) {
 	flags.String("read-timeout", "", "Server read timeout, e.g. 30s")
 	flags.String("write-timeout", "", "Server write timeout, e.g. 30s")
 	flags.String("idle-timeout", "", "Server idle timeout, e.g. 120s")
-	flags.String("openrouter-key", "", "Default OpenRouter API key")
-	flags.String("default-base-url", "", "Default upstream base URL")
-	flags.String("default-model", "", "Default upstream model alias")
 }
 
 func ApplyFlagOverrides(cmd *cobra.Command, cfg *Config) error {

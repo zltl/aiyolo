@@ -29,6 +29,11 @@ type Store interface {
 	UpsertModelRoute(ctx context.Context, route domain.ModelRoute) error
 	ListModelRoutes(ctx context.Context) ([]domain.ModelRoute, error)
 	GetModelRoute(ctx context.Context, publicName string) (domain.ModelRoute, error)
+	LookupModelRoute(ctx context.Context, publicName string) (domain.ModelRoute, error)
+
+	UpsertPricingRule(ctx context.Context, rule domain.PricingRule) error
+	ListPricingRules(ctx context.Context) ([]domain.PricingRule, error)
+	GetPricingRule(ctx context.Context, id string) (domain.PricingRule, error)
 
 	UpsertProxyProfile(ctx context.Context, profile domain.ProxyProfile) error
 	ListProxyProfiles(ctx context.Context) ([]domain.ProxyProfile, error)
@@ -36,13 +41,15 @@ type Store interface {
 
 	InsertUsage(ctx context.Context, usage domain.UsageRecord) error
 	ListUsage(ctx context.Context, limit int) ([]domain.UsageRecord, error)
+	GetUsageByRequestID(ctx context.Context, requestID string) (domain.UsageRecord, error)
+	SummarizeAPIKeyUsage(ctx context.Context, apiKeyID string) (domain.APIKeyUsageSummary, error)
 	InsertAudit(ctx context.Context, event domain.AuditEvent) error
 	ListAudit(ctx context.Context, limit int) ([]domain.AuditEvent, error)
 	Dashboard(ctx context.Context) (domain.DashboardData, error)
+	BillingOverview(ctx context.Context) (domain.BillingOverview, error)
+	UserDirectory(ctx context.Context) (domain.UserDirectory, error)
+	GetConsoleAuthSettings(ctx context.Context) (domain.ConsoleAuthSettings, error)
+	SaveConsoleAuthSettings(ctx context.Context, settings domain.ConsoleAuthSettings) error
 }
 
-type SeedData struct {
-	OpenRouterKey  string
-	DefaultBaseURL string
-	DefaultModel   string
-}
+type SeedData struct{}

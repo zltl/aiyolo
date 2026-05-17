@@ -2,10 +2,14 @@ package app
 
 import (
 	"encoding/json"
+	"log"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	chmiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
 	"github.com/zltl/aiyolo/internal/console"
@@ -27,9 +31,12 @@ func (server *Server) Handler() http.Handler {
 	router := chi.NewRouter()
 	router.Use(cors.Handler(cors.Options{AllowedOrigins: []string{"*"}, AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}, AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-API-Key", "X-Request-ID", "Anthropic-Version", "Anthropic-Beta"}}))
 	router.Use(requestIDMiddleware)
+	router.Use(requestLoggerMiddleware)
 	router.Get("/healthz", server.healthz)
 	router.Get("/metrics", server.metrics)
-	router.Mount("/v1", gateway.NewHandler(server.store, proxytransport.NewTransportFactory()).Routes())
+	gatewayHandler := gateway.NewHandler(server.store, proxytransport.NewTransportFactory()).Routes()
+	router.Mount("/v1", gatewayHandler)
+	router.Mount("/api/v1", gatewayHandler)
 	router.Mount("/console", console.NewHandler(console.Config{SecretKey: server.cfg.SecretKey, AdminEmail: server.cfg.AdminEmail, AdminPassword: server.cfg.AdminPassword}, server.store).Routes())
 	router.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/console/", http.StatusSeeOther) })
 	return router
@@ -67,6 +74,42 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("x-request-id", requestID)
 		next.ServeHTTP(w, r)
 	})
+}
+
+func requestLoggerMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		wrapped := chmiddleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Printf("http request_id=%s method=%s path=%q query=%q status=%d bytes=%d duration_ms=%d client_ip=%q user_agent=%q panic=%v", requestIDValue(r), r.Method, r.URL.Path, r.URL.RawQuery, http.StatusInternalServerError, wrapped.BytesWritten(), time.Since(started).Milliseconds(), requestLogClientIP(r), r.UserAgent(), recovered)
+				panic(recovered)
+			}
+		}()
+		next.ServeHTTP(wrapped, r)
+		status := wrapped.Status()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		log.Printf("http request_id=%s method=%s path=%q query=%q status=%d bytes=%d duration_ms=%d client_ip=%q user_agent=%q", requestIDValue(r), r.Method, r.URL.Path, r.URL.RawQuery, status, wrapped.BytesWritten(), time.Since(started).Milliseconds(), requestLogClientIP(r), r.UserAgent())
+	})
+}
+
+func requestIDValue(r *http.Request) string {
+	if value := strings.TrimSpace(r.Header.Get("x-request-id")); value != "" {
+		return value
+	}
+	return "unknown"
+}
+
+func requestLogClientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("x-forwarded-for")); forwarded != "" {
+		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+	}
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func itoa(value int64) string {

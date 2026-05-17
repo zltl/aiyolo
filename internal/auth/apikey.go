@@ -53,7 +53,7 @@ func ExtractAPIKey(r *http.Request) (string, error) {
 }
 
 func Allows(subject domain.Subject, protocol, model string) bool {
-	if len(subject.AllowedProtocols) > 0 && !contains(subject.AllowedProtocols, protocol) {
+	if strings.TrimSpace(protocol) != "" && len(subject.AllowedProtocols) > 0 && !contains(subject.AllowedProtocols, protocol) {
 		return false
 	}
 	if len(subject.AllowedModels) > 0 && model != "" && !contains(subject.AllowedModels, model) {

@@ -12,13 +12,13 @@
 - 对外暴露 OpenAI-compatible 和 Anthropic-compatible API，方便 Codex、Claude Code、OpenCode 等应用把 base URL 指向 AIYolo。
 - 按用户、组织、项目、应用 Key、模型、上游来源统计用量和费用。
 - 记录可查询、可导出的审计日志，覆盖登录、配置变更、API 调用、代理选择、失败重试和管理员操作。
-- 支持 HTTP、HTTPS、SOCKS5 代理；对 VLESS/Xray/V2Ray 等代理形态采用外部代理进程或 sidecar 暴露本地 HTTP/SOCKS 入站端口，再由 Gateway 选择使用。
+- 支持 direct、HTTP、SOCKS5 三种代理类型；proxy profile 统一在网页控制台维护，再由 Gateway 在运行时选择使用。
 - 先做模块化单体，后续再按流量拆出 Gateway、Billing、Audit、Dashboard。
 
 ### 1.2 非目标
 
 - 不自行训练模型。
-- 不在 Gateway 中实现完整 VLESS/Xray/V2Ray 协议栈，避免把网络代理核心逻辑做成安全负担。
+- 不在 Gateway 中实现额外代理协议栈，避免把网络代理核心逻辑做成安全负担。
 - 不做复杂 BI 平台，MVP 只提供必要的用量、费用、错误率、延迟和审计查询。
 - 不引入 React、Next.js、Node.js worker 或前端构建流程。
 
@@ -38,7 +38,7 @@
 | 密码 | `golang.org/x/crypto/bcrypt` | 本地账号密码哈希 |
 | 权限 | `casbin/casbin` | 管理员、普通用户、审计员、项目成员权限 |
 | 限流 | PostgreSQL 事务 + `pg_advisory_xact_lock` | MVP 不引入 Redis；用窗口计数表和预留表承载 RPM/TPM/并发控制 |
-| 代理拨号 | Go `net/http` + `x/net/proxy` | HTTP/HTTPS/SOCKS5；Xray/V2Ray 通过本地入站适配 |
+| 代理拨号 | Go `net/http` + `x/net/proxy` | direct、HTTP、SOCKS5 |
 | 代理核心 | `net/http/httputil.ReverseProxy` + 自定义 Transformer | 同协议透明转发走 ReverseProxy；跨协议转换、计费和 SSE 解析走专用 Handler |
 | Token 估算 | `tiktoken-go/tokenizer` 等 | 上游未返回 usage 时估算成本 |
 | 可观测性 | OpenTelemetry + Prometheus + Grafana | trace、metrics、dashboard |
@@ -63,7 +63,6 @@ flowchart LR
   DB[(PostgreSQL)]
   Metrics[(Prometheus)]
   Proxy[Proxy Profiles]
-  Xray[Xray/V2Ray Sidecar optional]
   OpenAI[OpenAI-compatible Provider]
   Anthropic[Anthropic-compatible Provider]
   Other[Other Provider / Local Model]
@@ -83,7 +82,6 @@ flowchart LR
   Audit --> DB
   Gateway --> Metrics
   Router --> Proxy
-  Proxy --> Xray
   Proxy --> OpenAI
   Proxy --> Anthropic
   Proxy --> Other
@@ -236,6 +234,8 @@ Transformer 的核心职责：
 | Users | 用户、组织、角色、状态 |
 | Settings | 全局策略、审计保留、默认超时、默认代理 |
 
+说明：Provider、模型路由和代理 profile 都通过 console 页面配置并写入数据库，不从服务配置文件加载。
+
 ### 5.2 可视化指标
 
 MVP 仪表盘至少提供下列图表和指标。图表可以先用 Chart.js CDN 引入，生产环境再 vendored 到静态目录，避免运行时依赖外部网络。
@@ -323,6 +323,8 @@ MVP 支持三种路由：
 
 渠道是 provider 的可运营实例，用来承载 base URL、master key、协议类型、代理 profile、健康状态和调度权重。一个供应商可以配置多个渠道，例如 `deepseek-main`、`deepseek-backup`、`dashscope-cn`、`openai-hk-proxy`。
 
+这些渠道由管理员在 console 中创建和修改，服务启动时不会再从 YAML 或环境变量中导入 provider 配置。
+
 渠道字段至少包含：
 
 - `base_url`：上游 API 根地址。
@@ -341,20 +343,21 @@ MVP 支持三种路由：
 
 | 字段 | 说明 |
 | --- | --- |
-| `name` | 例如 `direct`、`hk-socks5-1`、`xray-sg` |
-| `type` | `direct`、`http`、`https`、`socks5`、`xray`、`v2ray` |
-| `endpoint` | HTTP/SOCKS 地址，或本地 Xray/V2Ray 入站地址 |
+| `name` | 例如 `direct`、`hk-socks5-1`、`sg-http-1` |
+| `type` | `direct`、`http`、`socks5` |
+| `endpoint` | HTTP/SOCKS 地址；`direct` 可留空 |
 | `auth` | 用户名/密码或引用 secret |
 | `region` | 逻辑地区，例如 `cn`、`hk`、`sg`、`jp`、`us` |
 | `timeout` | 连接超时和整体超时 |
 | `health_check_url` | 连通性检测目标 |
 | `status` | enabled/disabled/degraded |
 
-### 8.2 HTTP/HTTPS/SOCKS5
+### 8.2 Direct/HTTP/SOCKS5
 
 Go Gateway 直接支持：
 
-- HTTP/HTTPS proxy：使用 `http.Transport.Proxy`。
+- direct：不设置代理，直接访问上游。
+- HTTP proxy：使用 `http.Transport.Proxy`。
 - SOCKS5 proxy：使用 `golang.org/x/net/proxy` 创建 dialer，再注入 `http.Transport.DialContext`。
 
 每个上游 provider 拥有独立 `http.Client` 池，池 key 至少包含：
@@ -363,15 +366,15 @@ Go Gateway 直接支持：
 provider_id + proxy_profile_id + tls_settings + timeout_policy
 ```
 
-配置文件和数据库都允许为不同 provider 单独指定代理，例如 OpenAI 走 `hk-socks5-1`，DashScope 走 `direct`，Anthropic 走 `sg-http-1`。运行时解析顺序仍以请求路由、provider、项目/API Key、系统默认逐层回退。
+proxy profile 只在网页控制台中维护；provider 和模型路由可以选择已有代理。运行时解析顺序仍以请求路由、provider、项目/API Key、系统默认逐层回退。
 
-### 8.3 VLESS/Xray/V2Ray
+### 8.3 其它网络出口
 
-不在业务进程内实现 VLESS/Xray/V2Ray 协议。推荐的简化方案是：
+如果你有其它代理系统，先在网关外把它转换成 HTTP 或 SOCKS5 入站，再在控制台里登记成 `http` 或 `socks5` profile。
 
-**独立部署**：管理员在服务器上独立部署 Xray/V2Ray，把本地 `127.0.0.1:1080` 暴露为 SOCKS5 或 `127.0.0.1:8080` 暴露为 HTTP proxy；Gateway 的 proxy profile 选择 `socks5` 或 `http`。
+Gateway 本身只识别 `direct`、`http`、`socks5` 三种类型。
 
-这样可以把复杂代理协议、安全更新和网络规避能力交给成熟项目，Gateway 保持其轻量性，只负责选择代理、健康检查、审计和故障隔离。
+这样可以把复杂代理协议和安全更新交给外部组件，Gateway 保持轻量，只负责选择代理、健康检查、审计和故障隔离。
 
 ### 8.4 代理选择优先级
 
@@ -668,11 +671,11 @@ sequenceDiagram
 3. 实现 provider/model/proxy 的 CRUD 管理台。
 4. 实现 Transformer 内部结构和 OpenAI-compatible `/v1/models`、`/v1/chat/completions`。
 5. 实现 Anthropic-compatible `/v1/messages` 和 SSE 事件转换。
-6. 实现 HTTP/HTTPS/SOCKS5 proxy profile 和上游连通性测试。
+6. 实现 direct/http/socks5 proxy profile 和上游连通性测试。
 7. 实现 usage 采集、价格表、usage ledger、PostgreSQL 限流和双阶段预算预留/结算。
 8. 实现 audit log 中间件和查询页面。
 9. 实现 usage/dashboard 可视化，使用 Chart.js 展示每日消费曲线和模型分布。
-10. 增加高级代理方案（如独立部署 Xray 配合 profile）的配置文档。
+10. 增加控制台代理维护与外部网络出口接入文档。
 11. 增加 OpenTelemetry、Prometheus metrics 和健康检查。
 
 ## 15. 第一版验收标准

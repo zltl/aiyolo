@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -10,34 +11,30 @@ import (
 func TestLoadConfigFromYAML(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "aiyolo.private.yaml")
-	if err := os.WriteFile(configPath, []byte(`app:
-  http_addr: 127.0.0.1:19090
-  auto_migrate: true
-  seed_from_env: false
-  seed_api_key: yaml-seed-key
-  read_timeout: 12s
-  write_timeout: 3s
-  idle_timeout: 44s
-
-auth:
-  secret_key: yaml-secret
-  admin_email: yaml-admin@example.com
-  admin_password: yaml-password
-
-database:
-  host_external: db.example.com
-  username: yaml-user
-  password: yaml-password
-  name: yaml-db
-  schema: yaml_schema
-  sslmode: disable
-
-providers:
-  openrouter:
-    api_key: yaml-openrouter-key
-    default_base_url: https://example.com/v1
-    default_model: yaml/model
-`), 0o600); err != nil {
+	configYAML := strings.Join([]string{
+		"app:",
+		"  http_addr: 127.0.0.1:19090",
+		"  auto_migrate: true",
+		"  seed_from_env: false",
+		"  seed_api_key: yaml-seed-key",
+		"  read_timeout: 12s",
+		"  write_timeout: 3s",
+		"  idle_timeout: 44s",
+		"",
+		"auth:",
+		"  secret_key: yaml-secret",
+		"  admin_email: yaml-admin@example.com",
+		"  admin_password: yaml-password",
+		"",
+		"database:",
+		"  host_external: db.example.com",
+		"  username: yaml-user",
+		"  password: yaml-password",
+		"  name: yaml-db",
+		"  schema: yaml_schema",
+		"  sslmode: disable",
+	}, "\n") + "\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("AIYOLO_CONFIG_FILE", configPath)
@@ -54,9 +51,6 @@ providers:
 	}
 	if cfg.DatabaseURL != "postgres://yaml-user:yaml-password@db.example.com:5432/yaml-db?aiyolo_schema=yaml_schema&sslmode=disable" {
 		t.Fatalf("DatabaseURL=%q", cfg.DatabaseURL)
-	}
-	if cfg.OpenRouterKey != "yaml-openrouter-key" {
-		t.Fatalf("OpenRouterKey=%q", cfg.OpenRouterKey)
 	}
 	if cfg.AdminEmail != "yaml-admin@example.com" || cfg.AdminPassword != "yaml-password" {
 		t.Fatalf("unexpected admin config: %+v", cfg)

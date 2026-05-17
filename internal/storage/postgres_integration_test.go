@@ -25,7 +25,7 @@ func TestPostgresMigrateAndSeed(t *testing.T) {
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SeedDefaults(ctx, storage.SeedData{OpenRouterKey: "test-upstream-key", DefaultBaseURL: "https://example.invalid/v1", DefaultModel: "openrouter/auto"}); err != nil {
+	if err := store.SeedDefaults(ctx, storage.SeedData{}); err != nil {
 		t.Fatal(err)
 	}
 	providers, err := store.ListProviders(ctx)
@@ -40,7 +40,7 @@ func TestPostgresMigrateAndSeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(providers) == 0 || len(routes) == 0 || len(proxies) == 0 {
-		t.Fatalf("seed incomplete: providers=%d routes=%d proxies=%d", len(providers), len(routes), len(proxies))
+	if len(providers) != 0 || len(routes) != 0 || len(proxies) == 0 {
+		t.Fatalf("unexpected seed result: providers=%d routes=%d proxies=%d", len(providers), len(routes), len(proxies))
 	}
 }

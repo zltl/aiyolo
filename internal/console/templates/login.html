@@ -1,0 +1,77 @@
+{{define "login"}}
+<!doctype html>
+<html lang="{{.Locale}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.DisplayTitle}} - AIYolo Console</title>
+  <link rel="stylesheet" href="/console/static/console.css">
+</head>
+<body class="login-body">
+  <div class="login-shell">
+    <section class="login-hero">
+      <div class="login-tools">
+        <p class="section-kicker">{{msg .Locale "AI API 网关控制台" "AI API Gateway Console"}}</p>
+        <div class="locale-switch" aria-label="{{msg .Locale "语言切换" "Language switch"}}">
+          {{range .LocaleOptions}}
+          <a class="{{if .Active}}locale-pill is-active{{else}}locale-pill{{end}}" href="{{.Href}}">{{.Label}}</a>
+          {{end}}
+        </div>
+      </div>
+      <div>
+        <h2>{{msg .Locale "同一块控制台里管理模型、费用、路由和审计。" "Manage models, spend, routing, and audit from one console."}}</h2>
+        <p>{{msg .Locale "纯 Go 服务端渲染，不绑前端构建链，但依然保留清晰的层级、节奏和可扩展性。" "Pure Go server rendering with no front-end build chain, while still keeping the hierarchy and polish a control plane needs."}}</p>
+      </div>
+      <div class="callout">
+        <p class="section-kicker">{{msg .Locale "你会得到" "What you get"}}</p>
+        <ul class="login-feature-list">
+          <li>{{msg .Locale "统一查看 provider、模型别名、代理和账单热点。" "Review providers, model aliases, proxies, and spend hotspots in one place."}}</li>
+          <li>{{msg .Locale "把本地密码登录与第三方登录入口留在可审计的后台边界里。" "Keep local password login and third-party sign-in inside an auditable admin boundary."}}</li>
+          <li>{{msg .Locale "围绕 usage ledger 和 audit trail 管理网关运营状态。" "Operate the gateway around usage ledger and audit trail data."}}</li>
+        </ul>
+      </div>
+    </section>
+    <main class="login-panel">
+      <div>
+        <p class="section-kicker">{{.PageEyebrow}}</p>
+        <h1>AIYolo Console</h1>
+      </div>
+      {{if .Error}}
+      <div class="flash flash-error" role="alert">{{.Error}}</div>
+      {{end}}
+      {{if .LocalPasswordEnabled}}
+      <form method="post" class="form-grid">
+        <label class="field span-2">
+          <span class="field-label">{{msg .Locale "管理员邮箱" "Admin email"}}</span>
+          <input name="email" value="{{.AdminEmail}}" autocomplete="username">
+          <span class="field-help">{{msg .Locale "本地密码登录默认使用当前配置里的管理员邮箱。" "Local password sign-in defaults to the configured administrator email."}}</span>
+        </label>
+        <label class="field span-2">
+          <span class="field-label">{{msg .Locale "密码" "Password"}}</span>
+          <input name="password" type="password" autocomplete="current-password">
+          <span class="field-help">{{msg .Locale "密码会在服务端和管理员密码配置校验，不会回显。" "The password is verified server-side against the configured administrator credential and is never echoed back."}}</span>
+        </label>
+        <div class="field span-2">
+          <button class="primary-button" type="submit">{{msg .Locale "登录" "Sign in"}}</button>
+        </div>
+      </form>
+      {{end}}
+      {{if and .LocalPasswordEnabled .HasOAuthProviders}}
+      <div class="divider">{{msg .Locale "或" "or"}}</div>
+      {{end}}
+      {{if .HasOAuthProviders}}
+      <div class="providers">
+        {{range .Providers}}
+        <a class="provider-btn" href="{{.URL}}">{{msg $.Locale "使用" "Use"}} {{.Name}} {{msg $.Locale "登录" "sign-in"}}</a>
+        {{end}}
+      </div>
+      {{else if not .LocalPasswordEnabled}}
+      <div class="callout muted">{{msg .Locale "当前没有可用登录方式。请先在后台完成第三方登录配置，或重新开启本地密码登录。" "There is no available sign-in method right now. Configure a third-party provider or re-enable local password login first."}}</div>
+      {{else}}
+      <div class="callout muted">{{msg .Locale "第三方登录已内置支持；填写 client id、client secret 和回调配置后，这里会自动出现对应入口。" "Third-party sign-in is built in; once client id, client secret, and callback settings are saved, the entry point appears here automatically."}}</div>
+      {{end}}
+    </main>
+  </div>
+</body>
+</html>
+{{end}}

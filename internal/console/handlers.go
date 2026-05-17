@@ -2,7 +2,12 @@ package console
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,36 +33,49 @@ type Handler struct {
 }
 
 func NewHandler(cfg Config, store storage.Store) *Handler {
-	return &Handler{cfg: cfg, store: store, tmpl: template.Must(template.New("console").Funcs(template.FuncMap{"money": money, "join": strings.Join}).Parse(templates))}
+	return &Handler{cfg: cfg, store: store, tmpl: template.Must(template.New("console").Funcs(templateFuncs()).ParseFS(consoleAssets, "templates/*.html"))}
 }
 
 func (handler *Handler) Routes() http.Handler {
 	router := chi.NewRouter()
+	router.Get("/static/console.css", handler.styles)
+	router.Get("/locale", handler.setLocale)
 	router.Get("/login", handler.loginPage)
 	router.Post("/login", handler.login)
+	router.Get("/login/{provider}", handler.oauthLogin)
+	router.Get("/oauth/{provider}/callback", handler.oauthCallback)
 	router.Group(func(protected chi.Router) {
 		protected.Use(handler.requireSession)
 		protected.Get("/", handler.dashboard)
+		protected.Get("/chat", handler.chat)
+		protected.Post("/chat", handler.sendChat)
+		protected.Post("/chat/stream", handler.streamChat)
 		protected.Post("/logout", handler.logout)
 		protected.Get("/usage", handler.usage)
 		protected.Get("/audit", handler.audit)
 		protected.Get("/api-keys", handler.apiKeys)
 		protected.Post("/api-keys", handler.createAPIKey)
+		protected.Post("/api-keys/{keyID}/rotate", handler.rotateAPIKey)
+		protected.Post("/api-keys/{keyID}/disable", handler.disableAPIKey)
 		protected.Get("/providers", handler.providers)
 		protected.Post("/providers", handler.createProvider)
+		protected.Post("/providers/openrouter", handler.createOpenRouter)
+		protected.Post("/providers/{providerID}/sync-models", handler.syncProviderModels)
 		protected.Get("/models", handler.models)
 		protected.Post("/models", handler.createModel)
+		protected.Post("/models/test", handler.testModel)
 		protected.Get("/proxies", handler.proxies)
 		protected.Post("/proxies", handler.createProxy)
 		protected.Get("/billing", handler.billing)
 		protected.Get("/users", handler.users)
 		protected.Get("/settings", handler.settings)
+		protected.Post("/settings/auth", handler.saveAuthSettings)
 	})
 	return router
 }
 
 func (handler *Handler) loginPage(w http.ResponseWriter, r *http.Request) {
-	handler.render(w, "login", map[string]any{"Title": "Login"})
+	handler.renderLoginPage(w, r, "")
 }
 
 func (handler *Handler) login(w http.ResponseWriter, r *http.Request) {
@@ -65,10 +83,19 @@ func (handler *Handler) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	settings, err := handler.consoleAuthSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !settings.LocalPasswordEnabled {
+		handler.renderLoginPage(w, r, handler.requestText(r, "当前未启用本地密码登录", "Local password sign-in is disabled"))
+		return
+	}
 	email := strings.TrimSpace(r.FormValue("email"))
 	password := r.FormValue("password")
 	if email != handler.cfg.AdminEmail || password != handler.cfg.AdminPassword {
-		handler.render(w, "login", map[string]any{"Title": "Login", "Error": "邮箱或密码不正确"})
+		handler.renderLoginPage(w, r, handler.requestText(r, "邮箱或密码不正确", "Incorrect email or password"))
 		return
 	}
 	setSessionCookie(w, email, handler.cfg.SecretKey)
@@ -76,13 +103,23 @@ func (handler *Handler) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: "aiyolo_console", Value: "", Path: "/console", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: consoleSessionCookieName, Value: "", Path: "/console", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	clearOAuthStateCookie(w)
 	http.Redirect(w, r, "/console/login", http.StatusSeeOther)
+}
+
+func (handler *Handler) setLocale(w http.ResponseWriter, r *http.Request) {
+	locale := normalizeConsoleLocale(r.URL.Query().Get("lang"))
+	if locale == "" {
+		locale = consoleLocaleEN
+	}
+	http.SetCookie(w, &http.Cookie{Name: consoleLocaleCookieName, Value: locale, Path: "/console", MaxAge: 365 * 24 * 60 * 60, SameSite: http.SameSiteLaxMode})
+	http.Redirect(w, r, sanitizeConsoleNext(r.URL.Query().Get("next")), http.StatusSeeOther)
 }
 
 func (handler *Handler) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("aiyolo_console")
+		cookie, err := r.Cookie(consoleSessionCookieName)
 		if err != nil || !verifySessionCookie(cookie.Value, handler.cfg.SecretKey) {
 			http.Redirect(w, r, "/console/login", http.StatusSeeOther)
 			return
@@ -97,16 +134,30 @@ func (handler *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	handler.render(w, "dashboard", map[string]any{"Title": "Dashboard", "Data": data})
-}
-
-func (handler *Handler) usage(w http.ResponseWriter, r *http.Request) {
-	items, err := handler.store.ListUsage(r.Context(), 100)
+	history, err := handler.store.ListUsage(r.Context(), 200)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	handler.render(w, "usage", map[string]any{"Title": "Usage", "Usage": items})
+	handler.render(w, r, "dashboard", map[string]any{"Title": "Dashboard", "Data": data, "ChartUsage": history})
+}
+
+func (handler *Handler) usage(w http.ResponseWriter, r *http.Request) {
+	history, err := handler.store.ListUsage(r.Context(), 300)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	billing, err := handler.store.BillingOverview(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	items := history
+	if len(items) > 100 {
+		items = items[:100]
+	}
+	handler.render(w, r, "usage", map[string]any{"Title": "Usage", "Usage": items, "Billing": billing, "ChartUsage": history})
 }
 
 func (handler *Handler) audit(w http.ResponseWriter, r *http.Request) {
@@ -115,16 +166,11 @@ func (handler *Handler) audit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	handler.render(w, "audit", map[string]any{"Title": "Audit", "Audits": items})
+	handler.render(w, r, "audit", map[string]any{"Title": "Audit", "Audits": items})
 }
 
 func (handler *Handler) apiKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := handler.store.ListAPIKeys(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	handler.render(w, "apiKeys", map[string]any{"Title": "API Keys", "Keys": keys})
+	handler.renderAPIKeysPage(w, r, "", "")
 }
 
 func (handler *Handler) createAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -142,17 +188,67 @@ func (handler *Handler) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	keys, _ := handler.store.ListAPIKeys(r.Context())
-	handler.render(w, "apiKeys", map[string]any{"Title": "API Keys", "Keys": keys, "CreatedKey": clear})
+	handler.renderAPIKeysPage(w, r, clear, "")
+	return
 }
 
-func (handler *Handler) providers(w http.ResponseWriter, r *http.Request) {
-	providers, err := handler.store.ListProviders(r.Context())
+func (handler *Handler) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	key, err := handler.apiKeyByID(r.Context(), chi.URLParam(r, "keyID"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	kind := "live"
+	if strings.HasPrefix(strings.TrimSpace(key.Prefix), "aiyolo_test_") {
+		kind = "test"
+	}
+	clear, err := auth.GenerateAPIKey(kind)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	handler.render(w, "providers", map[string]any{"Title": "Providers", "Providers": providers})
+	key.KeyHash = auth.HashAPIKey(clear)
+	key.Prefix = auth.Prefix(clear)
+	if key.Status == "" {
+		key.Status = domain.StatusActive
+	}
+	if err := handler.store.CreateAPIKey(r.Context(), key); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	handler.renderAPIKeysPage(w, r, clear, handler.requestText(r, "API Key 已轮换", "API key rotated"))
+	return
+}
+
+func (handler *Handler) disableAPIKey(w http.ResponseWriter, r *http.Request) {
+	key, err := handler.apiKeyByID(r.Context(), chi.URLParam(r, "keyID"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	key.Status = domain.StatusDisabled
+	if err := handler.store.CreateAPIKey(r.Context(), key); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	handler.renderAPIKeysPage(w, r, "", handler.requestText(r, "API Key 已停用", "API key disabled"))
+}
+
+func (handler *Handler) providers(w http.ResponseWriter, r *http.Request) {
+	data, err := handler.providersPageData(r.Context(), "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	handler.render(w, r, "providers", data)
 }
 
 func (handler *Handler) createProvider(w http.ResponseWriter, r *http.Request) {
@@ -165,18 +261,120 @@ func (handler *Handler) createProvider(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/console/providers", http.StatusSeeOther)
-}
-
-func (handler *Handler) models(w http.ResponseWriter, r *http.Request) {
-	routes, err := handler.store.ListModelRoutes(r.Context())
+	data, err := handler.providersPageData(r.Context(), handler.requestText(r, "Provider 已保存", "Provider saved"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	providers, _ := handler.store.ListProviders(r.Context())
-	proxies, _ := handler.store.ListProxyProfiles(r.Context())
-	handler.render(w, "models", map[string]any{"Title": "Models", "Routes": routes, "Providers": providers, "Proxies": proxies})
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "providers-content", data)
+		return
+	}
+	handler.render(w, r, "providers", data)
+}
+
+func (handler *Handler) createOpenRouter(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	apiKey := strings.TrimSpace(r.FormValue("master_key"))
+	if apiKey == "" {
+		http.Error(w, handler.requestText(r, "缺少 master_key", "missing master_key"), http.StatusBadRequest)
+		return
+	}
+
+	provider := domain.Provider{
+		ID:             "openrouter",
+		Name:           "OpenRouter",
+		BaseURL:        "https://openrouter.ai/api/v1",
+		Protocol:       domain.ProtocolOpenAI,
+		MasterKey:      apiKey,
+		Status:         domain.StatusEnabled,
+		TimeoutSeconds: 180,
+		Priority:       1,
+		Weight:         100,
+	}
+
+	if err := handler.store.UpsertProvider(r.Context(), provider); err != nil {
+		http.Error(w, fmt.Errorf("upsert provider: %w", err).Error(), http.StatusInternalServerError)
+		return
+	}
+
+	summary, err := syncOpenRouterModelRoutes(r.Context(), handler.store, provider)
+	if err != nil {
+		http.Error(w, fmt.Errorf("sync models: %w", err).Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data, err := handler.providersPageData(r.Context(), handler.openRouterSyncNotice(r, provider, summary, true))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "providers-content", data)
+		return
+	}
+	handler.render(w, r, "providers", data)
+}
+
+func (handler *Handler) syncProviderModels(w http.ResponseWriter, r *http.Request) {
+	providerID := strings.TrimSpace(chi.URLParam(r, "providerID"))
+	if providerID == "" {
+		http.Error(w, handler.requestText(r, "缺少 providerID", "missing providerID"), http.StatusBadRequest)
+		return
+	}
+
+	provider, err := handler.store.GetProvider(r.Context(), providerID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			http.Error(w, handler.requestText(r, "找不到指定的 Provider。", "The requested provider was not found."), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Errorf("get provider: %w", err).Error(), http.StatusInternalServerError)
+		return
+	}
+	if !isOpenRouterProvider(provider) {
+		http.Error(w, handler.requestText(r, "当前 Provider 不是 OpenRouter 兼容通道。", "The selected provider is not OpenRouter-compatible."), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(provider.MasterKey) == "" {
+		http.Error(w, handler.requestText(r, "当前 Provider 还没有保存可用的 master key。", "The selected provider does not have a usable master key saved yet."), http.StatusBadRequest)
+		return
+	}
+
+	summary, err := syncOpenRouterModelRoutes(r.Context(), handler.store, provider)
+	if err != nil {
+		http.Error(w, fmt.Errorf("sync models: %w", err).Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data, err := handler.providersPageData(r.Context(), handler.openRouterSyncNotice(r, provider, summary, false))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "providers-content", data)
+		return
+	}
+	handler.render(w, r, "providers", data)
+}
+
+func (handler *Handler) models(w http.ResponseWriter, r *http.Request) {
+	data, err := handler.modelsViewData(r.Context(), r, "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "models-content", data)
+		return
+	}
+	handler.render(w, r, "models", data)
 }
 
 func (handler *Handler) createModel(w http.ResponseWriter, r *http.Request) {
@@ -185,20 +383,132 @@ func (handler *Handler) createModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	route := domain.ModelRoute{PublicName: strings.TrimSpace(r.FormValue("public_name")), ProviderID: strings.TrimSpace(r.FormValue("provider_id")), UpstreamModel: strings.TrimSpace(r.FormValue("upstream_model")), Protocol: formDefault(r, "protocol", domain.ProtocolOpenAI), ProxyProfileID: strings.TrimSpace(r.FormValue("proxy_profile_id")), Enabled: r.FormValue("enabled") != "false", Priority: formInt(r, "priority", 1), Weight: formInt(r, "weight", 100), ContextTokens: formInt(r, "context_tokens", 0)}
+	if existing, err := handler.store.LookupModelRoute(r.Context(), route.PublicName); err == nil {
+		route.CreatedAt = existing.CreatedAt
+		if existing.PriceRuleID != "" && existing.ProviderID == route.ProviderID && existing.UpstreamModel == route.UpstreamModel {
+			route.PriceRuleID = existing.PriceRuleID
+		}
+	} else if err != storage.ErrNotFound {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if err := handler.store.UpsertModelRoute(r.Context(), route); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/console/models", http.StatusSeeOther)
-}
-
-func (handler *Handler) proxies(w http.ResponseWriter, r *http.Request) {
-	profiles, err := handler.store.ListProxyProfiles(r.Context())
+	data, err := handler.modelsViewData(r.Context(), r, handler.requestText(r, "模型路由已保存", "Model route saved"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	handler.render(w, "proxies", map[string]any{"Title": "Proxies", "Profiles": profiles})
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "models-content", data)
+		return
+	}
+	handler.render(w, r, "models", data)
+}
+
+func (handler *Handler) testModel(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	started := time.Now()
+	requestID := requestID(r)
+	consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+
+	testForm := modelTestFormView{
+		PublicName: strings.TrimSpace(r.FormValue("test_public_name")),
+		Prompt:     strings.TrimSpace(r.FormValue("test_prompt")),
+	}
+	if testForm.Prompt == "" {
+		testForm.Prompt = defaultModelTestPrompt(resolveConsoleLocale(r))
+	}
+
+	var (
+		result       *modelTestResultView
+		errorMessage string
+	)
+
+	if testForm.PublicName == "" {
+		errorMessage = handler.requestText(r, "先选择一个已保存的 public model。", "Select a saved public model first.")
+	} else {
+		route, err := handler.store.GetModelRoute(r.Context(), testForm.PublicName)
+		if err != nil {
+			if err == storage.ErrNotFound {
+				errorMessage = handler.requestText(r, "找不到这个模型路由，请先保存后再测试。", "That model route was not found. Save it before testing.")
+			} else {
+				errorMessage = err.Error()
+			}
+		} else {
+			provider, err := handler.store.GetProvider(r.Context(), route.ProviderID)
+			if err != nil {
+				if err == storage.ErrNotFound {
+					errorMessage = handler.requestText(r, "路由引用的 Provider 不存在。", "The provider referenced by this route does not exist.")
+				} else {
+					errorMessage = err.Error()
+				}
+			} else if firstNonEmpty(provider.Protocol, route.Protocol, domain.ProtocolOpenAI) != domain.ProtocolOpenAI {
+				errorMessage = handler.requestText(r, "当前测试框只支持 OpenAI / OpenRouter 兼容 Provider。", "The test box currently supports only OpenAI/OpenRouter-compatible providers.")
+			} else if strings.TrimSpace(provider.MasterKey) == "" {
+				errorMessage = handler.requestText(r, "当前 Provider 还没有保存可用的 master key。", "The selected provider does not have a usable master key saved yet.")
+			} else {
+				protocol := firstNonEmpty(provider.Protocol, route.Protocol, domain.ProtocolOpenAI)
+				pricingRule, err := resolveModelTestPricingRule(r.Context(), handler.store, route)
+				if err != nil {
+					errorMessage = fmt.Sprintf(handler.requestText(r, "测试失败：%s", "Test failed: %s"), err.Error())
+				} else {
+					profile, err := resolveModelTestProxyProfile(r.Context(), handler.store, provider, route)
+					if err != nil {
+						errorMessage = fmt.Sprintf(handler.requestText(r, "测试失败：%s", "Test failed: %s"), err.Error())
+					} else {
+						view, err := runModelRouteTest(r.Context(), provider, route, profile, testForm.Prompt)
+						persistModelTestOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, clientIP(r), r.UserAgent(), protocol, route, provider, profile, pricingRule, started, view, err)
+						if err != nil {
+							errorMessage = fmt.Sprintf(handler.requestText(r, "测试失败：%s", "Test failed: %s"), err.Error())
+						} else {
+							result = &view.Result
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "model-test-result", map[string]any{"TestForm": testForm, "TestResult": result, "TestError": errorMessage})
+		return
+	}
+
+	data, err := handler.modelsViewData(r.Context(), r, "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	data["TestForm"] = testForm
+	data["TestResult"] = result
+	data["TestError"] = errorMessage
+	if errorMessage != "" {
+		data["Error"] = errorMessage
+	}
+	handler.render(w, r, "models", data)
+}
+
+func (handler *Handler) proxies(w http.ResponseWriter, r *http.Request) {
+	data, err := handler.proxiesViewData(r.Context(), r, "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if isLockedProxyProfileID(r.URL.Query().Get("edit_proxy_id")) {
+		data["Error"] = handler.requestText(r, "内置 direct Profile 不可编辑", "The built-in direct profile cannot be edited")
+	}
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "proxies-content", data)
+		return
+	}
+	handler.render(w, r, "proxies", data)
 }
 
 func (handler *Handler) createProxy(w http.ResponseWriter, r *http.Request) {
@@ -206,36 +516,287 @@ func (handler *Handler) createProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	profile := domain.ProxyProfile{ID: formDefault(r, "id", newConsoleID("proxy")), Name: formDefault(r, "name", "Proxy"), Type: formDefault(r, "type", "direct"), Endpoint: strings.TrimSpace(r.FormValue("endpoint")), Auth: strings.TrimSpace(r.FormValue("auth")), Region: strings.TrimSpace(r.FormValue("region")), TimeoutSeconds: formInt(r, "timeout_seconds", 60), HealthCheckURL: strings.TrimSpace(r.FormValue("health_check_url")), Status: formDefault(r, "status", domain.StatusEnabled)}
+	if isLockedProxyProfileID(r.FormValue("id")) {
+		http.Error(w, handler.requestText(r, "内置 direct Profile 不可编辑", "The built-in direct profile cannot be edited"), http.StatusBadRequest)
+		return
+	}
+	profile, err := domain.NormalizeProxyProfile(domain.ProxyProfile{ID: formDefault(r, "id", newConsoleID("proxy")), Name: formDefault(r, "name", "Proxy"), Type: formDefault(r, "type", domain.ProxyTypeDirect), Endpoint: strings.TrimSpace(r.FormValue("endpoint")), Auth: strings.TrimSpace(r.FormValue("auth")), Region: strings.TrimSpace(r.FormValue("region")), TimeoutSeconds: formInt(r, "timeout_seconds", 60), HealthCheckURL: strings.TrimSpace(r.FormValue("health_check_url")), Status: formDefault(r, "status", domain.StatusEnabled)})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := handler.store.UpsertProxyProfile(r.Context(), profile); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/console/proxies", http.StatusSeeOther)
+	data, err := handler.proxiesViewData(r.Context(), r, handler.requestText(r, "代理 Profile 已保存", "Proxy profile saved"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "proxies-content", data)
+		return
+	}
+	handler.render(w, r, "proxies", data)
 }
 
 func (handler *Handler) billing(w http.ResponseWriter, r *http.Request) {
-	handler.render(w, "placeholder", map[string]any{"Title": "Billing"})
-}
-func (handler *Handler) users(w http.ResponseWriter, r *http.Request) {
-	handler.render(w, "placeholder", map[string]any{"Title": "Users"})
-}
-func (handler *Handler) settings(w http.ResponseWriter, r *http.Request) {
-	handler.render(w, "placeholder", map[string]any{"Title": "Settings"})
+	http.Redirect(w, r, "/console/usage#spend-overview", http.StatusSeeOther)
 }
 
-func (handler *Handler) render(w http.ResponseWriter, name string, data map[string]any) {
+func (handler *Handler) users(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/console/settings#identity-center", http.StatusSeeOther)
+}
+
+func (handler *Handler) settings(w http.ResponseWriter, r *http.Request) {
+	handler.renderSettingsPage(w, r, "", "")
+}
+
+func (handler *Handler) render(w http.ResponseWriter, r *http.Request, name string, data map[string]any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := handler.tmpl.ExecuteTemplate(w, name, data); err != nil {
+	if err := handler.tmpl.ExecuteTemplate(w, name, handler.decoratePageData(r, data)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (handler *Handler) renderFragment(w http.ResponseWriter, r *http.Request, name string, data map[string]any) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := handler.tmpl.ExecuteTemplate(w, name, handler.decoratePageData(r, data)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (handler *Handler) styles(w http.ResponseWriter, r *http.Request) {
+	css, err := consoleAssets.ReadFile("static/console.css")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(css)
+}
+
+func (handler *Handler) apiKeysPageData(ctx context.Context, createdKey string, notice string) (map[string]any, error) {
+	keys, err := handler.store.ListAPIKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	routes, err := handler.store.ListModelRoutes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	providers, err := handler.store.ListProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"Title": "API Keys", "Keys": keys, "CreatedKey": createdKey, "ConfiguredProtocols": configuredProtocols(providers), "RouteAliases": routeAliases(routes), "Notice": notice}, nil
+}
+
+func (handler *Handler) renderAPIKeysPage(w http.ResponseWriter, r *http.Request, createdKey string, notice string) {
+	data, err := handler.apiKeysPageData(r.Context(), createdKey, notice)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "apiKeys-content", data)
+		return
+	}
+	handler.render(w, r, "apiKeys", data)
+}
+
+func (handler *Handler) apiKeyByID(ctx context.Context, keyID string) (domain.APIKey, error) {
+	keys, err := handler.store.ListAPIKeys(ctx)
+	if err != nil {
+		return domain.APIKey{}, err
+	}
+	for _, key := range keys {
+		if key.ID == keyID {
+			return key, nil
+		}
+	}
+	return domain.APIKey{}, storage.ErrNotFound
+}
+
+func (handler *Handler) providersPageData(ctx context.Context, notice string) (map[string]any, error) {
+	providers, err := handler.store.ListProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	proxies, err := handler.store.ListProxyProfiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"Title": "Providers", "Providers": providers, "Proxies": proxies, "Notice": notice}, nil
+}
+
+func (handler *Handler) modelsPageData(ctx context.Context, notice string) (map[string]any, error) {
+	routes, err := handler.store.ListModelRoutes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	providers, err := handler.store.ListProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	proxies, err := handler.store.ListProxyProfiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pricingRules, err := handler.store.ListPricingRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"Title": "Models", "Routes": routes, "Providers": providers, "Proxies": proxies, "PricingRules": pricingRulesByID(pricingRules), "KnownUpstreamModels": upstreamModels(routes), "Notice": notice}, nil
+}
+
+func (handler *Handler) modelsViewData(ctx context.Context, r *http.Request, notice string) (map[string]any, error) {
+	data, err := handler.modelsPageData(ctx, notice)
+	if err != nil {
+		return nil, err
+	}
+	buildModelsViewData(data, r)
+	return data, nil
+}
+
+func (handler *Handler) proxiesPageData(ctx context.Context, notice string) (map[string]any, error) {
+	profiles, err := handler.store.ListProxyProfiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"Title": "Proxies", "Profiles": profiles, "Regions": proxyRegions(profiles), "Notice": notice}, nil
+}
+
+func (handler *Handler) proxiesViewData(ctx context.Context, r *http.Request, notice string) (map[string]any, error) {
+	data, err := handler.proxiesPageData(ctx, notice)
+	if err != nil {
+		return nil, err
+	}
+	if err := buildProxiesViewData(ctx, handler.store, data, r); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func configuredProtocols(providers []domain.Provider) []string {
+	values := make([]string, 0, 4)
+	seen := make(map[string]struct{})
+	for _, protocol := range []string{domain.ProtocolOpenAI, domain.ProtocolAnthropic} {
+		for _, provider := range providers {
+			if provider.Protocol == protocol {
+				values = appendUniqueString(values, seen, provider.Protocol)
+				break
+			}
+		}
+	}
+	for _, provider := range providers {
+		values = appendUniqueString(values, seen, provider.Protocol)
+	}
+	return values
+}
+
+func routeAliases(routes []domain.ModelRoute) []string {
+	values := make([]string, 0, len(routes))
+	seen := make(map[string]struct{})
+	for _, route := range routes {
+		values = appendUniqueString(values, seen, route.PublicName)
+	}
+	return values
+}
+
+func upstreamModels(routes []domain.ModelRoute) []string {
+	values := make([]string, 0, len(routes))
+	seen := make(map[string]struct{})
+	for _, route := range routes {
+		values = appendUniqueString(values, seen, route.UpstreamModel)
+	}
+	return values
+}
+
+func pricingRulesByID(rules []domain.PricingRule) map[string]domain.PricingRule {
+	values := make(map[string]domain.PricingRule, len(rules))
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.ID) == "" {
+			continue
+		}
+		values[rule.ID] = rule
+	}
+	return values
+}
+
+func proxyRegions(profiles []domain.ProxyProfile) []string {
+	values := make([]string, 0, len(profiles))
+	seen := make(map[string]struct{})
+	for _, profile := range profiles {
+		values = appendUniqueString(values, seen, profile.Region)
+	}
+	return values
+}
+
+func appendUniqueString(values []string, seen map[string]struct{}, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	if _, ok := seen[value]; ok {
+		return values
+	}
+	seen[value] = struct{}{}
+	return append(values, value)
+}
+
+func (handler *Handler) billingPageData(ctx context.Context) (map[string]any, error) {
+	data, err := handler.store.BillingOverview(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"Title": "Billing", "Data": data}, nil
+}
+
+func (handler *Handler) usersPageData(ctx context.Context) (map[string]any, error) {
+	data, err := handler.store.UserDirectory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"Title": "Users", "AdminEmail": handler.cfg.AdminEmail, "Data": data}, nil
+}
+
+func isHTMXRequest(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("HX-Request")), "true")
+}
+
+func requestID(r *http.Request) string {
+	if value := strings.TrimSpace(r.Header.Get("x-request-id")); value != "" {
+		return value
+	}
+	return newID("req")
+}
+
+func newID(prefix string) string {
+	raw := make([]byte, 12)
+	if _, err := rand.Read(raw); err != nil {
+		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	}
+	return prefix + "_" + hex.EncodeToString(raw)
+}
+
+func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("x-forwarded-for")); forwarded != "" {
+		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+	}
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func setSessionCookie(w http.ResponseWriter, email, secret string) {
 	expires := time.Now().Add(12 * time.Hour).Unix()
 	value := email + ":" + strconv.FormatInt(expires, 10)
 	signature := auth.Sign(value, secret)
-	http.SetCookie(w, &http.Cookie{Name: "aiyolo_console", Value: value + ":" + signature, Path: "/console", Expires: time.Unix(expires, 0), HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: consoleSessionCookieName, Value: value + ":" + signature, Path: "/console", Expires: time.Unix(expires, 0), HttpOnly: true, SameSite: http.SameSiteLaxMode})
 }
 
 func verifySessionCookie(value, secret string) bool {
@@ -285,23 +846,187 @@ func money(microCents int64) string {
 	return "$" + strconv.FormatFloat(float64(microCents)/100000000, 'f', 4, 64)
 }
 
+func templateFuncs() template.FuncMap {
+	return template.FuncMap{
+		"displayTitle":          pageTitleLocalized,
+		"effectiveModelProxy":   effectiveModelProxy,
+		"modelProxySelectLabel": modelProxySelectLabel,
+		"msg":                   consoleText,
+		"money":                 money,
+		"countShare":            countShare,
+		"join":                  strings.Join,
+		"navClass":              navClass,
+		"orDash":                orDash,
+		"pairShare":             pairShare,
+		"pageEyebrow":           pageEyebrow,
+		"isOpenRouterProvider":  isOpenRouterProvider,
+		"protocolLabel":         protocolLabel,
+		"ratio":                 ratio,
+		"statusClass":           statusClass,
+		"statusText":            statusText,
+		"timefmt":               timefmt,
+		"usageSparkline":        usageSparkline,
+	}
+}
+
+func navClass(currentTitle, itemTitle string) string {
+	if strings.HasPrefix(itemTitle, "/console") {
+		if itemTitle == "/console/" && (currentTitle == "/console" || currentTitle == "/console/") {
+			return "nav-link is-active"
+		}
+		if itemTitle != "/console/" && strings.HasPrefix(currentTitle, itemTitle) {
+			return "nav-link is-active"
+		}
+		return "nav-link"
+	}
+	if currentTitle == itemTitle {
+		return "nav-link is-active"
+	}
+	return "nav-link"
+}
+
+func pageEyebrow(title string) string {
+	switch title {
+	case "Dashboard":
+		return "Control Center"
+	case "Usage":
+		return "Usage Ledger"
+	case "Audit":
+		return "Audit Trail"
+	case "API Keys":
+		return "Credential Surface"
+	case "Providers":
+		return "Upstream Channels"
+	case "Models":
+		return "Route Map"
+	case "Proxies":
+		return "Network Paths"
+	case "Billing":
+		return "Spend View"
+	case "Users":
+		return "Identity Surface"
+	case "Settings":
+		return "Access Policy"
+	case "Login":
+		return "Sign In"
+	default:
+		return "AIYolo Console"
+	}
+}
+
+func (handler *Handler) openRouterSyncNotice(r *http.Request, provider domain.Provider, summary openRouterSyncSummary, created bool) string {
+	providerName := firstNonEmpty(strings.TrimSpace(provider.Name), strings.TrimSpace(provider.ID), "OpenRouter")
+	if summary.SkippedConflicts > 0 {
+		if created {
+			return fmt.Sprintf(
+				handler.requestText(r, "成功接入 %s，导入了 %d 个模型，并保留了 %d 条同名路由。", "%s connected, %d models were imported, and %d conflicting routes were kept."),
+				providerName,
+				summary.Synced,
+				summary.SkippedConflicts,
+			)
+		}
+		return fmt.Sprintf(
+			handler.requestText(r, "已从 %s 重新导入 %d 个模型，并保留了 %d 条同名路由。", "Re-imported %d models from %s and kept %d conflicting routes."),
+			summary.Synced,
+			providerName,
+			summary.SkippedConflicts,
+		)
+	}
+	if created {
+		return fmt.Sprintf(
+			handler.requestText(r, "成功接入 %s，并导入了 %d 个模型", "%s connected and %d models were imported"),
+			providerName,
+			summary.Synced,
+		)
+	}
+	return fmt.Sprintf(
+		handler.requestText(r, "已从 %s 重新导入 %d 个模型", "Re-imported %d models from %s"),
+		summary.Synced,
+		providerName,
+	)
+}
+
+func protocolLabel(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case domain.ProtocolOpenAI:
+		return "OpenAI"
+	case domain.ProtocolAnthropic:
+		return "Anthropic"
+	case "":
+		return "-"
+	default:
+		return strings.ToUpper(value)
+	}
+}
+
+func statusClass(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case domain.StatusEnabled, domain.StatusActive:
+		return "badge tone-good"
+	case domain.StatusDisabled:
+		return "badge tone-danger"
+	case "degraded":
+		return "badge tone-warn"
+	default:
+		return "badge tone-neutral"
+	}
+}
+
+func statusText(locale, value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case domain.StatusEnabled:
+		return consoleText(locale, "已启用", "Enabled")
+	case domain.StatusActive:
+		return consoleText(locale, "生效中", "Active")
+	case domain.StatusDisabled:
+		return consoleText(locale, "已停用", "Disabled")
+	case "degraded":
+		return consoleText(locale, "降级", "Degraded")
+	case "ready":
+		return consoleText(locale, "就绪", "Ready")
+	default:
+		return value
+	}
+}
+
+func orDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
+func ratio(part, total int64) string {
+	if total <= 0 {
+		return "0%"
+	}
+	return strconv.FormatInt(part*100/total, 10) + "%"
+}
+
+func pairShare(left, right int64) string {
+	return ratio(left, left+right)
+}
+
+func timefmt(value any) string {
+	switch typed := value.(type) {
+	case time.Time:
+		if typed.IsZero() {
+			return "-"
+		}
+		return typed.Local().Format("2006-01-02 15:04")
+	case *time.Time:
+		if typed == nil || typed.IsZero() {
+			return "-"
+		}
+		return typed.Local().Format("2006-01-02 15:04")
+	default:
+		return "-"
+	}
+}
+
 func EnsureSeedKey(ctx context.Context, store storage.Store, clearKey string) error {
 	if clearKey == "" {
 		return nil
 	}
 	return store.CreateAPIKey(ctx, domain.APIKey{ID: "seed", Name: "Seed API Key", KeyHash: auth.HashAPIKey(clearKey), Prefix: auth.Prefix(clearKey), UserID: "local", OrganizationID: "default", ProjectID: "default", Status: domain.StatusActive, CreatedAt: time.Now().UTC()})
 }
-
-const templates = `
-{{define "layout-start"}}<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}} - AIYolo</title><script src="https://unpkg.com/htmx.org@1.9.12"></script><style>body{font-family:Inter,system-ui,sans-serif;margin:0;background:#f7f7f8;color:#171717}.shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}.side{background:#111827;color:#f9fafb;padding:20px}.side a{display:block;color:#d1d5db;text-decoration:none;padding:8px 0}.side a:hover{color:white}.main{padding:24px}.card{background:white;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin-bottom:16px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.metric{font-size:26px;font-weight:700}table{width:100%;border-collapse:collapse;background:white}th,td{border-bottom:1px solid #e5e7eb;text-align:left;padding:10px;font-size:14px}input,select{box-sizing:border-box;width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px}button{padding:8px 12px;border:0;border-radius:6px;background:#111827;color:white;cursor:pointer}.formgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.notice{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;padding:10px;border-radius:6px;margin-bottom:12px}.error{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px;border-radius:6px}</style></head><body><div class="shell"><nav class="side"><h2>AIYolo</h2><a href="/console/">Dashboard</a><a href="/console/usage">Usage</a><a href="/console/audit">Audit</a><a href="/console/api-keys">API Keys</a><a href="/console/providers">Providers</a><a href="/console/models">Models</a><a href="/console/proxies">Proxies</a><a href="/console/billing">Billing</a><a href="/console/users">Users</a><a href="/console/settings">Settings</a><form method="post" action="/console/logout"><button>退出</button></form></nav><main class="main"><h1>{{.Title}}</h1>{{end}}
-{{define "layout-end"}}</main></div></body></html>{{end}}
-{{define "login"}}<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Login - AIYolo</title><style>body{font-family:Inter,system-ui,sans-serif;background:#f7f7f8;display:grid;place-items:center;min-height:100vh}.box{background:white;border:1px solid #e5e7eb;border-radius:8px;padding:24px;width:360px}input{box-sizing:border-box;width:100%;padding:10px;margin:8px 0;border:1px solid #d1d5db;border-radius:6px}button{width:100%;padding:10px;border:0;border-radius:6px;background:#111827;color:white}.error{background:#fef2f2;color:#991b1b;padding:8px;border-radius:6px}</style></head><body><form class="box" method="post"><h1>AIYolo Console</h1>{{if .Error}}<p class="error">{{.Error}}</p>{{end}}<input name="email" placeholder="email" autocomplete="username"><input name="password" placeholder="password" type="password" autocomplete="current-password"><button>登录</button></form></body></html>{{end}}
-{{define "dashboard"}}{{template "layout-start" .}}<div class="grid"><div class="card"><div>24h 请求</div><div class="metric">{{.Data.RequestCount}}</div></div><div class="card"><div>错误</div><div class="metric">{{.Data.ErrorCount}}</div></div><div class="card"><div>输入 tokens</div><div class="metric">{{.Data.InputTokens}}</div></div><div class="card"><div>输出 tokens</div><div class="metric">{{.Data.OutputTokens}}</div></div></div><div class="card"><h2>模型费用</h2><table><tr><th>模型</th><th>请求</th><th>输入</th><th>输出</th><th>费用</th></tr>{{range .Data.ModelCosts}}<tr><td>{{.ModelAlias}}</td><td>{{.RequestCount}}</td><td>{{.InputTokens}}</td><td>{{.OutputTokens}}</td><td>{{money .CostMicroCents}}</td></tr>{{end}}</table></div>{{template "layout-end" .}}{{end}}
-{{define "usage"}}{{template "layout-start" .}}<table><tr><th>时间</th><th>请求</th><th>模型</th><th>Provider</th><th>状态</th><th>输入</th><th>输出</th><th>耗时</th></tr>{{range .Usage}}<tr><td>{{.CreatedAt}}</td><td>{{.RequestID}}</td><td>{{.ModelAlias}}</td><td>{{.ProviderID}}</td><td>{{.StatusCode}}</td><td>{{.InputTokens}}</td><td>{{.OutputTokens}}</td><td>{{.LatencyMS}}ms</td></tr>{{end}}</table>{{template "layout-end" .}}{{end}}
-{{define "audit"}}{{template "layout-start" .}}<table><tr><th>时间</th><th>事件</th><th>请求</th><th>模型</th><th>状态</th><th>错误</th><th>代理</th></tr>{{range .Audits}}<tr><td>{{.CreatedAt}}</td><td>{{.EventType}}</td><td>{{.RequestID}}</td><td>{{.ModelAlias}}</td><td>{{.StatusCode}}</td><td>{{.ErrorCode}}</td><td>{{.ProxyProfileID}}</td></tr>{{end}}</table>{{template "layout-end" .}}{{end}}
-{{define "apiKeys"}}{{template "layout-start" .}}{{if .CreatedKey}}<div class="notice">新 API Key 只显示一次：<strong>{{.CreatedKey}}</strong></div>{{end}}<div class="card"><form method="post" class="formgrid"><input name="name" placeholder="名称"><input name="kind" placeholder="live 或 test" value="live"><input name="allowed_protocols" placeholder="允许协议，空为全部"><input name="allowed_models" placeholder="允许模型，空为全部"><input name="rpm_limit" placeholder="RPM，0 不限"><input name="tpm_limit" placeholder="TPM，0 不限"><input name="concurrent_limit" placeholder="并发，0 不限"><input name="daily_budget_cents" placeholder="日预算 cents"><input name="monthly_budget_cents" placeholder="月预算 cents"><button>创建 Key</button></form></div><table><tr><th>名称</th><th>前缀</th><th>状态</th><th>协议</th><th>模型</th><th>RPM</th><th>TPM</th><th>并发</th><th>预算</th><th>创建时间</th></tr>{{range .Keys}}<tr><td>{{.Name}}</td><td>{{.Prefix}}</td><td>{{.Status}}</td><td>{{join .AllowedProtocols ","}}</td><td>{{join .AllowedModels ","}}</td><td>{{.RPMLimit}}</td><td>{{.TPMLimit}}</td><td>{{.ConcurrentLimit}}</td><td>{{.DailyBudgetCents}} / {{.MonthlyBudgetCents}}</td><td>{{.CreatedAt}}</td></tr>{{end}}</table>{{template "layout-end" .}}{{end}}
-{{define "providers"}}{{template "layout-start" .}}<div class="card"><form method="post" class="formgrid"><input name="id" placeholder="provider id"><input name="name" placeholder="名称"><input name="base_url" placeholder="https://.../v1"><select name="protocol"><option value="openai">openai</option><option value="anthropic">anthropic</option></select><input name="master_key" placeholder="上游 master key"><input name="default_proxy_id" placeholder="direct"><input name="timeout_seconds" value="90"><button>保存 Provider</button></form></div><table><tr><th>ID</th><th>名称</th><th>Base URL</th><th>协议</th><th>代理</th><th>状态</th></tr>{{range .Providers}}<tr><td>{{.ID}}</td><td>{{.Name}}</td><td>{{.BaseURL}}</td><td>{{.Protocol}}</td><td>{{.DefaultProxyID}}</td><td>{{.Status}}</td></tr>{{end}}</table>{{template "layout-end" .}}{{end}}
-{{define "models"}}{{template "layout-start" .}}<div class="card"><form method="post" class="formgrid"><input name="public_name" placeholder="public model"><input name="provider_id" placeholder="provider id"><input name="upstream_model" placeholder="upstream model"><select name="protocol"><option value="openai">openai</option><option value="anthropic">anthropic</option></select><input name="proxy_profile_id" placeholder="direct"><input name="context_tokens" placeholder="上下文长度"><button>保存模型</button></form></div><table><tr><th>Public</th><th>Provider</th><th>Upstream</th><th>协议</th><th>代理</th><th>状态</th></tr>{{range .Routes}}<tr><td>{{.PublicName}}</td><td>{{.ProviderID}}</td><td>{{.UpstreamModel}}</td><td>{{.Protocol}}</td><td>{{.ProxyProfileID}}</td><td>{{.Enabled}}</td></tr>{{end}}</table>{{template "layout-end" .}}{{end}}
-{{define "proxies"}}{{template "layout-start" .}}<div class="card"><form method="post" class="formgrid"><input name="id" placeholder="direct"><input name="name" placeholder="名称"><select name="type"><option value="direct">direct</option><option value="http">http</option><option value="https">https</option><option value="socks5">socks5</option><option value="xray">xray</option><option value="v2ray">v2ray</option></select><input name="endpoint" placeholder="host:port 或 URL"><input name="auth" placeholder="user:password"><input name="region" placeholder="hk"><input name="timeout_seconds" value="60"><button>保存代理</button></form></div><table><tr><th>ID</th><th>名称</th><th>类型</th><th>端点</th><th>地区</th><th>状态</th></tr>{{range .Profiles}}<tr><td>{{.ID}}</td><td>{{.Name}}</td><td>{{.Type}}</td><td>{{.Endpoint}}</td><td>{{.Region}}</td><td>{{.Status}}</td></tr>{{end}}</table>{{template "layout-end" .}}{{end}}
-{{define "placeholder"}}{{template "layout-start" .}}<div class="card">该页面已挂载，后续可在当前服务端渲染框架内继续扩展表单和报表。</div>{{template "layout-end" .}}{{end}}
-`

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +16,9 @@ type MemoryStore struct {
 	apiKeys      map[string]domain.APIKey
 	providers    map[string]domain.Provider
 	routes       map[string]domain.ModelRoute
+	pricingRules map[string]domain.PricingRule
 	proxies      map[string]domain.ProxyProfile
+	consoleAuth  *domain.ConsoleAuthSettings
 	usage        []domain.UsageRecord
 	audits       []domain.AuditEvent
 	limits       map[string]memoryLimitWindow
@@ -32,6 +35,7 @@ func NewMemoryStore() *MemoryStore {
 		apiKeys:      make(map[string]domain.APIKey),
 		providers:    make(map[string]domain.Provider),
 		routes:       make(map[string]domain.ModelRoute),
+		pricingRules: make(map[string]domain.PricingRule),
 		proxies:      make(map[string]domain.ProxyProfile),
 		limits:       make(map[string]memoryLimitWindow),
 		reservations: make(map[string]domain.QuotaReservation),
@@ -42,17 +46,10 @@ func (store *MemoryStore) Close()                        {}
 func (store *MemoryStore) Migrate(context.Context) error { return nil }
 
 func (store *MemoryStore) SeedDefaults(ctx context.Context, seed SeedData) error {
-	if err := store.UpsertProxyProfile(ctx, domain.ProxyProfile{ID: "direct", Name: "direct", Type: "direct", Status: domain.StatusEnabled, TimeoutSeconds: 60}); err != nil {
+	if err := store.UpsertProxyProfile(ctx, domain.ProxyProfile{ID: domain.ProxyTypeDirect, Name: domain.ProxyTypeDirect, Type: domain.ProxyTypeDirect, Status: domain.StatusEnabled, TimeoutSeconds: 60}); err != nil {
 		return err
 	}
-	if seed.OpenRouterKey == "" {
-		return nil
-	}
-	provider := domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: seed.DefaultBaseURL, Protocol: domain.ProtocolOpenAI, MasterKey: seed.OpenRouterKey, Status: domain.StatusEnabled, TimeoutSeconds: 90, Weight: 100, Priority: 1}
-	if err := store.UpsertProvider(ctx, provider); err != nil {
-		return err
-	}
-	return store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: seed.DefaultModel, ProviderID: provider.ID, UpstreamModel: seed.DefaultModel, Protocol: domain.ProtocolOpenAI, ProxyProfileID: "direct", Enabled: true, Weight: 100, Priority: 1})
+	return nil
 }
 
 func (store *MemoryStore) CreateAPIKey(_ context.Context, key domain.APIKey) error {
@@ -186,6 +183,8 @@ func (store *MemoryStore) UpsertProvider(_ context.Context, provider domain.Prov
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	now := time.Now().UTC()
+	provider.SupportedProtocols = nonNilStrings(domain.ProviderSupportedProtocols(provider))
+	provider.Protocol = domain.ProviderPrimaryProtocol(provider)
 	if provider.CreatedAt.IsZero() {
 		provider.CreatedAt = now
 	}
@@ -222,6 +221,17 @@ func (store *MemoryStore) UpsertModelRoute(_ context.Context, route domain.Model
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	now := time.Now().UTC()
+	route.AllowedProtocols = nonNilStrings(domain.NormalizeProtocols(route.AllowedProtocols))
+	route.Protocol = domain.NormalizeProtocol(route.Protocol)
+	if len(route.AllowedProtocols) == 0 && route.Protocol != "" {
+		route.AllowedProtocols = []string{route.Protocol}
+	}
+	if len(route.AllowedProtocols) == 0 {
+		route.AllowedProtocols = []string{domain.ProtocolOpenAI}
+	}
+	if route.Protocol == "" {
+		route.Protocol = route.AllowedProtocols[0]
+	}
 	if route.CreatedAt.IsZero() {
 		route.CreatedAt = now
 	}
@@ -253,10 +263,79 @@ func (store *MemoryStore) GetModelRoute(_ context.Context, publicName string) (d
 	return route, nil
 }
 
+func (store *MemoryStore) LookupModelRoute(_ context.Context, publicName string) (domain.ModelRoute, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	route, ok := store.routes[publicName]
+	if !ok {
+		return domain.ModelRoute{}, ErrNotFound
+	}
+	return route, nil
+}
+
+func (store *MemoryStore) UpsertPricingRule(_ context.Context, rule domain.PricingRule) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if existing, ok := store.pricingRules[rule.ID]; ok {
+		if rule.EffectiveFrom.IsZero() {
+			rule.EffectiveFrom = existing.EffectiveFrom
+		}
+	}
+	if rule.EffectiveFrom.IsZero() {
+		rule.EffectiveFrom = time.Now().UTC()
+	}
+	if strings.TrimSpace(rule.Currency) == "" {
+		rule.Currency = "USD"
+	}
+	store.pricingRules[rule.ID] = rule
+	return nil
+}
+
+func (store *MemoryStore) ListPricingRules(context.Context) ([]domain.PricingRule, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	rules := make([]domain.PricingRule, 0, len(store.pricingRules))
+	for _, rule := range store.pricingRules {
+		rules = append(rules, rule)
+	}
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].ModelAlias != rules[j].ModelAlias {
+			return rules[i].ModelAlias < rules[j].ModelAlias
+		}
+		return rules[i].ID < rules[j].ID
+	})
+	return rules, nil
+}
+
+func (store *MemoryStore) GetPricingRule(_ context.Context, id string) (domain.PricingRule, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	rule, ok := store.pricingRules[id]
+	if !ok {
+		return domain.PricingRule{}, ErrNotFound
+	}
+	return rule, nil
+}
+
 func (store *MemoryStore) UpsertProxyProfile(_ context.Context, profile domain.ProxyProfile) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	normalized, err := domain.NormalizeProxyProfile(profile)
+	if err != nil {
+		return err
+	}
+	profile = normalized
+	existing, ok := store.proxies[profile.ID]
 	now := time.Now().UTC()
+	if ok {
+		profile.CreatedAt = existing.CreatedAt
+		if profile.Auth == "" {
+			profile.Auth = existing.Auth
+		}
+		if profile.LastError == "" {
+			profile.LastError = existing.LastError
+		}
+	}
 	if profile.CreatedAt.IsZero() {
 		profile.CreatedAt = now
 	}
@@ -303,6 +382,43 @@ func (store *MemoryStore) ListUsage(_ context.Context, limit int) ([]domain.Usag
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	return recentUsage(store.usage, limit), nil
+}
+
+func (store *MemoryStore) GetUsageByRequestID(_ context.Context, requestID string) (domain.UsageRecord, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	for index := len(store.usage) - 1; index >= 0; index-- {
+		if store.usage[index].RequestID == requestID {
+			return store.usage[index], nil
+		}
+	}
+	return domain.UsageRecord{}, ErrNotFound
+}
+
+func (store *MemoryStore) SummarizeAPIKeyUsage(_ context.Context, apiKeyID string) (domain.APIKeyUsageSummary, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	now := time.Now().UTC()
+	dailyStart := now.Add(-24 * time.Hour)
+	weeklyStart := now.Add(-7 * 24 * time.Hour)
+	monthlyStart := now.Add(-30 * 24 * time.Hour)
+	var summary domain.APIKeyUsageSummary
+	for _, usage := range store.usage {
+		if usage.APIKeyID != apiKeyID {
+			continue
+		}
+		addUsageTotals(&summary.AllTime, usage)
+		if !usage.CreatedAt.Before(dailyStart) {
+			addUsageTotals(&summary.Daily, usage)
+		}
+		if !usage.CreatedAt.Before(weeklyStart) {
+			addUsageTotals(&summary.Weekly, usage)
+		}
+		if !usage.CreatedAt.Before(monthlyStart) {
+			addUsageTotals(&summary.Monthly, usage)
+		}
+	}
+	return summary, nil
 }
 
 func (store *MemoryStore) InsertAudit(_ context.Context, event domain.AuditEvent) error {
@@ -356,6 +472,177 @@ func (store *MemoryStore) Dashboard(context.Context) (domain.DashboardData, erro
 	return data, nil
 }
 
+func (store *MemoryStore) BillingOverview(context.Context) (domain.BillingOverview, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	var data domain.BillingOverview
+	models := make(map[string]*domain.ModelCost)
+	providers := make(map[string]*domain.SpendBreakdown)
+	apiKeys := make(map[string]*domain.SpendBreakdown)
+	users := make(map[string]*domain.SpendBreakdown)
+	keyPrefixes := make(map[string]string, len(store.apiKeys))
+	keyNames := make(map[string]string, len(store.apiKeys))
+	for _, key := range store.apiKeys {
+		keyPrefixes[key.ID] = key.Prefix
+		keyNames[key.ID] = key.Name
+	}
+	for _, usage := range store.usage {
+		data.RequestCount++
+		if usage.Estimated {
+			data.EstimatedCount++
+		}
+		data.InputTokens += int64(usage.InputTokens)
+		data.OutputTokens += int64(usage.OutputTokens)
+		data.CostMicroCents += usage.CostMicroCents
+
+		model := models[usage.ModelAlias]
+		if model == nil {
+			model = &domain.ModelCost{ModelAlias: usage.ModelAlias}
+			models[usage.ModelAlias] = model
+		}
+		model.RequestCount++
+		model.InputTokens += int64(usage.InputTokens)
+		model.OutputTokens += int64(usage.OutputTokens)
+		model.CostMicroCents += usage.CostMicroCents
+
+		provider := providers[usage.ProviderID]
+		if provider == nil {
+			provider = &domain.SpendBreakdown{Key: usage.ProviderID, Label: usage.ProviderID}
+			providers[usage.ProviderID] = provider
+		}
+		provider.RequestCount++
+		provider.TotalTokens += int64(usage.TotalTokens)
+		provider.CostMicroCents += usage.CostMicroCents
+		provider.LastSeen = laterTime(provider.LastSeen, usage.CreatedAt)
+
+		keyID := usage.APIKeyID
+		keyLabel := firstNonEmptyString(keyNames[keyID], keyPrefixes[keyID], keyID)
+		keyCost := apiKeys[keyID]
+		if keyCost == nil {
+			keyCost = &domain.SpendBreakdown{Key: keyID, Label: keyLabel}
+			apiKeys[keyID] = keyCost
+		}
+		keyCost.RequestCount++
+		keyCost.TotalTokens += int64(usage.TotalTokens)
+		keyCost.CostMicroCents += usage.CostMicroCents
+		keyCost.LastSeen = laterTime(keyCost.LastSeen, usage.CreatedAt)
+
+		userID := usage.UserID
+		if userID == "" {
+			userID = "anonymous"
+		}
+		userCost := users[userID]
+		if userCost == nil {
+			userCost = &domain.SpendBreakdown{Key: userID, Label: userID}
+			users[userID] = userCost
+		}
+		userCost.RequestCount++
+		userCost.TotalTokens += int64(usage.TotalTokens)
+		userCost.CostMicroCents += usage.CostMicroCents
+		userCost.LastSeen = laterTime(userCost.LastSeen, usage.CreatedAt)
+	}
+	for _, item := range models {
+		data.ModelCosts = append(data.ModelCosts, *item)
+	}
+	data.ProviderCosts = spendBreakdownSlice(providers)
+	data.APIKeyCosts = spendBreakdownSlice(apiKeys)
+	data.UserCosts = spendBreakdownSlice(users)
+	sort.Slice(data.ModelCosts, func(i, j int) bool { return data.ModelCosts[i].CostMicroCents > data.ModelCosts[j].CostMicroCents })
+	data.RecentUsage = recentUsage(store.usage, 12)
+	return data, nil
+}
+
+func (store *MemoryStore) UserDirectory(context.Context) (domain.UserDirectory, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	var data domain.UserDirectory
+	if store.consoleAuth != nil {
+		data.Settings = cloneConsoleAuthSettings(*store.consoleAuth)
+	}
+	data.ActiveAPIKeys = int64(len(store.apiKeys))
+	data.ReadyOAuthProviders = int64(countReadyProviders(data.Settings))
+	keyPrefixes := make(map[string]string, len(store.apiKeys))
+	summaries := make(map[string]*domain.ConsoleUserSummary)
+	for _, key := range store.apiKeys {
+		keyPrefixes[key.ID] = key.Prefix
+		userID := firstNonEmptyString(key.UserID, "anonymous")
+		summary := summaries[userID]
+		if summary == nil {
+			summary = &domain.ConsoleUserSummary{UserID: userID}
+			summaries[userID] = summary
+		}
+		summary.APIKeyCount++
+		if summary.LastAPIKeyPrefix == "" {
+			summary.LastAPIKeyPrefix = key.Prefix
+		}
+		summary.LastSeen = laterTime(summary.LastSeen, key.CreatedAt)
+		if key.LastUsedAt != nil {
+			summary.LastSeen = laterTime(summary.LastSeen, *key.LastUsedAt)
+		}
+	}
+	for _, usage := range store.usage {
+		userID := firstNonEmptyString(usage.UserID, "anonymous")
+		summary := summaries[userID]
+		if summary == nil {
+			summary = &domain.ConsoleUserSummary{UserID: userID}
+			summaries[userID] = summary
+		}
+		summary.RequestCount++
+		summary.CostMicroCents += usage.CostMicroCents
+		summary.LastSeen = laterTime(summary.LastSeen, usage.CreatedAt)
+		if summary.LastAPIKeyPrefix == "" {
+			summary.LastAPIKeyPrefix = keyPrefixes[usage.APIKeyID]
+		}
+	}
+	for _, event := range store.audits {
+		if strings.TrimSpace(event.UserID) == "" {
+			continue
+		}
+		summary := summaries[event.UserID]
+		if summary == nil {
+			summary = &domain.ConsoleUserSummary{UserID: event.UserID}
+			summaries[event.UserID] = summary
+		}
+		summary.LastSeen = laterTime(summary.LastSeen, event.CreatedAt)
+	}
+	for _, summary := range summaries {
+		data.Summaries = append(data.Summaries, *summary)
+	}
+	sort.Slice(data.Summaries, func(i, j int) bool {
+		left, right := data.Summaries[i], data.Summaries[j]
+		if left.LastSeen != nil && right.LastSeen != nil && !left.LastSeen.Equal(*right.LastSeen) {
+			return left.LastSeen.After(*right.LastSeen)
+		}
+		if left.RequestCount != right.RequestCount {
+			return left.RequestCount > right.RequestCount
+		}
+		return left.UserID < right.UserID
+	})
+	data.ObservedUsers = int64(len(data.Summaries))
+	data.RecentAudit = recentAudit(store.audits, 8)
+	return data, nil
+}
+
+func (store *MemoryStore) GetConsoleAuthSettings(context.Context) (domain.ConsoleAuthSettings, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if store.consoleAuth == nil {
+		return domain.ConsoleAuthSettings{}, ErrNotFound
+	}
+	return cloneConsoleAuthSettings(*store.consoleAuth), nil
+}
+
+func (store *MemoryStore) SaveConsoleAuthSettings(_ context.Context, settings domain.ConsoleAuthSettings) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if settings.UpdatedAt.IsZero() {
+		settings.UpdatedAt = time.Now().UTC()
+	}
+	cloned := cloneConsoleAuthSettings(settings)
+	store.consoleAuth = &cloned
+	return nil
+}
+
 func recentUsage(values []domain.UsageRecord, limit int) []domain.UsageRecord {
 	if limit <= 0 || limit > len(values) {
 		limit = len(values)
@@ -376,4 +663,73 @@ func recentAudit(values []domain.AuditEvent, limit int) []domain.AuditEvent {
 		result = append(result, values[i])
 	}
 	return result
+}
+
+func addUsageTotals(target *domain.UsageTotals, usage domain.UsageRecord) {
+	target.Requests++
+	target.TotalTokens += int64(usage.TotalTokens)
+	target.CostMicroCents += usage.CostMicroCents
+}
+
+func cloneConsoleAuthSettings(settings domain.ConsoleAuthSettings) domain.ConsoleAuthSettings {
+	clone := settings
+	clone.AllowedEmails = append([]string(nil), settings.AllowedEmails...)
+	clone.AllowedDomains = append([]string(nil), settings.AllowedDomains...)
+	clone.Providers = make([]domain.OAuthProviderSettings, 0, len(settings.Providers))
+	for _, provider := range settings.Providers {
+		providerClone := provider
+		providerClone.Scopes = append([]string(nil), provider.Scopes...)
+		providerClone.AuthParams = append([]domain.KeyValue(nil), provider.AuthParams...)
+		providerClone.TokenParams = append([]domain.KeyValue(nil), provider.TokenParams...)
+		providerClone.UserInfoParams = append([]domain.KeyValue(nil), provider.UserInfoParams...)
+		clone.Providers = append(clone.Providers, providerClone)
+	}
+	return clone
+}
+
+func spendBreakdownSlice(values map[string]*domain.SpendBreakdown) []domain.SpendBreakdown {
+	items := make([]domain.SpendBreakdown, 0, len(values))
+	for _, item := range values {
+		items = append(items, *item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CostMicroCents != items[j].CostMicroCents {
+			return items[i].CostMicroCents > items[j].CostMicroCents
+		}
+		return items[i].Label < items[j].Label
+	})
+	if len(items) > 8 {
+		items = items[:8]
+	}
+	return items
+}
+
+func countReadyProviders(settings domain.ConsoleAuthSettings) int {
+	count := 0
+	for _, provider := range settings.Providers {
+		if provider.Enabled && strings.TrimSpace(provider.ClientID) != "" && strings.TrimSpace(provider.ClientSecret) != "" && strings.TrimSpace(provider.AuthURL) != "" && strings.TrimSpace(provider.TokenURL) != "" && strings.TrimSpace(provider.UserInfoURL) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func laterTime(current *time.Time, candidate time.Time) *time.Time {
+	if candidate.IsZero() {
+		return current
+	}
+	if current == nil || candidate.After(*current) {
+		value := candidate
+		return &value
+	}
+	return current
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

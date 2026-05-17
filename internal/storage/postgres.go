@@ -2,9 +2,11 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +21,8 @@ type PostgresStore struct {
 	schema      string
 	databaseURL string
 }
+
+const consoleAuthSettingsKey = "console_auth"
 
 func OpenPostgres(ctx context.Context, databaseURL, secretKey string) (*PostgresStore, error) {
 	schema, cleanURL, err := extractSchema(databaseURL)
@@ -90,17 +94,10 @@ func quoteIdent(value string) string {
 }
 
 func (store *PostgresStore) SeedDefaults(ctx context.Context, seed SeedData) error {
-	if err := store.UpsertProxyProfile(ctx, domain.ProxyProfile{ID: "direct", Name: "direct", Type: "direct", Status: domain.StatusEnabled, TimeoutSeconds: 60}); err != nil {
+	if err := store.UpsertProxyProfile(ctx, domain.ProxyProfile{ID: domain.ProxyTypeDirect, Name: domain.ProxyTypeDirect, Type: domain.ProxyTypeDirect, Status: domain.StatusEnabled, TimeoutSeconds: 60}); err != nil {
 		return err
 	}
-	if strings.TrimSpace(seed.OpenRouterKey) == "" {
-		return nil
-	}
-	provider := domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: seed.DefaultBaseURL, Protocol: domain.ProtocolOpenAI, MasterKey: seed.OpenRouterKey, DefaultProxyID: "direct", Status: domain.StatusEnabled, Priority: 1, Weight: 100, TimeoutSeconds: 90}
-	if err := store.UpsertProvider(ctx, provider); err != nil {
-		return err
-	}
-	return store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: seed.DefaultModel, ProviderID: provider.ID, UpstreamModel: seed.DefaultModel, Protocol: domain.ProtocolOpenAI, ProxyProfileID: "direct", Enabled: true, Priority: 1, Weight: 100})
+	return nil
 }
 
 func (store *PostgresStore) CreateAPIKey(ctx context.Context, key domain.APIKey) error {
@@ -277,6 +274,8 @@ func (store *PostgresStore) SettleQuota(ctx context.Context, reservation domain.
 }
 
 func (store *PostgresStore) UpsertProvider(ctx context.Context, provider domain.Provider) error {
+	provider.SupportedProtocols = nonNilStrings(domain.ProviderSupportedProtocols(provider))
+	provider.Protocol = domain.ProviderPrimaryProtocol(provider)
 	secret, err := store.box.Encrypt(provider.MasterKey)
 	if err != nil {
 		return err
@@ -287,15 +286,15 @@ func (store *PostgresStore) UpsertProvider(ctx context.Context, provider domain.
 	}
 	provider.UpdatedAt = now
 	_, err = store.pool.Exec(ctx, `
-INSERT INTO providers (id, name, base_url, protocol, master_key_ciphertext, default_proxy_id, priority, weight, status, timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-ON CONFLICT (id) DO UPDATE SET name = excluded.name, base_url = excluded.base_url, protocol = excluded.protocol, master_key_ciphertext = CASE WHEN excluded.master_key_ciphertext = '' THEN providers.master_key_ciphertext ELSE excluded.master_key_ciphertext END, default_proxy_id = excluded.default_proxy_id, priority = excluded.priority, weight = excluded.weight, status = excluded.status, timeout_seconds = excluded.timeout_seconds, rate_limit_hint = excluded.rate_limit_hint, last_health_check = excluded.last_health_check, last_error = excluded.last_error, updated_at = excluded.updated_at`,
-		provider.ID, provider.Name, provider.BaseURL, provider.Protocol, secret, provider.DefaultProxyID, provider.Priority, provider.Weight, normalizeStatus(provider.Status, domain.StatusEnabled), provider.TimeoutSeconds, provider.RateLimitHint, provider.LastHealthCheck, provider.LastError, provider.CreatedAt, provider.UpdatedAt)
+INSERT INTO providers (id, name, base_url, protocol, supported_protocols, master_key_ciphertext, default_proxy_id, priority, weight, status, timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+ON CONFLICT (id) DO UPDATE SET name = excluded.name, base_url = excluded.base_url, protocol = excluded.protocol, supported_protocols = excluded.supported_protocols, master_key_ciphertext = CASE WHEN excluded.master_key_ciphertext = '' THEN providers.master_key_ciphertext ELSE excluded.master_key_ciphertext END, default_proxy_id = excluded.default_proxy_id, priority = excluded.priority, weight = excluded.weight, status = excluded.status, timeout_seconds = excluded.timeout_seconds, rate_limit_hint = excluded.rate_limit_hint, last_health_check = excluded.last_health_check, last_error = excluded.last_error, updated_at = excluded.updated_at`,
+		provider.ID, provider.Name, provider.BaseURL, provider.Protocol, provider.SupportedProtocols, secret, provider.DefaultProxyID, provider.Priority, provider.Weight, normalizeStatus(provider.Status, domain.StatusEnabled), provider.TimeoutSeconds, provider.RateLimitHint, provider.LastHealthCheck, provider.LastError, provider.CreatedAt, provider.UpdatedAt)
 	return err
 }
 
 func (store *PostgresStore) ListProviders(ctx context.Context) ([]domain.Provider, error) {
-	rows, err := store.pool.Query(ctx, `SELECT id, name, base_url, protocol, default_proxy_id, priority, weight, status, timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at FROM providers ORDER BY id`)
+	rows, err := store.pool.Query(ctx, `SELECT id, name, base_url, protocol, supported_protocols, default_proxy_id, priority, weight, status, timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at FROM providers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +302,7 @@ func (store *PostgresStore) ListProviders(ctx context.Context) ([]domain.Provide
 	var providers []domain.Provider
 	for rows.Next() {
 		var provider domain.Provider
-		if err := rows.Scan(&provider.ID, &provider.Name, &provider.BaseURL, &provider.Protocol, &provider.DefaultProxyID, &provider.Priority, &provider.Weight, &provider.Status, &provider.TimeoutSeconds, &provider.RateLimitHint, &provider.LastHealthCheck, &provider.LastError, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
+		if err := rows.Scan(&provider.ID, &provider.Name, &provider.BaseURL, &provider.Protocol, &provider.SupportedProtocols, &provider.DefaultProxyID, &provider.Priority, &provider.Weight, &provider.Status, &provider.TimeoutSeconds, &provider.RateLimitHint, &provider.LastHealthCheck, &provider.LastError, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
 			return nil, err
 		}
 		providers = append(providers, provider)
@@ -314,7 +313,7 @@ func (store *PostgresStore) ListProviders(ctx context.Context) ([]domain.Provide
 func (store *PostgresStore) GetProvider(ctx context.Context, id string) (domain.Provider, error) {
 	var provider domain.Provider
 	var secret string
-	err := store.pool.QueryRow(ctx, `SELECT id, name, base_url, protocol, master_key_ciphertext, default_proxy_id, priority, weight, status, timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at FROM providers WHERE id = $1`, id).Scan(&provider.ID, &provider.Name, &provider.BaseURL, &provider.Protocol, &secret, &provider.DefaultProxyID, &provider.Priority, &provider.Weight, &provider.Status, &provider.TimeoutSeconds, &provider.RateLimitHint, &provider.LastHealthCheck, &provider.LastError, &provider.CreatedAt, &provider.UpdatedAt)
+	err := store.pool.QueryRow(ctx, `SELECT id, name, base_url, protocol, supported_protocols, master_key_ciphertext, default_proxy_id, priority, weight, status, timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at FROM providers WHERE id = $1`, id).Scan(&provider.ID, &provider.Name, &provider.BaseURL, &provider.Protocol, &provider.SupportedProtocols, &secret, &provider.DefaultProxyID, &provider.Priority, &provider.Weight, &provider.Status, &provider.TimeoutSeconds, &provider.RateLimitHint, &provider.LastHealthCheck, &provider.LastError, &provider.CreatedAt, &provider.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Provider{}, ErrNotFound
 	}
@@ -326,21 +325,32 @@ func (store *PostgresStore) GetProvider(ctx context.Context, id string) (domain.
 }
 
 func (store *PostgresStore) UpsertModelRoute(ctx context.Context, route domain.ModelRoute) error {
+	route.AllowedProtocols = nonNilStrings(domain.NormalizeProtocols(route.AllowedProtocols))
+	route.Protocol = domain.NormalizeProtocol(route.Protocol)
+	if len(route.AllowedProtocols) == 0 && route.Protocol != "" {
+		route.AllowedProtocols = []string{route.Protocol}
+	}
+	if len(route.AllowedProtocols) == 0 {
+		route.AllowedProtocols = []string{domain.ProtocolOpenAI}
+	}
+	if route.Protocol == "" {
+		route.Protocol = route.AllowedProtocols[0]
+	}
 	now := time.Now().UTC()
 	if route.CreatedAt.IsZero() {
 		route.CreatedAt = now
 	}
 	route.UpdatedAt = now
 	_, err := store.pool.Exec(ctx, `
-INSERT INTO model_routes (public_name, provider_id, upstream_model, protocol, proxy_profile_id, price_rule_id, enabled, priority, weight, context_tokens, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-ON CONFLICT (public_name) DO UPDATE SET provider_id = excluded.provider_id, upstream_model = excluded.upstream_model, protocol = excluded.protocol, proxy_profile_id = excluded.proxy_profile_id, price_rule_id = excluded.price_rule_id, enabled = excluded.enabled, priority = excluded.priority, weight = excluded.weight, context_tokens = excluded.context_tokens, updated_at = excluded.updated_at`,
-		route.PublicName, route.ProviderID, route.UpstreamModel, route.Protocol, route.ProxyProfileID, route.PriceRuleID, route.Enabled, route.Priority, route.Weight, route.ContextTokens, route.CreatedAt, route.UpdatedAt)
+INSERT INTO model_routes (public_name, provider_id, upstream_model, protocol, allowed_protocols, proxy_profile_id, price_rule_id, enabled, priority, weight, context_tokens, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+ON CONFLICT (public_name) DO UPDATE SET provider_id = excluded.provider_id, upstream_model = excluded.upstream_model, protocol = excluded.protocol, allowed_protocols = excluded.allowed_protocols, proxy_profile_id = excluded.proxy_profile_id, price_rule_id = excluded.price_rule_id, enabled = excluded.enabled, priority = excluded.priority, weight = excluded.weight, context_tokens = excluded.context_tokens, updated_at = excluded.updated_at`,
+		route.PublicName, route.ProviderID, route.UpstreamModel, route.Protocol, route.AllowedProtocols, route.ProxyProfileID, route.PriceRuleID, route.Enabled, route.Priority, route.Weight, route.ContextTokens, route.CreatedAt, route.UpdatedAt)
 	return err
 }
 
 func (store *PostgresStore) ListModelRoutes(ctx context.Context) ([]domain.ModelRoute, error) {
-	rows, err := store.pool.Query(ctx, `SELECT public_name, provider_id, upstream_model, protocol, proxy_profile_id, price_rule_id, enabled, priority, weight, context_tokens, created_at, updated_at FROM model_routes WHERE enabled = true ORDER BY public_name`)
+	rows, err := store.pool.Query(ctx, `SELECT public_name, provider_id, upstream_model, protocol, allowed_protocols, proxy_profile_id, price_rule_id, enabled, priority, weight, context_tokens, created_at, updated_at FROM model_routes WHERE enabled = true ORDER BY public_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +358,7 @@ func (store *PostgresStore) ListModelRoutes(ctx context.Context) ([]domain.Model
 	var routes []domain.ModelRoute
 	for rows.Next() {
 		var route domain.ModelRoute
-		if err := rows.Scan(&route.PublicName, &route.ProviderID, &route.UpstreamModel, &route.Protocol, &route.ProxyProfileID, &route.PriceRuleID, &route.Enabled, &route.Priority, &route.Weight, &route.ContextTokens, &route.CreatedAt, &route.UpdatedAt); err != nil {
+		if err := rows.Scan(&route.PublicName, &route.ProviderID, &route.UpstreamModel, &route.Protocol, &route.AllowedProtocols, &route.ProxyProfileID, &route.PriceRuleID, &route.Enabled, &route.Priority, &route.Weight, &route.ContextTokens, &route.CreatedAt, &route.UpdatedAt); err != nil {
 			return nil, err
 		}
 		routes = append(routes, route)
@@ -358,14 +368,69 @@ func (store *PostgresStore) ListModelRoutes(ctx context.Context) ([]domain.Model
 
 func (store *PostgresStore) GetModelRoute(ctx context.Context, publicName string) (domain.ModelRoute, error) {
 	var route domain.ModelRoute
-	err := store.pool.QueryRow(ctx, `SELECT public_name, provider_id, upstream_model, protocol, proxy_profile_id, price_rule_id, enabled, priority, weight, context_tokens, created_at, updated_at FROM model_routes WHERE public_name = $1 AND enabled = true`, publicName).Scan(&route.PublicName, &route.ProviderID, &route.UpstreamModel, &route.Protocol, &route.ProxyProfileID, &route.PriceRuleID, &route.Enabled, &route.Priority, &route.Weight, &route.ContextTokens, &route.CreatedAt, &route.UpdatedAt)
+	err := store.pool.QueryRow(ctx, `SELECT public_name, provider_id, upstream_model, protocol, allowed_protocols, proxy_profile_id, price_rule_id, enabled, priority, weight, context_tokens, created_at, updated_at FROM model_routes WHERE public_name = $1 AND enabled = true`, publicName).Scan(&route.PublicName, &route.ProviderID, &route.UpstreamModel, &route.Protocol, &route.AllowedProtocols, &route.ProxyProfileID, &route.PriceRuleID, &route.Enabled, &route.Priority, &route.Weight, &route.ContextTokens, &route.CreatedAt, &route.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ModelRoute{}, ErrNotFound
 	}
 	return route, err
 }
 
+func (store *PostgresStore) LookupModelRoute(ctx context.Context, publicName string) (domain.ModelRoute, error) {
+	var route domain.ModelRoute
+	err := store.pool.QueryRow(ctx, `SELECT public_name, provider_id, upstream_model, protocol, allowed_protocols, proxy_profile_id, price_rule_id, enabled, priority, weight, context_tokens, created_at, updated_at FROM model_routes WHERE public_name = $1`, publicName).Scan(&route.PublicName, &route.ProviderID, &route.UpstreamModel, &route.Protocol, &route.AllowedProtocols, &route.ProxyProfileID, &route.PriceRuleID, &route.Enabled, &route.Priority, &route.Weight, &route.ContextTokens, &route.CreatedAt, &route.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ModelRoute{}, ErrNotFound
+	}
+	return route, err
+}
+
+func (store *PostgresStore) UpsertPricingRule(ctx context.Context, rule domain.PricingRule) error {
+	if strings.TrimSpace(rule.Currency) == "" {
+		rule.Currency = "USD"
+	}
+	if rule.EffectiveFrom.IsZero() {
+		rule.EffectiveFrom = time.Now().UTC()
+	}
+	_, err := store.pool.Exec(ctx, `
+INSERT INTO pricing_rules (id, model_alias, provider_id, currency, input_price_per_million_tokens, output_price_per_million_tokens, cache_read_price_per_million_tokens, cache_write_price_per_million_tokens, effective_from, effective_to)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+ON CONFLICT (id) DO UPDATE SET model_alias = excluded.model_alias, provider_id = excluded.provider_id, currency = excluded.currency, input_price_per_million_tokens = excluded.input_price_per_million_tokens, output_price_per_million_tokens = excluded.output_price_per_million_tokens, cache_read_price_per_million_tokens = excluded.cache_read_price_per_million_tokens, cache_write_price_per_million_tokens = excluded.cache_write_price_per_million_tokens, effective_from = excluded.effective_from, effective_to = excluded.effective_to`,
+		rule.ID, rule.ModelAlias, rule.ProviderID, rule.Currency, rule.InputPricePerMillionTokens, rule.OutputPricePerMillionTokens, rule.CacheReadPricePerMillionTokens, rule.CacheWritePricePerMillionTokens, rule.EffectiveFrom, rule.EffectiveTo)
+	return err
+}
+
+func (store *PostgresStore) ListPricingRules(ctx context.Context) ([]domain.PricingRule, error) {
+	rows, err := store.pool.Query(ctx, `SELECT id, model_alias, provider_id, currency, input_price_per_million_tokens, output_price_per_million_tokens, cache_read_price_per_million_tokens, cache_write_price_per_million_tokens, effective_from, effective_to FROM pricing_rules ORDER BY model_alias, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rules []domain.PricingRule
+	for rows.Next() {
+		var rule domain.PricingRule
+		if err := rows.Scan(&rule.ID, &rule.ModelAlias, &rule.ProviderID, &rule.Currency, &rule.InputPricePerMillionTokens, &rule.OutputPricePerMillionTokens, &rule.CacheReadPricePerMillionTokens, &rule.CacheWritePricePerMillionTokens, &rule.EffectiveFrom, &rule.EffectiveTo); err != nil {
+			return nil, err
+		}
+		rules = append(rules, rule)
+	}
+	return rules, rows.Err()
+}
+
+func (store *PostgresStore) GetPricingRule(ctx context.Context, id string) (domain.PricingRule, error) {
+	var rule domain.PricingRule
+	err := store.pool.QueryRow(ctx, `SELECT id, model_alias, provider_id, currency, input_price_per_million_tokens, output_price_per_million_tokens, cache_read_price_per_million_tokens, cache_write_price_per_million_tokens, effective_from, effective_to FROM pricing_rules WHERE id = $1`, id).Scan(&rule.ID, &rule.ModelAlias, &rule.ProviderID, &rule.Currency, &rule.InputPricePerMillionTokens, &rule.OutputPricePerMillionTokens, &rule.CacheReadPricePerMillionTokens, &rule.CacheWritePricePerMillionTokens, &rule.EffectiveFrom, &rule.EffectiveTo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.PricingRule{}, ErrNotFound
+	}
+	return rule, err
+}
+
 func (store *PostgresStore) UpsertProxyProfile(ctx context.Context, profile domain.ProxyProfile) error {
+	normalized, err := domain.NormalizeProxyProfile(profile)
+	if err != nil {
+		return err
+	}
+	profile = normalized
 	secret, err := store.box.Encrypt(profile.Auth)
 	if err != nil {
 		return err
@@ -378,7 +443,7 @@ func (store *PostgresStore) UpsertProxyProfile(ctx context.Context, profile doma
 	_, err = store.pool.Exec(ctx, `
 INSERT INTO proxy_profiles (id, name, type, endpoint, auth_ciphertext, region, timeout_seconds, health_check_url, status, last_error, created_at, updated_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-ON CONFLICT (id) DO UPDATE SET name = excluded.name, type = excluded.type, endpoint = excluded.endpoint, auth_ciphertext = CASE WHEN excluded.auth_ciphertext = '' THEN proxy_profiles.auth_ciphertext ELSE excluded.auth_ciphertext END, region = excluded.region, timeout_seconds = excluded.timeout_seconds, health_check_url = excluded.health_check_url, status = excluded.status, last_error = excluded.last_error, updated_at = excluded.updated_at`,
+ON CONFLICT (id) DO UPDATE SET name = excluded.name, type = excluded.type, endpoint = excluded.endpoint, auth_ciphertext = CASE WHEN excluded.auth_ciphertext = '' THEN proxy_profiles.auth_ciphertext ELSE excluded.auth_ciphertext END, region = excluded.region, timeout_seconds = excluded.timeout_seconds, health_check_url = excluded.health_check_url, status = excluded.status, last_error = CASE WHEN excluded.last_error = '' THEN proxy_profiles.last_error ELSE excluded.last_error END, updated_at = excluded.updated_at`,
 		profile.ID, profile.Name, profile.Type, profile.Endpoint, secret, profile.Region, profile.TimeoutSeconds, profile.HealthCheckURL, normalizeStatus(profile.Status, domain.StatusEnabled), profile.LastError, profile.CreatedAt, profile.UpdatedAt)
 	return err
 }
@@ -442,6 +507,48 @@ func (store *PostgresStore) ListUsage(ctx context.Context, limit int) ([]domain.
 	return usage, rows.Err()
 }
 
+func (store *PostgresStore) GetUsageByRequestID(ctx context.Context, requestID string) (domain.UsageRecord, error) {
+	var item domain.UsageRecord
+	err := store.pool.QueryRow(ctx, `SELECT request_id, user_id, api_key_id, provider_id, model_alias, upstream_model, protocol, endpoint, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, cost_micro_cents, currency, estimated, stream, status_code, latency_ms, created_at FROM usage_ledger WHERE request_id = $1 ORDER BY created_at DESC LIMIT 1`, requestID).Scan(&item.RequestID, &item.UserID, &item.APIKeyID, &item.ProviderID, &item.ModelAlias, &item.UpstreamModel, &item.Protocol, &item.Endpoint, &item.InputTokens, &item.OutputTokens, &item.CacheReadTokens, &item.CacheCreationTokens, &item.TotalTokens, &item.CostMicroCents, &item.Currency, &item.Estimated, &item.Stream, &item.StatusCode, &item.LatencyMS, &item.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.UsageRecord{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (store *PostgresStore) SummarizeAPIKeyUsage(ctx context.Context, apiKeyID string) (domain.APIKeyUsageSummary, error) {
+	var summary domain.APIKeyUsageSummary
+	err := store.pool.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE api_key_id = $1),
+			coalesce(sum(total_tokens) FILTER (WHERE api_key_id = $1), 0),
+			coalesce(sum(cost_micro_cents) FILTER (WHERE api_key_id = $1), 0),
+			count(*) FILTER (WHERE api_key_id = $1 AND created_at >= now() - interval '1 day'),
+			coalesce(sum(total_tokens) FILTER (WHERE api_key_id = $1 AND created_at >= now() - interval '1 day'), 0),
+			coalesce(sum(cost_micro_cents) FILTER (WHERE api_key_id = $1 AND created_at >= now() - interval '1 day'), 0),
+			count(*) FILTER (WHERE api_key_id = $1 AND created_at >= now() - interval '7 days'),
+			coalesce(sum(total_tokens) FILTER (WHERE api_key_id = $1 AND created_at >= now() - interval '7 days'), 0),
+			coalesce(sum(cost_micro_cents) FILTER (WHERE api_key_id = $1 AND created_at >= now() - interval '7 days'), 0),
+			count(*) FILTER (WHERE api_key_id = $1 AND created_at >= now() - interval '30 days'),
+			coalesce(sum(total_tokens) FILTER (WHERE api_key_id = $1 AND created_at >= now() - interval '30 days'), 0),
+			coalesce(sum(cost_micro_cents) FILTER (WHERE api_key_id = $1 AND created_at >= now() - interval '30 days'), 0)
+		FROM usage_ledger`, apiKeyID).Scan(
+		&summary.AllTime.Requests,
+		&summary.AllTime.TotalTokens,
+		&summary.AllTime.CostMicroCents,
+		&summary.Daily.Requests,
+		&summary.Daily.TotalTokens,
+		&summary.Daily.CostMicroCents,
+		&summary.Weekly.Requests,
+		&summary.Weekly.TotalTokens,
+		&summary.Weekly.CostMicroCents,
+		&summary.Monthly.Requests,
+		&summary.Monthly.TotalTokens,
+		&summary.Monthly.CostMicroCents,
+	)
+	return summary, err
+}
+
 func (store *PostgresStore) InsertAudit(ctx context.Context, event domain.AuditEvent) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
@@ -499,6 +606,164 @@ func (store *PostgresStore) Dashboard(ctx context.Context) (domain.DashboardData
 	return data, rows.Err()
 }
 
+func (store *PostgresStore) BillingOverview(ctx context.Context) (domain.BillingOverview, error) {
+	var data domain.BillingOverview
+	err := store.pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE estimated), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0), coalesce(sum(cost_micro_cents),0) FROM usage_ledger WHERE created_at >= now() - interval '30 days'`).Scan(&data.RequestCount, &data.EstimatedCount, &data.InputTokens, &data.OutputTokens, &data.CostMicroCents)
+	if err != nil {
+		return data, err
+	}
+	data.RecentUsage, err = store.ListUsage(ctx, 12)
+	if err != nil {
+		return data, err
+	}
+	if data.ModelCosts, err = queryModelCosts(ctx, store.pool); err != nil {
+		return data, err
+	}
+	if data.ProviderCosts, err = querySpendBreakdowns(ctx, store.pool, `SELECT provider_id AS key, provider_id AS label, count(*), coalesce(sum(total_tokens),0), coalesce(sum(cost_micro_cents),0), max(created_at) FROM usage_ledger WHERE created_at >= now() - interval '30 days' GROUP BY provider_id ORDER BY 5 DESC LIMIT 8`); err != nil {
+		return data, err
+	}
+	if data.APIKeyCosts, err = querySpendBreakdowns(ctx, store.pool, `SELECT l.api_key_id AS key, coalesce(nullif(k.name, ''), nullif(k.prefix, ''), l.api_key_id) AS label, count(*), coalesce(sum(l.total_tokens),0), coalesce(sum(l.cost_micro_cents),0), max(l.created_at) FROM usage_ledger l LEFT JOIN api_keys k ON k.id = l.api_key_id WHERE l.created_at >= now() - interval '30 days' GROUP BY l.api_key_id, label ORDER BY 5 DESC LIMIT 8`); err != nil {
+		return data, err
+	}
+	if data.UserCosts, err = querySpendBreakdowns(ctx, store.pool, `SELECT coalesce(nullif(user_id, ''), 'anonymous') AS key, coalesce(nullif(user_id, ''), 'anonymous') AS label, count(*), coalesce(sum(total_tokens),0), coalesce(sum(cost_micro_cents),0), max(created_at) FROM usage_ledger WHERE created_at >= now() - interval '30 days' GROUP BY 1, 2 ORDER BY 5 DESC LIMIT 8`); err != nil {
+		return data, err
+	}
+	return data, nil
+}
+
+func (store *PostgresStore) UserDirectory(ctx context.Context) (domain.UserDirectory, error) {
+	var data domain.UserDirectory
+	settings, err := store.GetConsoleAuthSettings(ctx)
+	if err == nil {
+		data.Settings = settings
+	} else if !errors.Is(err, ErrNotFound) {
+		return data, err
+	}
+	data.ReadyOAuthProviders = int64(countReadyAuthProviders(data.Settings))
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM api_keys`).Scan(&data.ActiveAPIKeys); err != nil {
+		return data, err
+	}
+	keys, err := store.ListAPIKeys(ctx)
+	if err != nil {
+		return data, err
+	}
+	usageRows, err := store.pool.Query(ctx, `SELECT coalesce(nullif(user_id, ''), 'anonymous') AS user_id, count(*), coalesce(sum(cost_micro_cents),0), max(created_at) FROM usage_ledger GROUP BY 1 ORDER BY max(created_at) DESC`)
+	if err != nil {
+		return data, err
+	}
+	defer usageRows.Close()
+	summaries := make(map[string]*domain.ConsoleUserSummary)
+	for _, key := range keys {
+		userID := firstNonEmptyValue(key.UserID, "anonymous")
+		summary := summaries[userID]
+		if summary == nil {
+			summary = &domain.ConsoleUserSummary{UserID: userID}
+			summaries[userID] = summary
+		}
+		summary.APIKeyCount++
+		if summary.LastAPIKeyPrefix == "" {
+			summary.LastAPIKeyPrefix = key.Prefix
+		}
+		summary.LastSeen = maxTime(summary.LastSeen, key.CreatedAt)
+		if key.LastUsedAt != nil {
+			summary.LastSeen = maxTime(summary.LastSeen, *key.LastUsedAt)
+		}
+	}
+	for usageRows.Next() {
+		var userID string
+		var requestCount int64
+		var cost int64
+		var lastSeen time.Time
+		if err := usageRows.Scan(&userID, &requestCount, &cost, &lastSeen); err != nil {
+			return data, err
+		}
+		summary := summaries[userID]
+		if summary == nil {
+			summary = &domain.ConsoleUserSummary{UserID: userID}
+			summaries[userID] = summary
+		}
+		summary.RequestCount = requestCount
+		summary.CostMicroCents = cost
+		summary.LastSeen = maxTime(summary.LastSeen, lastSeen)
+	}
+	if err := usageRows.Err(); err != nil {
+		return data, err
+	}
+	auditRows, err := store.pool.Query(ctx, `SELECT coalesce(nullif(user_id, ''), 'anonymous') AS user_id, max(created_at) FROM audit_logs GROUP BY 1`)
+	if err != nil {
+		return data, err
+	}
+	defer auditRows.Close()
+	for auditRows.Next() {
+		var userID string
+		var lastSeen time.Time
+		if err := auditRows.Scan(&userID, &lastSeen); err != nil {
+			return data, err
+		}
+		summary := summaries[userID]
+		if summary == nil {
+			summary = &domain.ConsoleUserSummary{UserID: userID}
+			summaries[userID] = summary
+		}
+		summary.LastSeen = maxTime(summary.LastSeen, lastSeen)
+	}
+	if err := auditRows.Err(); err != nil {
+		return data, err
+	}
+	for _, summary := range summaries {
+		data.Summaries = append(data.Summaries, *summary)
+	}
+	sortConsoleUsers(data.Summaries)
+	data.ObservedUsers = int64(len(data.Summaries))
+	data.RecentAudit, err = store.ListAudit(ctx, 8)
+	if err != nil {
+		return data, err
+	}
+	return data, nil
+}
+
+func (store *PostgresStore) GetConsoleAuthSettings(ctx context.Context) (domain.ConsoleAuthSettings, error) {
+	var secret string
+	err := store.pool.QueryRow(ctx, `SELECT value_ciphertext FROM console_settings WHERE key = $1`, consoleAuthSettingsKey).Scan(&secret)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ConsoleAuthSettings{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.ConsoleAuthSettings{}, err
+	}
+	if strings.TrimSpace(secret) == "" {
+		return domain.ConsoleAuthSettings{}, ErrNotFound
+	}
+	clear, err := store.box.Decrypt(secret)
+	if err != nil {
+		return domain.ConsoleAuthSettings{}, err
+	}
+	var settings domain.ConsoleAuthSettings
+	if err := json.Unmarshal([]byte(clear), &settings); err != nil {
+		return domain.ConsoleAuthSettings{}, err
+	}
+	return settings, nil
+}
+
+func (store *PostgresStore) SaveConsoleAuthSettings(ctx context.Context, settings domain.ConsoleAuthSettings) error {
+	if settings.UpdatedAt.IsZero() {
+		settings.UpdatedAt = time.Now().UTC()
+	}
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	secret, err := store.box.Encrypt(string(payload))
+	if err != nil {
+		return err
+	}
+	_, err = store.pool.Exec(ctx, `
+INSERT INTO console_settings (key, value_ciphertext, updated_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (key) DO UPDATE SET value_ciphertext = excluded.value_ciphertext, updated_at = excluded.updated_at`, consoleAuthSettingsKey, secret, settings.UpdatedAt)
+	return err
+}
+
 func normalizeStatus(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
@@ -511,4 +776,83 @@ func nonNilStrings(values []string) []string {
 		return []string{}
 	}
 	return values
+}
+
+func queryModelCosts(ctx context.Context, pool *pgxpool.Pool) ([]domain.ModelCost, error) {
+	rows, err := pool.Query(ctx, `SELECT model_alias, count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0), coalesce(sum(cost_micro_cents),0) FROM usage_ledger WHERE created_at >= now() - interval '30 days' GROUP BY model_alias ORDER BY 5 DESC LIMIT 8`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []domain.ModelCost
+	for rows.Next() {
+		var item domain.ModelCost
+		if err := rows.Scan(&item.ModelAlias, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.CostMicroCents); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func querySpendBreakdowns(ctx context.Context, pool *pgxpool.Pool, statement string) ([]domain.SpendBreakdown, error) {
+	rows, err := pool.Query(ctx, statement)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []domain.SpendBreakdown
+	for rows.Next() {
+		var item domain.SpendBreakdown
+		var lastSeen time.Time
+		if err := rows.Scan(&item.Key, &item.Label, &item.RequestCount, &item.TotalTokens, &item.CostMicroCents, &lastSeen); err != nil {
+			return nil, err
+		}
+		item.LastSeen = &lastSeen
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func countReadyAuthProviders(settings domain.ConsoleAuthSettings) int {
+	count := 0
+	for _, provider := range settings.Providers {
+		if provider.Enabled && strings.TrimSpace(provider.ClientID) != "" && strings.TrimSpace(provider.ClientSecret) != "" && strings.TrimSpace(provider.AuthURL) != "" && strings.TrimSpace(provider.TokenURL) != "" && strings.TrimSpace(provider.UserInfoURL) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func firstNonEmptyValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func maxTime(current *time.Time, candidate time.Time) *time.Time {
+	if candidate.IsZero() {
+		return current
+	}
+	if current == nil || candidate.After(*current) {
+		value := candidate
+		return &value
+	}
+	return current
+}
+
+func sortConsoleUsers(values []domain.ConsoleUserSummary) {
+	sort.Slice(values, func(i, j int) bool {
+		left, right := values[i], values[j]
+		if left.LastSeen != nil && right.LastSeen != nil && !left.LastSeen.Equal(*right.LastSeen) {
+			return left.LastSeen.After(*right.LastSeen)
+		}
+		if left.RequestCount != right.RequestCount {
+			return left.RequestCount > right.RequestCount
+		}
+		return left.UserID < right.UserID
+	})
 }
