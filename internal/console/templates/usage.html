@@ -113,7 +113,7 @@
       <article class="activity-item">
         <div class="activity-top">
           <strong>{{.ModelAlias}}</strong>
-          <span class="badge tone-neutral">{{money .CostMicroCents}}</span>
+          <span class="badge tone-neutral">{{money .CostMicroCents .Currency}}</span>
         </div>
         <p class="panel-copy"><span class="mono">{{.RequestID}}</span></p>
         <span class="meta">{{.ProviderID}} · {{orDash .APIKeyID}} · {{.InputTokens}} / {{.OutputTokens}} tokens · {{timefmt .CreatedAt}}</span>
@@ -218,7 +218,7 @@
             <td>{{protocolLabel .Protocol}}</td>
             <td><span class="badge tone-neutral">{{.StatusCode}}</span></td>
             <td>{{.InputTokens}} / {{.OutputTokens}}<span class="meta">total {{.TotalTokens}}</span></td>
-            <td>{{money .CostMicroCents}}</td>
+            <td>{{money .CostMicroCents .Currency}}</td>
             <td>{{.LatencyMS}}ms</td>
             <td>
               {{if .Estimated}}<span class="badge tone-warn">{{msg $.Locale "估算" "estimated"}}</span>{{end}}

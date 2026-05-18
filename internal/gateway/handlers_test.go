@@ -845,6 +845,43 @@ func TestQuotaRPMEnforced(t *testing.T) {
 	}
 }
 
+func TestGatewayAllowedModelsEnforced(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertModel(t, r, "upstream-chat")
+		writeJSON(t, w, map[string]any{"id": "chatcmpl_test", "object": "chat.completion", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}})
+	}))
+	defer upstream.Close()
+
+	store := testStore(t, upstream.URL)
+	ctx := context.Background()
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openai-test", UpstreamModel: "upstream-chat", Protocol: domain.ProtocolOpenAI, ProxyProfileID: "direct", PriceRuleID: "price_public-chat", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-4o", ProviderID: "openai-test", UpstreamModel: "upstream-chat", Protocol: domain.ProtocolOpenAI, ProxyProfileID: "direct", PriceRuleID: "price_public-chat", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAPIKey(ctx, domain.APIKey{ID: "test-key", Name: "codex-scoped", KeyHash: auth.HashAPIKey(testAPIKey), Prefix: auth.Prefix(testAPIKey), UserID: "user-1", OrganizationID: "org-1", ProjectID: "proj-1", Status: domain.StatusActive, AllowedProtocols: []string{domain.ProtocolOpenAI}, AllowedModels: []string{"gpt-5.4", "gpt-5.5", "gpt-5.5-pro"}, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	allowed := doRequest(t, server.URL+"/v1/chat/completions", http.MethodPost, []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`), map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer allowed.Body.Close()
+	if allowed.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(allowed.Body)
+		t.Fatalf("allowed status=%d body=%s", allowed.StatusCode, body)
+	}
+
+	blocked := doRequest(t, server.URL+"/v1/chat/completions", http.MethodPost, []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`), map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer blocked.Body.Close()
+	if blocked.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(blocked.Body)
+		t.Fatalf("blocked status=%d body=%s", blocked.StatusCode, body)
+	}
+}
+
 func testConfig() app.Config {
 	return app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
 }

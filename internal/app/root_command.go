@@ -6,10 +6,12 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/zltl/aiyolo/internal/artifacts"
 	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
@@ -22,30 +24,107 @@ func NewRootCommand() *cobra.Command {
 		SilenceUsage: true,
 		RunE:         runServe,
 	}
-	AddConfigFlags(cmd.Flags())
+	AddConfigFlags(cmd.PersistentFlags())
+	cmd.AddCommand(newPublishArtifactsCommand())
 	return cmd
 }
 
 func runServe(cmd *cobra.Command, _ []string) error {
-	configFile, err := cmd.Flags().GetString("config")
+	cfg, err := loadConfigFromCommand(cmd)
 	if err != nil {
-		return err
-	}
-	v, _, err := NewViper(configFile)
-	if err != nil {
-		return err
-	}
-	if err := BindStringFlags(v, cmd.Flags()); err != nil {
-		return err
-	}
-	cfg, err := LoadConfig(v)
-	if err != nil {
-		return err
-	}
-	if err := ApplyFlagOverrides(cmd, &cfg); err != nil {
 		return err
 	}
 	return Run(cmd.Context(), cfg)
+}
+
+func loadConfigFromCommand(cmd *cobra.Command) (Config, error) {
+	configFile, err := cmd.Flags().GetString("config")
+	if err != nil {
+		return Config{}, err
+	}
+	v, _, err := NewViper(configFile)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := BindStringFlags(v, cmd.Flags()); err != nil {
+		return Config{}, err
+	}
+	cfg, err := LoadConfig(v)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := ApplyFlagOverrides(cmd, &cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func newPublishArtifactsCommand() *cobra.Command {
+	var artifactSpecs []string
+	var releaseVersion string
+	cmd := &cobra.Command{
+		Use:          "publish-artifacts",
+		Short:        "Upload build artifacts to the configured S3/OSS bucket",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfigFromCommand(cmd)
+			if err != nil {
+				return err
+			}
+			publisher, err := artifacts.NewPublisher(cfg.Artifacts)
+			if err != nil {
+				return err
+			}
+			for _, spec := range artifactSpecs {
+				localPath, objectKey, err := parseArtifactSpec(spec)
+				if err != nil {
+					return err
+				}
+				for _, targetKey := range publishObjectKeys(objectKey, releaseVersion) {
+					published, err := publisher.UploadFile(cmd.Context(), localPath, targetKey)
+					if err != nil {
+						return err
+					}
+					if _, err := publisher.UploadSHA256(cmd.Context(), targetKey+".sha256", published.SHA256); err != nil {
+						return err
+					}
+					log.Printf("published artifact local=%q object_key=%q size=%d sha256=%s url=%q", localPath, published.ObjectKey, published.SizeBytes, published.SHA256, published.PublicURL)
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringArrayVar(&artifactSpecs, "artifact", nil, "Artifact mapping in the form localPath=objectKey (repeatable)")
+	cmd.Flags().StringVar(&releaseVersion, "version", "", "Release version used for versioned uploads and latest aliases")
+	_ = cmd.MarkFlagRequired("artifact")
+	return cmd
+}
+
+func publishObjectKeys(objectKey string, version string) []string {
+	stable, latest, versioned := artifacts.ReleaseObjectKeys(objectKey, version)
+	seen := make(map[string]struct{}, 3)
+	keys := make([]string, 0, 3)
+	for _, key := range []string{versioned, latest, stable} {
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func parseArtifactSpec(value string) (string, string, error) {
+	left, right, ok := strings.Cut(strings.TrimSpace(value), "=")
+	localPath := strings.TrimSpace(left)
+	objectKey := strings.Trim(strings.TrimSpace(right), "/")
+	if !ok || localPath == "" || objectKey == "" {
+		return "", "", errors.New("artifact must use localPath=objectKey")
+	}
+	return localPath, objectKey, nil
 }
 
 func Run(ctx context.Context, cfg Config) error {

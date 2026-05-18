@@ -46,3 +46,59 @@ func TestFetchOpenRouterModelsUsesMetadataContextLength(t *testing.T) {
 		t.Fatalf("third import=%+v", imports[2])
 	}
 }
+
+func TestFetchCompatibleModelsSupportsDeepSeekList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-ds-test" {
+			t.Fatalf("authorization=%q", got)
+		}
+		if got := r.Header.Get("HTTP-Referer"); got != "" {
+			t.Fatalf("http-referer=%q, want empty", got)
+		}
+		if got := r.Header.Get("X-Title"); got != "" {
+			t.Fatalf("x-title=%q, want empty", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro","context_length":1048576},{"id":"deepseek-chat"},{"id":"deepseek-reasoner"}]}`))
+	}))
+	defer server.Close()
+
+	imports, err := fetchCompatibleModels(context.Background(), domain.Provider{ID: "deepseek", BaseURL: server.URL, Protocol: domain.ProtocolOpenAI, SupportedProtocols: []string{domain.ProtocolOpenAI, domain.ProtocolAnthropic}, MasterKey: "sk-ds-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imports) != 4 {
+		t.Fatalf("import count=%d", len(imports))
+	}
+	importedByID := make(map[string]openRouterImportedModel, len(imports))
+	for _, imported := range imports {
+		importedByID[imported.Route.PublicName] = imported
+	}
+	flash := importedByID["deepseek-v4-flash"]
+	if flash.Route.PublicName != "deepseek-v4-flash" || flash.Route.Protocol != domain.ProtocolOpenAI {
+		t.Fatalf("flash import=%+v", flash)
+	}
+	if len(flash.Route.AllowedProtocols) != 2 || flash.Route.AllowedProtocols[0] != domain.ProtocolOpenAI || flash.Route.AllowedProtocols[1] != domain.ProtocolAnthropic {
+		t.Fatalf("flash protocols=%+v", flash.Route.AllowedProtocols)
+	}
+	if flash.Route.PriceRuleID == "" || flash.PricingRule.Currency != "CNY" || flash.PricingRule.InputPricePerMillionTokens != 100000000 || flash.PricingRule.OutputPricePerMillionTokens != 200000000 || flash.PricingRule.CacheReadPricePerMillionTokens != 2000000 || flash.PricingRule.CacheWritePricePerMillionTokens != 100000000 {
+		t.Fatalf("unexpected flash pricing=%+v", flash)
+	}
+	pro := importedByID["deepseek-v4-pro"]
+	if pro.Route.PublicName != "deepseek-v4-pro" || pro.Route.ContextTokens != 1048576 {
+		t.Fatalf("pro import=%+v", pro)
+	}
+	if pro.Route.PriceRuleID == "" || pro.PricingRule.Currency != "CNY" || pro.PricingRule.InputPricePerMillionTokens != 300000000 || pro.PricingRule.OutputPricePerMillionTokens != 600000000 || pro.PricingRule.CacheReadPricePerMillionTokens != 2500000 || pro.PricingRule.CacheWritePricePerMillionTokens != 300000000 {
+		t.Fatalf("unexpected pro pricing=%+v", pro)
+	}
+	for _, alias := range []string{"deepseek-chat", "deepseek-reasoner"} {
+		imported := importedByID[alias]
+		if imported.Route.PriceRuleID == "" || imported.PricingRule.Currency != "CNY" || imported.PricingRule.InputPricePerMillionTokens != 100000000 || imported.PricingRule.OutputPricePerMillionTokens != 200000000 || imported.PricingRule.CacheReadPricePerMillionTokens != 2000000 || imported.PricingRule.CacheWritePricePerMillionTokens != 100000000 {
+			t.Fatalf("unexpected alias pricing for %s: %+v", alias, imported)
+		}
+	}
+}

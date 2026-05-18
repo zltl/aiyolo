@@ -13,11 +13,13 @@ const (
 )
 
 type navItemView struct {
-	Key   string
-	Label string
-	Href  string
-	Icon  string
-	Tone  string
+	Key    string
+	Label  string
+	Href   string
+	Target string
+	Rel    string
+	Icon   string
+	Tone   string
 }
 
 type localeOptionView struct {
@@ -82,7 +84,8 @@ func localeSwitches(currentURI, locale string) []localeOptionView {
 func consoleNavItems(locale string) []navItemView {
 	return []navItemView{
 		{Key: "Dashboard", Label: consoleText(locale, "总览", "Dashboard"), Href: "/console/", Icon: "dashboard", Tone: "tone-clay"},
-		{Key: "Chat", Label: consoleText(locale, "对话", "Chat"), Href: "/console/chat", Icon: "chat", Tone: "tone-sea"},
+		{Key: "Codex", Label: consoleText(locale, "Codex", "Codex"), Href: "/console/codex", Icon: "codex", Tone: "tone-forest"},
+		{Key: "Chat", Label: consoleText(locale, "Chat", "Chat"), Href: "/console/chat", Target: "_blank", Rel: "noopener noreferrer", Icon: "chat", Tone: "tone-sea"},
 		{Key: "Usage", Label: consoleText(locale, "用量", "Usage"), Href: "/console/usage", Icon: "usage", Tone: "tone-sand"},
 		{Key: "Audit", Label: consoleText(locale, "审计", "Audit"), Href: "/console/audit", Icon: "audit", Tone: "tone-ink"},
 		{Key: "API Keys", Label: consoleText(locale, "API 密钥", "API Keys"), Href: "/console/api-keys", Icon: "keys", Tone: "tone-clay"},
@@ -97,6 +100,8 @@ func pageTitleLocalized(locale, title string) string {
 	switch title {
 	case "Dashboard":
 		return consoleText(locale, "总览", "Dashboard")
+	case "Codex":
+		return "Codex"
 	case "Chat":
 		return consoleText(locale, "对话", "Chat")
 	case "Usage":
@@ -124,6 +129,8 @@ func pageEyebrowLocalized(locale, title string) string {
 	switch title {
 	case "Dashboard":
 		return consoleText(locale, "控制中枢", "Control Center")
+	case "Codex":
+		return consoleText(locale, "Windows 安装器", "Windows Installer")
 	case "Chat":
 		return consoleText(locale, "对话工作台", "Conversation Workbench")
 	case "Usage":
@@ -151,8 +158,10 @@ func pageDescriptionLocalized(locale, title string) string {
 	switch title {
 	case "Dashboard":
 		return consoleText(locale, "把请求、错误、费用和热点路由压缩进一块更易读的运营总览。", "Compress requests, errors, spend, and hot routes into a faster operational overview.")
+	case "Codex":
+		return consoleText(locale, "为 Windows 用户生成一次性 AIYolo Codex 安装命令，并自动配置受限 API Key。", "Generate one-time Windows AIYolo Codex install commands with scoped API keys configured automatically.")
 	case "Chat":
-		return consoleText(locale, "直接在控制台里和已保存的 public model 对话，验证路由、代理与上游响应是否符合预期。", "Talk to a saved public model directly from the console to validate routing, proxy selection, and upstream behavior.")
+		return consoleText(locale, "直接在独立 chat 工作区里验证 public model 的路由、代理与上游响应。", "Use the dedicated chat workspace to validate routing, proxies, and upstream behavior.")
 	case "Usage":
 		return consoleText(locale, "在同一页里查看用量账本、近 30 天费用和消费热点，不再拆成两张页面。", "Review the usage ledger, 30-day spend, and cost hotspots in one place instead of two pages.")
 	case "Audit":
@@ -160,7 +169,7 @@ func pageDescriptionLocalized(locale, title string) string {
 	case "API Keys":
 		return consoleText(locale, "创建并收紧调用方凭证，把预算、协议和模型边界留在网关内。", "Issue client credentials while keeping budget, protocol, and model boundaries inside the gateway.")
 	case "Providers":
-		return consoleText(locale, "管理真实上游渠道、OpenRouter 自动导入和运行时权重。", "Manage upstream channels, OpenRouter sync, and runtime weights.")
+		return consoleText(locale, "管理真实上游渠道、一键导入模型和运行时权重。", "Manage upstream channels, one-click model sync, and runtime weights.")
 	case "Models":
 		return consoleText(locale, "把稳定的对外模型名映射到真实 provider 与代理路径。", "Map stable public model names to real providers and proxy paths.")
 	case "Proxies":

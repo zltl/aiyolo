@@ -1117,7 +1117,7 @@ func (handler *Handler) resolveRoute(ctx context.Context, model string) (domain.
 }
 
 func (handler *Handler) buildUpstreamRequest(ctx context.Context, clientRequest *http.Request, endpoint string, provider domain.Provider, protocol string, body []byte) (*http.Request, error) {
-	upstreamURL, err := joinUpstreamURL(provider.BaseURL, endpoint)
+	upstreamURL, err := joinUpstreamURL(domain.ProviderBaseURLForProtocol(provider, protocol), endpoint)
 	if err != nil {
 		return nil, err
 	}

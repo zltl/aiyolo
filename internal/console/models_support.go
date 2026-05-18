@@ -179,10 +179,30 @@ func newOpenAICompatibleClient(provider domain.Provider, baseClient *http.Client
 }
 
 func isOpenRouterProvider(provider domain.Provider) bool {
-	if strings.EqualFold(strings.TrimSpace(provider.ID), "openrouter") {
-		return true
+	return domain.IsOpenRouterProvider(provider)
+}
+
+func isDeepSeekProvider(provider domain.Provider) bool {
+	return domain.IsDeepSeekProvider(provider)
+}
+
+func supportsCompatibleModelImportProvider(provider domain.Provider) bool {
+	if domain.ProviderPrimaryProtocol(provider) != domain.ProtocolOpenAI {
+		return false
 	}
-	return strings.Contains(strings.ToLower(strings.TrimSpace(provider.BaseURL)), "openrouter.ai")
+	return isOpenRouterProvider(provider) || isDeepSeekProvider(provider)
+}
+
+func providerProtocolSummary(provider domain.Provider) string {
+	protocols := domain.ProviderSupportedProtocols(provider)
+	if len(protocols) == 0 {
+		protocols = []string{domain.ProtocolOpenAI}
+	}
+	labels := make([]string, 0, len(protocols))
+	for _, protocol := range protocols {
+		labels = append(labels, protocolLabel(protocol))
+	}
+	return strings.Join(labels, " / ")
 }
 
 func directProxyProfile(provider domain.Provider) domain.ProxyProfile {

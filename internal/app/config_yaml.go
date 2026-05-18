@@ -37,6 +37,34 @@ func bindEnvKeys(v *viper.Viper) {
 		"app.auto_migrate":                      "AIYOLO_AUTO_MIGRATE",
 		"app.seed_from_env":                     "AIYOLO_SEED_FROM_ENV",
 		"app.seed_api_key":                      "AIYOLO_SEED_API_KEY",
+		"artifacts.public_base_url":             "AIYOLO_ARTIFACTS_PUBLIC_BASE_URL",
+		"artifacts.proxy_base_path":             "AIYOLO_ARTIFACTS_PROXY_BASE_PATH",
+		"artifacts.s3.endpoint":                 "AIYOLO_ARTIFACTS_S3_ENDPOINT",
+		"artifacts.s3.internal_endpoint":        "AIYOLO_ARTIFACTS_S3_INTERNAL_ENDPOINT",
+		"artifacts.s3.region":                   "AIYOLO_ARTIFACTS_S3_REGION",
+		"artifacts.s3.bucket":                   "AIYOLO_ARTIFACTS_S3_BUCKET",
+		"artifacts.s3.prefix":                   "AIYOLO_ARTIFACTS_S3_PREFIX",
+		"artifacts.s3.access_key_id":            "AIYOLO_ARTIFACTS_S3_ACCESS_KEY_ID",
+		"artifacts.s3.access_key_secret":        "AIYOLO_ARTIFACTS_S3_ACCESS_KEY_SECRET",
+		"artifacts.s3.bucket_domain":            "AIYOLO_ARTIFACTS_S3_BUCKET_DOMAIN",
+		"artifacts.s3.cname_domain":             "AIYOLO_ARTIFACTS_S3_CNAME_DOMAIN",
+		"artifacts.s3.use_internal":             "AIYOLO_ARTIFACTS_S3_USE_INTERNAL",
+		"chat.attachments.public_base_url":      "AIYOLO_CHAT_ATTACHMENTS_PUBLIC_BASE_URL",
+		"chat.attachments.proxy_base_path":      "AIYOLO_CHAT_ATTACHMENTS_PROXY_BASE_PATH",
+		"chat.attachments.s3.endpoint":          "AIYOLO_CHAT_ATTACHMENTS_S3_ENDPOINT",
+		"chat.attachments.s3.internal_endpoint": "AIYOLO_CHAT_ATTACHMENTS_S3_INTERNAL_ENDPOINT",
+		"chat.attachments.s3.region":            "AIYOLO_CHAT_ATTACHMENTS_S3_REGION",
+		"chat.attachments.s3.bucket":            "AIYOLO_CHAT_ATTACHMENTS_S3_BUCKET",
+		"chat.attachments.s3.prefix":            "AIYOLO_CHAT_ATTACHMENTS_S3_PREFIX",
+		"chat.attachments.s3.access_key_id":     "AIYOLO_CHAT_ATTACHMENTS_S3_ACCESS_KEY_ID",
+		"chat.attachments.s3.access_key_secret": "AIYOLO_CHAT_ATTACHMENTS_S3_ACCESS_KEY_SECRET",
+		"chat.attachments.s3.bucket_domain":     "AIYOLO_CHAT_ATTACHMENTS_S3_BUCKET_DOMAIN",
+		"chat.attachments.s3.cname_domain":      "AIYOLO_CHAT_ATTACHMENTS_S3_CNAME_DOMAIN",
+		"chat.attachments.s3.use_internal":      "AIYOLO_CHAT_ATTACHMENTS_S3_USE_INTERNAL",
+		"codex.public_base_url":                 "AIYOLO_CODEX_PUBLIC_BASE_URL",
+		"codex.install_token_ttl":               "AIYOLO_CODEX_INSTALL_TOKEN_TTL",
+		"codex.windows_wrapper_url":             "AIYOLO_CODEX_WINDOWS_WRAPPER_URL",
+		"codex.windows_wrapper_sha256":          "AIYOLO_CODEX_WINDOWS_WRAPPER_SHA256",
 		"app.read_timeout":                      "AIYOLO_READ_TIMEOUT",
 		"app.write_timeout":                     "AIYOLO_WRITE_TIMEOUT",
 		"app.idle_timeout":                      "AIYOLO_IDLE_TIMEOUT",
@@ -60,16 +88,20 @@ func bindEnvKeys(v *viper.Viper) {
 
 func BindStringFlags(v *viper.Viper, flags *pflag.FlagSet) error {
 	bindings := map[string]string{
-		"config":           "config",
-		"http-addr":        "app.http_addr",
-		"database-url":     "database.url",
-		"seed-api-key":     "app.seed_api_key",
-		"secret-key":       "auth.secret_key",
-		"admin-email":      "auth.admin_email",
-		"admin-password":   "auth.admin_password",
-		"read-timeout":     "app.read_timeout",
-		"write-timeout":    "app.write_timeout",
-		"idle-timeout":     "app.idle_timeout",
+		"config":                       "config",
+		"http-addr":                    "app.http_addr",
+		"database-url":                 "database.url",
+		"seed-api-key":                 "app.seed_api_key",
+		"codex-public-base-url":        "codex.public_base_url",
+		"codex-install-token-ttl":      "codex.install_token_ttl",
+		"codex-windows-wrapper-url":    "codex.windows_wrapper_url",
+		"codex-windows-wrapper-sha256": "codex.windows_wrapper_sha256",
+		"secret-key":                   "auth.secret_key",
+		"admin-email":                  "auth.admin_email",
+		"admin-password":               "auth.admin_password",
+		"read-timeout":                 "app.read_timeout",
+		"write-timeout":                "app.write_timeout",
+		"idle-timeout":                 "app.idle_timeout",
 	}
 	for flagName, key := range bindings {
 		if err := v.BindPFlag(key, flags.Lookup(flagName)); err != nil {
@@ -120,6 +152,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("app.read_timeout", "30s")
 	v.SetDefault("app.write_timeout", "0s")
 	v.SetDefault("app.idle_timeout", "120s")
+	v.SetDefault("artifacts.proxy_base_path", "/artifacts")
+	v.SetDefault("chat.attachments.proxy_base_path", "/console/chat/attachments/files")
+	v.SetDefault("codex.install_token_ttl", "15m")
+	v.SetDefault("codex.windows_wrapper_url", "/console/codex/artifacts/aiyolo.exe")
 	v.SetDefault("database.name", "bbflow")
 	v.SetDefault("database.schema", "aiyolo")
 	v.SetDefault("database.sslmode", "disable")
@@ -133,6 +169,10 @@ func AddConfigFlags(flags *pflag.FlagSet) {
 	flags.Bool("auto-migrate", false, "Run database migrations before serving")
 	flags.Bool("seed-from-env", false, "Seed built-in defaults and API key settings before serving")
 	flags.String("seed-api-key", "", "Seed a local API key at startup")
+	flags.String("codex-public-base-url", "", "Browser-facing AIYolo base URL used in Codex install scripts")
+	flags.String("codex-install-token-ttl", "", "Codex install link lifetime, e.g. 15m")
+	flags.String("codex-windows-wrapper-url", "", "Windows aiyolo.exe wrapper download URL or console path")
+	flags.String("codex-windows-wrapper-sha256", "", "Optional SHA-256 checksum for the Windows aiyolo.exe wrapper")
 	flags.String("secret-key", "", "Application secret key")
 	flags.String("admin-email", "", "Console admin email")
 	flags.String("admin-password", "", "Console admin password")

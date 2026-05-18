@@ -126,7 +126,7 @@
           {{with index $.PricingRules .PriceRuleID}}
           <div>
             <dt>{{msg $.Locale "计费" "Pricing"}}</dt>
-            <dd>{{money .InputPricePerMillionTokens}} / 1M in{{if gt .OutputPricePerMillionTokens 0}} · {{money .OutputPricePerMillionTokens}} / 1M out{{end}}{{if gt .CacheReadPricePerMillionTokens 0}} · {{money .CacheReadPricePerMillionTokens}} / 1M cache read{{end}}{{if gt .CacheWritePricePerMillionTokens 0}} · {{money .CacheWritePricePerMillionTokens}} / 1M cache write{{end}}</dd>
+            <dd>{{money .InputPricePerMillionTokens .Currency}} / 1M in{{if gt .OutputPricePerMillionTokens 0}} · {{money .OutputPricePerMillionTokens .Currency}} / 1M out{{end}}{{if gt .CacheReadPricePerMillionTokens 0}} · {{money .CacheReadPricePerMillionTokens .Currency}} / 1M cache read{{end}}{{if and (gt .CacheWritePricePerMillionTokens 0) (ne .CacheWritePricePerMillionTokens .InputPricePerMillionTokens)}} · {{money .CacheWritePricePerMillionTokens .Currency}} / 1M cache write{{end}}</dd>
           </div>
           {{end}}
           {{end}}

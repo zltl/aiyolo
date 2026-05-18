@@ -14,6 +14,7 @@ import (
 type MemoryStore struct {
 	mu           sync.RWMutex
 	apiKeys      map[string]domain.APIKey
+	codexTokens  map[string]domain.CodexInstallToken
 	providers    map[string]domain.Provider
 	routes       map[string]domain.ModelRoute
 	pricingRules map[string]domain.PricingRule
@@ -33,6 +34,7 @@ type memoryLimitWindow struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		apiKeys:      make(map[string]domain.APIKey),
+		codexTokens:  make(map[string]domain.CodexInstallToken),
 		providers:    make(map[string]domain.Provider),
 		routes:       make(map[string]domain.ModelRoute),
 		pricingRules: make(map[string]domain.PricingRule),
@@ -100,6 +102,48 @@ func (store *MemoryStore) TouchAPIKey(_ context.Context, id string) error {
 		}
 	}
 	return nil
+}
+
+func (store *MemoryStore) CreateCodexInstallToken(_ context.Context, token domain.CodexInstallToken) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	now := time.Now().UTC()
+	if token.CreatedAt.IsZero() {
+		token.CreatedAt = now
+	}
+	if token.Platform == "" {
+		token.Platform = "windows"
+	}
+	token.AllowedModels = nonNilStrings(token.AllowedModels)
+	store.codexTokens[token.TokenHash] = token
+	return nil
+}
+
+func (store *MemoryStore) RedeemCodexInstallToken(_ context.Context, tokenHash string, key domain.APIKey, redeemedAt time.Time) (domain.CodexInstallToken, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if redeemedAt.IsZero() {
+		redeemedAt = time.Now().UTC()
+	}
+	token, ok := store.codexTokens[tokenHash]
+	if !ok || token.UsedAt != nil || !redeemedAt.Before(token.ExpiresAt) {
+		return domain.CodexInstallToken{}, ErrNotFound
+	}
+	if key.CreatedAt.IsZero() {
+		key.CreatedAt = redeemedAt
+	}
+	key.AllowedProtocols = nonNilStrings(key.AllowedProtocols)
+	key.AllowedModels = nonNilStrings(key.AllowedModels)
+	for hash, existing := range store.apiKeys {
+		if existing.ID == key.ID && hash != key.KeyHash {
+			delete(store.apiKeys, hash)
+		}
+	}
+	store.apiKeys[key.KeyHash] = key
+	token.UsedAt = &redeemedAt
+	token.APIKeyID = key.ID
+	store.codexTokens[tokenHash] = token
+	return token, nil
 }
 
 func (store *MemoryStore) ReserveQuota(_ context.Context, request domain.QuotaRequest) (domain.QuotaReservation, error) {

@@ -145,6 +145,68 @@ func (store *PostgresStore) TouchAPIKey(ctx context.Context, id string) error {
 	return err
 }
 
+func (store *PostgresStore) CreateCodexInstallToken(ctx context.Context, token domain.CodexInstallToken) error {
+	if token.CreatedAt.IsZero() {
+		token.CreatedAt = time.Now().UTC()
+	}
+	if token.Platform == "" {
+		token.Platform = "windows"
+	}
+	token.AllowedModels = nonNilStrings(token.AllowedModels)
+	_, err := store.pool.Exec(ctx, `
+INSERT INTO codex_install_tokens (id, token_hash, created_by, platform, default_model, allowed_models, expires_at, created_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT (id) DO UPDATE SET token_hash = excluded.token_hash, created_by = excluded.created_by, platform = excluded.platform, default_model = excluded.default_model, allowed_models = excluded.allowed_models, expires_at = excluded.expires_at, created_at = excluded.created_at, used_at = NULL, api_key_id = ''`,
+		token.ID, token.TokenHash, token.CreatedBy, token.Platform, token.DefaultModel, token.AllowedModels, token.ExpiresAt, token.CreatedAt)
+	return err
+}
+
+func (store *PostgresStore) RedeemCodexInstallToken(ctx context.Context, tokenHash string, key domain.APIKey, redeemedAt time.Time) (domain.CodexInstallToken, error) {
+	if redeemedAt.IsZero() {
+		redeemedAt = time.Now().UTC()
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return domain.CodexInstallToken{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var token domain.CodexInstallToken
+	err = tx.QueryRow(ctx, `SELECT id, token_hash, created_by, platform, default_model, allowed_models, expires_at, created_at, used_at, api_key_id FROM codex_install_tokens WHERE token_hash = $1 FOR UPDATE`, tokenHash).Scan(&token.ID, &token.TokenHash, &token.CreatedBy, &token.Platform, &token.DefaultModel, &token.AllowedModels, &token.ExpiresAt, &token.CreatedAt, &token.UsedAt, &token.APIKeyID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.CodexInstallToken{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.CodexInstallToken{}, err
+	}
+	if token.UsedAt != nil || !redeemedAt.Before(token.ExpiresAt) {
+		return domain.CodexInstallToken{}, ErrNotFound
+	}
+	if key.CreatedAt.IsZero() {
+		key.CreatedAt = redeemedAt
+	}
+	key.AllowedProtocols = nonNilStrings(key.AllowedProtocols)
+	key.AllowedModels = nonNilStrings(key.AllowedModels)
+	_, err = tx.Exec(ctx, `
+INSERT INTO api_keys (id, name, key_hash, prefix, user_id, organization_id, project_id, status, allowed_protocols, allowed_models, rpm_limit, tpm_limit, concurrent_limit, daily_budget_cents, monthly_budget_cents, expires_at, created_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+ON CONFLICT (id) DO UPDATE SET name = excluded.name, key_hash = excluded.key_hash, prefix = excluded.prefix, user_id = excluded.user_id, organization_id = excluded.organization_id, project_id = excluded.project_id, status = excluded.status, allowed_protocols = excluded.allowed_protocols, allowed_models = excluded.allowed_models, rpm_limit = excluded.rpm_limit, tpm_limit = excluded.tpm_limit, concurrent_limit = excluded.concurrent_limit, daily_budget_cents = excluded.daily_budget_cents, monthly_budget_cents = excluded.monthly_budget_cents, expires_at = excluded.expires_at`,
+		key.ID, key.Name, key.KeyHash, key.Prefix, key.UserID, key.OrganizationID, key.ProjectID, normalizeStatus(key.Status, domain.StatusActive), key.AllowedProtocols, key.AllowedModels, key.RPMLimit, key.TPMLimit, key.ConcurrentLimit, key.DailyBudgetCents, key.MonthlyBudgetCents, key.ExpiresAt, key.CreatedAt)
+	if err != nil {
+		return domain.CodexInstallToken{}, err
+	}
+	_, err = tx.Exec(ctx, `UPDATE codex_install_tokens SET used_at = $1, api_key_id = $2 WHERE id = $3`, redeemedAt, key.ID, token.ID)
+	if err != nil {
+		return domain.CodexInstallToken{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.CodexInstallToken{}, err
+	}
+	token.UsedAt = &redeemedAt
+	token.APIKeyID = key.ID
+	return token, nil
+}
+
 func (store *PostgresStore) ReserveQuota(ctx context.Context, request domain.QuotaRequest) (domain.QuotaReservation, error) {
 	now := request.Now
 	if now.IsZero() {

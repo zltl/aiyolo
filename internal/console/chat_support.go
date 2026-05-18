@@ -2,22 +2,27 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"mime"
 	"net/http"
-	"sort"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
 
+	"github.com/zltl/aiyolo/internal/artifacts"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
 )
 
 const (
 	consoleChatEndpoint            = "/console/chat"
+	consoleChatFormMaxMemory       = 1 << 20
 	consoleChatMaxCompletionTokens = 768
+	consoleChatEmptyOutput         = "No text returned."
 )
 
 type consoleChatRouteView struct {
@@ -29,15 +34,29 @@ type consoleChatRouteView struct {
 }
 
 type consoleChatFormView struct {
-	PublicName   string
-	SystemPrompt string
-	Draft        string
+	ClientSessionID string                      `json:"clientSessionId"`
+	PublicName      string                      `json:"publicName"`
+	SystemPrompt    string                      `json:"systemPrompt"`
+	Draft           string                      `json:"draft"`
+	Attachments     []consoleChatAttachmentView `json:"attachments,omitempty"`
+}
+
+type consoleChatAttachmentView struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ObjectKey string `json:"objectKey"`
+	URL       string `json:"url"`
+	MediaType string `json:"mediaType"`
+	SizeBytes int64  `json:"sizeBytes"`
 }
 
 type consoleChatMessageView struct {
-	Role    string
-	Label   string
-	Content string
+	ID          string                      `json:"id"`
+	Role        string                      `json:"role"`
+	Label       string                      `json:"label"`
+	Content     string                      `json:"content"`
+	Reasoning   string                      `json:"reasoning,omitempty"`
+	Attachments []consoleChatAttachmentView `json:"attachments,omitempty"`
 }
 
 type consoleChatPromptView struct {
@@ -45,12 +64,15 @@ type consoleChatPromptView struct {
 	Prompt string
 }
 
+var consoleChatAllowedExactModels = []string{"deepseek-v4-pro", "gpt-5.4"}
+
 type consoleChatResultView struct {
 	PublicName    string
 	ProviderID    string
 	ProviderName  string
 	UpstreamModel string
 	Output        string
+	Reasoning     string `json:"reasoning,omitempty"`
 	ResponseID    string
 	FinishReason  string
 	DurationMS    int64
@@ -64,32 +86,56 @@ type consoleChatExecution struct {
 }
 
 type consoleChatPageState struct {
-	Form          consoleChatFormView
-	Routes        []consoleChatRouteView
-	Messages      []consoleChatMessageView
-	Presets       []consoleChatPromptView
-	SelectedRoute consoleChatRouteView
-	Result        *consoleChatResultView
-	Error         string
+	Form                    consoleChatFormView
+	Routes                  []consoleChatRouteView
+	Messages                []consoleChatMessageView
+	Presets                 []consoleChatPromptView
+	SelectedRoute           consoleChatRouteView
+	Result                  *consoleChatResultView
+	Error                   string
+	AttachmentUploadURL     string
+	AttachmentUploadEnabled bool
+	AttachmentMaxBytes      int64
 }
 
 func (state consoleChatPageState) data() map[string]any {
 	return map[string]any{
-		"Title":             "Chat",
-		"ChatForm":          state.Form,
-		"ChatRoutes":        state.Routes,
-		"ChatMessages":      state.Messages,
-		"ChatPresets":       state.Presets,
-		"SelectedChatRoute": state.SelectedRoute,
-		"ChatResult":        state.Result,
-		"ChatError":         state.Error,
+		"Title":                       "Chat",
+		"ChatForm":                    state.Form,
+		"ChatRoutes":                  state.Routes,
+		"ChatMessages":                state.Messages,
+		"ChatPresets":                 state.Presets,
+		"SelectedChatRoute":           state.SelectedRoute,
+		"ChatResult":                  state.Result,
+		"ChatError":                   state.Error,
+		"ChatHistoryJSON":             consoleChatJSON(state.Messages),
+		"ChatDraftAttachmentsJSON":    consoleChatJSON(state.Form.Attachments),
+		"ChatAttachmentUploadURL":     state.AttachmentUploadURL,
+		"ChatAttachmentUploadEnabled": state.AttachmentUploadEnabled,
+		"ChatAttachmentMaxBytes":      state.AttachmentMaxBytes,
 	}
+}
+
+func consoleChatJSON(value any) string {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return "[]"
+	}
+	return string(payload)
+}
+
+func parseConsoleChatForm(r *http.Request) error {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err == nil && mediaType == "multipart/form-data" {
+		return r.ParseMultipartForm(consoleChatFormMaxMemory)
+	}
+	return r.ParseForm()
 }
 
 func defaultConsoleChatSystemPrompt(locale string) string {
 	return consoleText(locale,
-		"你正在 AIYolo 控制台里协助运维验证模型路由。回答保持简洁、具体，并尽量贴近当前选中的模型与路由上下文。",
-		"You are assisting an operator inside the AIYolo console. Keep answers concise, concrete, and grounded in the selected model route.")
+		"你正在 AIYolo 提供的 AI 助手，回复要自然、流畅、专业，像人类助理一样倾听并回应。鼓励使用格式化工具（如粗体、无序列表、表格）保持内容条理清晰，避免大段密集的文字。在处理情感问题时要求保持同理心，但同时也要基于事实与现实。",
+		"You are an AI assistant provided by AIYolo. Your responses should be natural, fluent, and professional, listening and responding like a human assistant. Use formatting tools such as bold text, bullet lists, and tables to keep the content clear and well organized, and avoid large dense blocks of text. When handling emotional issues, remain empathetic while staying grounded in facts and reality.")
 }
 
 func defaultConsoleChatPrompts(locale string) []consoleChatPromptView {
@@ -136,11 +182,194 @@ func normalizeConsoleChatRole(role string) string {
 }
 
 func buildConsoleChatMessage(locale, role, content string) consoleChatMessageView {
-	role = normalizeConsoleChatRole(role)
-	return consoleChatMessageView{Role: role, Label: consoleChatRoleLabel(locale, role), Content: strings.TrimSpace(content)}
+	return buildConsoleChatMessageWithAttachments(locale, role, content, nil)
 }
 
-func parseConsoleChatMessages(r *http.Request, locale string) []consoleChatMessageView {
+func buildConsoleChatMessageWithReasoning(locale, role, content, reasoning string) consoleChatMessageView {
+	message := buildConsoleChatMessage(locale, role, content)
+	message.Reasoning = strings.TrimSpace(reasoning)
+	return message
+}
+
+func buildConsoleChatMessageWithAttachments(locale, role, content string, attachments []consoleChatAttachmentView) consoleChatMessageView {
+	role = normalizeConsoleChatRole(role)
+	return consoleChatMessageView{ID: newConsoleID("msg"), Role: role, Label: consoleChatRoleLabel(locale, role), Content: strings.TrimSpace(content), Attachments: cloneConsoleChatAttachments(attachments)}
+}
+
+func consoleChatDisplayOutput(locale string, result consoleChatResultView) string {
+	output := strings.TrimSpace(result.Output)
+	if output != "" && output != consoleChatEmptyOutput {
+		return output
+	}
+	if strings.TrimSpace(result.Reasoning) != "" {
+		return consoleText(locale,
+			"模型只返回了思考过程，没有返回最终答复。",
+			"The model returned reasoning but no final answer text.")
+	}
+	if output != "" {
+		return output
+	}
+	return consoleChatEmptyOutput
+}
+
+func cloneConsoleChatAttachments(attachments []consoleChatAttachmentView) []consoleChatAttachmentView {
+	if len(attachments) == 0 {
+		return nil
+	}
+	cloned := make([]consoleChatAttachmentView, 0, len(attachments))
+	for _, attachment := range attachments {
+		cloned = append(cloned, attachment)
+	}
+	return cloned
+}
+
+func normalizeConsoleChatAttachment(cfg artifacts.Config, attachment consoleChatAttachmentView) (consoleChatAttachmentView, bool) {
+	attachment.ID = strings.TrimSpace(attachment.ID)
+	if attachment.ID == "" {
+		attachment.ID = newConsoleID("att")
+	}
+	attachment.ObjectKey = artifacts.NormalizeObjectKey(attachment.ObjectKey)
+	if attachment.ObjectKey == "" {
+		return consoleChatAttachmentView{}, false
+	}
+	attachment.Name = strings.TrimSpace(attachment.Name)
+	if attachment.Name == "" {
+		attachment.Name = path.Base(attachment.ObjectKey)
+	}
+	attachment.MediaType = strings.ToLower(strings.TrimSpace(attachment.MediaType))
+	if attachment.MediaType == "" {
+		attachment.MediaType = "application/octet-stream"
+	}
+	if attachment.SizeBytes < 0 {
+		attachment.SizeBytes = 0
+	}
+	attachment.URL = cfg.PublicObjectURL(attachment.ObjectKey)
+	if strings.TrimSpace(attachment.URL) == "" {
+		return consoleChatAttachmentView{}, false
+	}
+	return attachment, true
+}
+
+func normalizeConsoleChatMessage(locale string, message consoleChatMessageView, cfg artifacts.Config) (consoleChatMessageView, bool) {
+	message.Role = normalizeConsoleChatRole(message.Role)
+	message.Content = strings.TrimSpace(message.Content)
+	message.Reasoning = strings.TrimSpace(message.Reasoning)
+	message.ID = strings.TrimSpace(message.ID)
+	if message.ID == "" {
+		message.ID = newConsoleID("msg")
+	}
+	attachments := make([]consoleChatAttachmentView, 0, len(message.Attachments))
+	for _, attachment := range message.Attachments {
+		normalized, ok := normalizeConsoleChatAttachment(cfg, attachment)
+		if !ok {
+			continue
+		}
+		attachments = append(attachments, normalized)
+	}
+	message.Attachments = attachments
+	if message.Role == "" || (message.Content == "" && message.Reasoning == "" && len(message.Attachments) == 0) {
+		return consoleChatMessageView{}, false
+	}
+	message.Label = consoleChatRoleLabel(locale, message.Role)
+	return message, true
+}
+
+func parseConsoleChatDraftAttachments(r *http.Request, cfg artifacts.Config) []consoleChatAttachmentView {
+	raw := strings.TrimSpace(r.FormValue("chat_draft_attachments_json"))
+	if raw == "" {
+		return nil
+	}
+	var attachments []consoleChatAttachmentView
+	if err := json.Unmarshal([]byte(raw), &attachments); err != nil {
+		return nil
+	}
+	views := make([]consoleChatAttachmentView, 0, len(attachments))
+	for _, attachment := range attachments {
+		normalized, ok := normalizeConsoleChatAttachment(cfg, attachment)
+		if !ok {
+			continue
+		}
+		views = append(views, normalized)
+	}
+	return views
+}
+
+func consoleChatAllowedModelSlot(raw string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return "", false
+	}
+	for _, exact := range consoleChatAllowedExactModels {
+		if normalized == exact || strings.HasSuffix(normalized, "/"+exact) {
+			return exact, true
+		}
+	}
+	return "", false
+}
+
+func consoleChatRouteSlot(route domain.ModelRoute) (string, bool) {
+	if slot, ok := consoleChatAllowedModelSlot(route.PublicName); ok {
+		return slot, true
+	}
+	return consoleChatAllowedModelSlot(route.UpstreamModel)
+}
+
+func consoleChatRouteSlotPriority(route domain.ModelRoute, slot string) int {
+	publicName := strings.ToLower(strings.TrimSpace(route.PublicName))
+	upstreamModel := strings.ToLower(strings.TrimSpace(route.UpstreamModel))
+	switch {
+	case publicName == slot:
+		return 0
+	case upstreamModel == slot:
+		return 1
+	case strings.HasSuffix(publicName, "/"+slot):
+		return 2
+	case strings.HasSuffix(upstreamModel, "/"+slot):
+		return 3
+	default:
+		return 4
+	}
+	}
+
+func shouldPreferConsoleChatRoute(candidate, current domain.ModelRoute, slot string) bool {
+	candidatePriority := consoleChatRouteSlotPriority(candidate, slot)
+	currentPriority := consoleChatRouteSlotPriority(current, slot)
+	if candidatePriority != currentPriority {
+		return candidatePriority < currentPriority
+	}
+	candidateName := strings.TrimSpace(candidate.PublicName)
+	currentName := strings.TrimSpace(current.PublicName)
+	if len(candidateName) != len(currentName) {
+		return len(candidateName) < len(currentName)
+	}
+	if candidate.Priority != current.Priority {
+		return candidate.Priority < current.Priority
+	}
+	if candidate.Weight != current.Weight {
+		return candidate.Weight > current.Weight
+	}
+	if candidateName != currentName {
+		return candidateName < currentName
+	}
+	return strings.TrimSpace(candidate.ProviderID) < strings.TrimSpace(current.ProviderID)
+}
+
+func parseConsoleChatMessages(r *http.Request, locale string, cfg artifacts.Config) []consoleChatMessageView {
+	raw := strings.TrimSpace(r.FormValue("chat_history_json"))
+	if raw != "" {
+		var decoded []consoleChatMessageView
+		if err := json.Unmarshal([]byte(raw), &decoded); err == nil {
+			messages := make([]consoleChatMessageView, 0, len(decoded))
+			for _, message := range decoded {
+				normalized, ok := normalizeConsoleChatMessage(locale, message, cfg)
+				if !ok {
+					continue
+				}
+				messages = append(messages, normalized)
+			}
+			return messages
+		}
+	}
 	roles := r.Form["chat_message_role"]
 	contents := r.Form["chat_message_content"]
 	limit := len(roles)
@@ -149,8 +378,8 @@ func parseConsoleChatMessages(r *http.Request, locale string) []consoleChatMessa
 	}
 	messages := make([]consoleChatMessageView, 0, limit)
 	for idx := 0; idx < limit; idx++ {
-		message := buildConsoleChatMessage(locale, roles[idx], contents[idx])
-		if message.Role == "" || message.Content == "" {
+		message, ok := normalizeConsoleChatMessage(locale, consoleChatMessageView{Role: roles[idx], Content: contents[idx]}, cfg)
+		if !ok {
 			continue
 		}
 		messages = append(messages, message)
@@ -164,9 +393,17 @@ func consoleChatRoutes(routes []domain.ModelRoute, providers []domain.Provider) 
 		providerByID[provider.ID] = provider
 	}
 
-	views := make([]consoleChatRouteView, 0, len(routes))
+	type selectedConsoleChatRoute struct {
+		route domain.ModelRoute
+		view  consoleChatRouteView
+	}
+	selected := make(map[string]selectedConsoleChatRoute, len(consoleChatAllowedExactModels))
 	for _, route := range routes {
 		if strings.TrimSpace(route.PublicName) == "" || !route.Enabled {
+			continue
+		}
+		slot, ok := consoleChatRouteSlot(route)
+		if !ok {
 			continue
 		}
 		provider, ok := providerByID[route.ProviderID]
@@ -180,17 +417,27 @@ func consoleChatRoutes(routes []domain.ModelRoute, providers []domain.Provider) 
 		if protocol == "" {
 			continue
 		}
-		views = append(views, consoleChatRouteView{
+		candidate := selectedConsoleChatRoute{route: route, view: consoleChatRouteView{
 			PublicName:    route.PublicName,
 			ProviderID:    provider.ID,
 			ProviderName:  firstNonEmpty(strings.TrimSpace(provider.Name), provider.ID),
 			UpstreamModel: firstNonEmpty(route.UpstreamModel, route.PublicName),
 			Protocol:      protocol,
-		})
+		}}
+		current, exists := selected[slot]
+		if exists && !shouldPreferConsoleChatRoute(route, current.route, slot) {
+			continue
+		}
+		selected[slot] = candidate
 	}
-	sort.Slice(views, func(i, j int) bool {
-		return views[i].PublicName < views[j].PublicName
-	})
+	views := make([]consoleChatRouteView, 0, len(selected))
+	for _, slot := range consoleChatAllowedExactModels {
+		candidate, ok := selected[slot]
+		if !ok {
+			continue
+		}
+		views = append(views, candidate.view)
+	}
 	return views
 }
 
@@ -216,13 +463,18 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 	locale := resolveConsoleLocale(r)
 	state := consoleChatPageState{
 		Form: consoleChatFormView{
-			PublicName:   strings.TrimSpace(r.FormValue("chat_public_name")),
-			SystemPrompt: strings.TrimSpace(r.FormValue("chat_system_prompt")),
-			Draft:        strings.TrimSpace(r.FormValue("chat_draft")),
+			ClientSessionID: strings.TrimSpace(r.FormValue("chat_client_session_id")),
+			PublicName:      strings.TrimSpace(r.FormValue("chat_public_name")),
+			SystemPrompt:    strings.TrimSpace(r.FormValue("chat_system_prompt")),
+			Draft:           strings.TrimSpace(r.FormValue("chat_draft")),
+			Attachments:     parseConsoleChatDraftAttachments(r, handler.cfg.ChatAttachments),
 		},
-		Routes:   consoleChatRoutes(routes, providers),
-		Messages: parseConsoleChatMessages(r, locale),
-		Presets:  defaultConsoleChatPrompts(locale),
+		Routes:                  consoleChatRoutes(routes, providers),
+		Messages:                parseConsoleChatMessages(r, locale, handler.cfg.ChatAttachments),
+		Presets:                 defaultConsoleChatPrompts(locale),
+		AttachmentUploadURL:     consoleChatAttachmentUploadPath,
+		AttachmentUploadEnabled: handler.cfg.ChatAttachments.CanUpload(),
+		AttachmentMaxBytes:      consoleChatAttachmentMaxBytes,
 	}
 	if state.Form.PublicName == "" && len(state.Routes) > 0 {
 		state.Form.PublicName = state.Routes[0].PublicName
@@ -254,7 +506,7 @@ func (handler *Handler) chat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
+	if err := parseConsoleChatForm(r); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -270,7 +522,7 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 		handler.renderChat(w, r, state)
 		return
 	}
-	if strings.TrimSpace(state.Form.Draft) == "" {
+	if strings.TrimSpace(state.Form.Draft) == "" && len(state.Form.Attachments) == 0 {
 		state.Error = handler.requestText(r, "先输入一条消息。", "Enter a message first.")
 		handler.renderChat(w, r, state)
 		return
@@ -291,26 +543,28 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 	requestID := requestID(r)
 	consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
 	started := time.Now()
-	state.Messages = append(state.Messages, buildConsoleChatMessage(locale, openai.ChatMessageRoleUser, state.Form.Draft))
-	execution, err := runConsoleChatTurn(r.Context(), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft)
+	state.Messages = append(state.Messages, buildConsoleChatMessageWithAttachments(locale, openai.ChatMessageRoleUser, state.Form.Draft, state.Form.Attachments))
+	execution, err := runConsoleChatTurn(r.Context(), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments)
 	persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, clientIP(r), r.UserAgent(), target.Protocol, target.Route, target.Provider, target.Profile, target.PricingRule, started, execution, err)
-	state.Form.Draft = ""
 	if err != nil {
 		state.Error = fmt.Sprintf(handler.requestText(r, "对话失败：%s", "Chat failed: %s"), err.Error())
 		handler.renderChat(w, r, state)
 		return
 	}
-	state.Messages = append(state.Messages, buildConsoleChatMessage(locale, openai.ChatMessageRoleAssistant, execution.Result.Output))
+	state.Form.Draft = ""
+	state.Form.Attachments = nil
+	execution.Result.Output = consoleChatDisplayOutput(locale, execution.Result)
+	state.Messages = append(state.Messages, buildConsoleChatMessageWithReasoning(locale, openai.ChatMessageRoleAssistant, execution.Result.Output, execution.Result.Reasoning))
 	state.Result = &execution.Result
 	handler.renderChat(w, r, state)
 }
 
-func runConsoleChatTurn(ctx context.Context, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, history []consoleChatMessageView, userInput string) (consoleChatExecution, error) {
+func runConsoleChatTurn(ctx context.Context, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) (consoleChatExecution, error) {
 	protocol := consoleChatRouteProtocol(route, provider)
 	if protocol == "" {
 		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest}}, &consoleUpstreamError{StatusCode: http.StatusBadRequest, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
 	}
-	return runConsoleRawChatTurn(ctx, protocol, provider, route, profile, systemPrompt, history, userInput, false, nil)
+	return runConsoleRawChatTurn(ctx, protocol, provider, route, profile, systemPrompt, history, userInput, attachments, false, nil, nil)
 }
 
 func buildConsoleChatUsageRecord(requestID, userID, protocol string, route domain.ModelRoute, provider domain.Provider, pricingRule domain.PricingRule, started time.Time, execution consoleChatExecution) domain.UsageRecord {

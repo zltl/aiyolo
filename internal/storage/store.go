@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/zltl/aiyolo/internal/domain"
 )
@@ -19,6 +20,8 @@ type Store interface {
 	ListAPIKeys(ctx context.Context) ([]domain.APIKey, error)
 	FindAPIKeyByHash(ctx context.Context, hash string) (domain.APIKey, error)
 	TouchAPIKey(ctx context.Context, id string) error
+	CreateCodexInstallToken(ctx context.Context, token domain.CodexInstallToken) error
+	RedeemCodexInstallToken(ctx context.Context, tokenHash string, key domain.APIKey, redeemedAt time.Time) (domain.CodexInstallToken, error)
 	ReserveQuota(ctx context.Context, request domain.QuotaRequest) (domain.QuotaReservation, error)
 	SettleQuota(ctx context.Context, reservation domain.QuotaReservation, usage domain.UsageRecord) error
 

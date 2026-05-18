@@ -15,41 +15,67 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/zltl/aiyolo/internal/artifacts"
 	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
 )
 
 type Config struct {
-	SecretKey     string
-	AdminEmail    string
-	AdminPassword string
+	SecretKey                 string
+	AdminEmail                string
+	AdminPassword             string
+	Artifacts                 artifacts.Config
+	ChatAttachments           artifacts.Config
+	CodexPublicBaseURL        string
+	CodexInstallTokenTTL      time.Duration
+	CodexWindowsWrapperURL    string
+	CodexWindowsWrapperSHA256 string
+}
+
+type consoleChatAttachmentPublisher interface {
+	UploadBytes(ctx context.Context, payload []byte, objectKey string, mediaType string) (artifacts.PublishedObject, error)
 }
 
 type Handler struct {
-	cfg   Config
-	store storage.Store
-	tmpl  *template.Template
+	cfg                        Config
+	store                      storage.Store
+	tmpl                       *template.Template
+	newChatAttachmentPublisher func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error)
 }
 
 func NewHandler(cfg Config, store storage.Store) *Handler {
-	return &Handler{cfg: cfg, store: store, tmpl: template.Must(template.New("console").Funcs(templateFuncs()).ParseFS(consoleAssets, "templates/*.html"))}
+	if cfg.CodexInstallTokenTTL <= 0 {
+		cfg.CodexInstallTokenTTL = 15 * time.Minute
+	}
+	if strings.TrimSpace(cfg.CodexWindowsWrapperURL) == "" {
+		cfg.CodexWindowsWrapperURL = "/console/codex/artifacts/aiyolo.exe"
+	}
+	return &Handler{cfg: cfg, store: store, tmpl: template.Must(template.New("console").Funcs(templateFuncs()).ParseFS(consoleAssets, "templates/*.html")), newChatAttachmentPublisher: func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error) {
+		return artifacts.NewPublisher(cfg)
+	}}
 }
 
 func (handler *Handler) Routes() http.Handler {
 	router := chi.NewRouter()
 	router.Get("/static/console.css", handler.styles)
+	router.Get("/static/chat.js", handler.chatScript)
 	router.Get("/locale", handler.setLocale)
 	router.Get("/login", handler.loginPage)
 	router.Post("/login", handler.login)
 	router.Get("/login/{provider}", handler.oauthLogin)
 	router.Get("/oauth/{provider}/callback", handler.oauthCallback)
+	router.Get("/codex/install.ps1", handler.codexInstallScript)
+	router.Get("/codex/artifacts/aiyolo.exe", handler.codexWindowsArtifact)
 	router.Group(func(protected chi.Router) {
 		protected.Use(handler.requireSession)
 		protected.Get("/", handler.dashboard)
+		protected.Get("/codex", handler.codex)
+		protected.Post("/codex/install-tokens", handler.createCodexInstallToken)
 		protected.Get("/chat", handler.chat)
 		protected.Post("/chat", handler.sendChat)
 		protected.Post("/chat/stream", handler.streamChat)
+		protected.Post("/chat/attachments", handler.uploadChatAttachments)
 		protected.Post("/logout", handler.logout)
 		protected.Get("/usage", handler.usage)
 		protected.Get("/audit", handler.audit)
@@ -60,6 +86,7 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Get("/providers", handler.providers)
 		protected.Post("/providers", handler.createProvider)
 		protected.Post("/providers/openrouter", handler.createOpenRouter)
+		protected.Post("/providers/deepseek", handler.createDeepSeek)
 		protected.Post("/providers/{providerID}/sync-models", handler.syncProviderModels)
 		protected.Get("/models", handler.models)
 		protected.Post("/models", handler.createModel)
@@ -178,12 +205,21 @@ func (handler *Handler) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	clear, err := auth.GenerateAPIKey(strings.TrimSpace(r.FormValue("kind")))
+	clear, key, err := newConsoleAPIKey(apiKeySpec{
+		Name:               formDefault(r, "name", "console key"),
+		Kind:               strings.TrimSpace(r.FormValue("kind")),
+		AllowedProtocols:   splitCSV(r.FormValue("allowed_protocols")),
+		AllowedModels:      splitCSV(r.FormValue("allowed_models")),
+		RPMLimit:           formInt(r, "rpm_limit", 0),
+		TPMLimit:           formInt(r, "tpm_limit", 0),
+		ConcurrentLimit:    formInt(r, "concurrent_limit", 0),
+		DailyBudgetCents:   int64(formInt(r, "daily_budget_cents", 0)),
+		MonthlyBudgetCents: int64(formInt(r, "monthly_budget_cents", 0)),
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	key := domain.APIKey{ID: newConsoleID("key"), Name: formDefault(r, "name", "console key"), KeyHash: auth.HashAPIKey(clear), Prefix: auth.Prefix(clear), UserID: "local", OrganizationID: "default", ProjectID: "default", Status: domain.StatusActive, AllowedProtocols: splitCSV(r.FormValue("allowed_protocols")), AllowedModels: splitCSV(r.FormValue("allowed_models")), RPMLimit: formInt(r, "rpm_limit", 0), TPMLimit: formInt(r, "tpm_limit", 0), ConcurrentLimit: formInt(r, "concurrent_limit", 0), DailyBudgetCents: int64(formInt(r, "daily_budget_cents", 0)), MonthlyBudgetCents: int64(formInt(r, "monthly_budget_cents", 0)), CreatedAt: time.Now().UTC()}
 	if err := handler.store.CreateAPIKey(r.Context(), key); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -243,9 +279,13 @@ func (handler *Handler) disableAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) providers(w http.ResponseWriter, r *http.Request) {
-	data, err := handler.providersPageData(r.Context(), "")
+	data, err := handler.providersViewData(r.Context(), r, "")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if isHTMXRequest(r) {
+		handler.renderFragment(w, r, "providers-content", data)
 		return
 	}
 	handler.render(w, r, "providers", data)
@@ -256,12 +296,34 @@ func (handler *Handler) createProvider(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	provider := domain.Provider{ID: formDefault(r, "id", newConsoleID("provider")), Name: formDefault(r, "name", "Provider"), BaseURL: strings.TrimSpace(r.FormValue("base_url")), Protocol: formDefault(r, "protocol", domain.ProtocolOpenAI), MasterKey: strings.TrimSpace(r.FormValue("master_key")), DefaultProxyID: strings.TrimSpace(r.FormValue("default_proxy_id")), Status: formDefault(r, "status", domain.StatusEnabled), TimeoutSeconds: formInt(r, "timeout_seconds", 90), Priority: formInt(r, "priority", 1), Weight: formInt(r, "weight", 100)}
+	providerID := formDefault(r, "id", newConsoleID("provider"))
+	existing := domain.Provider{}
+	if current, err := handler.store.GetProvider(r.Context(), providerID); err == nil {
+		existing = current
+	} else if err != storage.ErrNotFound {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	provider := existing
+	provider.ID = providerID
+	provider.Name = formDefault(r, "name", firstNonEmpty(existing.Name, "Provider"))
+	provider.BaseURL = strings.TrimSpace(r.FormValue("base_url"))
+	provider.Protocol = formDefault(r, "protocol", firstNonEmpty(existing.Protocol, domain.ProtocolOpenAI))
+	provider.SupportedProtocols = normalizeProviderSupportedProtocols(provider.Protocol, r.Form["supported_protocols"])
+	masterKey := strings.TrimSpace(r.FormValue("master_key"))
+	if masterKey != "" || strings.TrimSpace(existing.MasterKey) == "" {
+		provider.MasterKey = masterKey
+	}
+	provider.DefaultProxyID = strings.TrimSpace(r.FormValue("default_proxy_id"))
+	provider.Status = formDefault(r, "status", firstNonEmpty(existing.Status, domain.StatusEnabled))
+	provider.TimeoutSeconds = formInt(r, "timeout_seconds", defaultProviderInt(existing.TimeoutSeconds, 90))
+	provider.Priority = formInt(r, "priority", defaultProviderInt(existing.Priority, 1))
+	provider.Weight = formInt(r, "weight", defaultProviderInt(existing.Weight, 100))
 	if err := handler.store.UpsertProvider(r.Context(), provider); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	data, err := handler.providersPageData(r.Context(), handler.requestText(r, "Provider 已保存", "Provider saved"))
+	data, err := handler.providersViewData(r.Context(), r, handler.requestText(r, "Provider 已保存", "Provider saved"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -284,7 +346,7 @@ func (handler *Handler) createOpenRouter(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	provider := domain.Provider{
+	handler.upsertCompatibleProviderAndSync(w, r, domain.Provider{
 		ID:             "openrouter",
 		Name:           "OpenRouter",
 		BaseURL:        "https://openrouter.ai/api/v1",
@@ -294,25 +356,48 @@ func (handler *Handler) createOpenRouter(w http.ResponseWriter, r *http.Request)
 		TimeoutSeconds: 180,
 		Priority:       1,
 		Weight:         100,
-	}
+	})
+}
 
+func (handler *Handler) createDeepSeek(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	apiKey := strings.TrimSpace(r.FormValue("master_key"))
+	if apiKey == "" {
+		http.Error(w, handler.requestText(r, "缺少 master_key", "missing master_key"), http.StatusBadRequest)
+		return
+	}
+	handler.upsertCompatibleProviderAndSync(w, r, domain.Provider{
+		ID:                 "deepseek",
+		Name:               "DeepSeek",
+		BaseURL:            "https://api.deepseek.com",
+		Protocol:           domain.ProtocolOpenAI,
+		SupportedProtocols: []string{domain.ProtocolOpenAI, domain.ProtocolAnthropic},
+		MasterKey:          apiKey,
+		Status:             domain.StatusEnabled,
+		TimeoutSeconds:     180,
+		Priority:           1,
+		Weight:             100,
+	})
+}
+
+func (handler *Handler) upsertCompatibleProviderAndSync(w http.ResponseWriter, r *http.Request, provider domain.Provider) {
 	if err := handler.store.UpsertProvider(r.Context(), provider); err != nil {
 		http.Error(w, fmt.Errorf("upsert provider: %w", err).Error(), http.StatusInternalServerError)
 		return
 	}
-
-	summary, err := syncOpenRouterModelRoutes(r.Context(), handler.store, provider)
+	summary, err := syncCompatibleModelRoutes(r.Context(), handler.store, provider)
 	if err != nil {
 		http.Error(w, fmt.Errorf("sync models: %w", err).Error(), http.StatusInternalServerError)
 		return
 	}
-
-	data, err := handler.providersPageData(r.Context(), handler.openRouterSyncNotice(r, provider, summary, true))
+	data, err := handler.providersViewData(r.Context(), r, handler.providerSyncNotice(r, provider, summary, true))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
 	if isHTMXRequest(r) {
 		handler.renderFragment(w, r, "providers-content", data)
 		return
@@ -329,15 +414,15 @@ func (handler *Handler) syncProviderModels(w http.ResponseWriter, r *http.Reques
 
 	provider, err := handler.store.GetProvider(r.Context(), providerID)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
+		if err == storage.ErrNotFound {
 			http.Error(w, handler.requestText(r, "找不到指定的 Provider。", "The requested provider was not found."), http.StatusNotFound)
 			return
 		}
 		http.Error(w, fmt.Errorf("get provider: %w", err).Error(), http.StatusInternalServerError)
 		return
 	}
-	if !isOpenRouterProvider(provider) {
-		http.Error(w, handler.requestText(r, "当前 Provider 不是 OpenRouter 兼容通道。", "The selected provider is not OpenRouter-compatible."), http.StatusBadRequest)
+	if !supportsCompatibleModelImportProvider(provider) {
+		http.Error(w, handler.requestText(r, "当前 Provider 暂不支持自动导入模型。", "The selected provider does not support automatic model import."), http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(provider.MasterKey) == "" {
@@ -345,13 +430,13 @@ func (handler *Handler) syncProviderModels(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	summary, err := syncOpenRouterModelRoutes(r.Context(), handler.store, provider)
+	summary, err := syncCompatibleModelRoutes(r.Context(), handler.store, provider)
 	if err != nil {
 		http.Error(w, fmt.Errorf("sync models: %w", err).Error(), http.StatusInternalServerError)
 		return
 	}
 
-	data, err := handler.providersPageData(r.Context(), handler.openRouterSyncNotice(r, provider, summary, false))
+	data, err := handler.providersViewData(r.Context(), r, handler.providerSyncNotice(r, provider, summary, false))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -578,6 +663,17 @@ func (handler *Handler) styles(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(css)
 }
 
+func (handler *Handler) chatScript(w http.ResponseWriter, r *http.Request) {
+	script, err := consoleAssets.ReadFile("static/chat.js")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(script)
+}
+
 func (handler *Handler) apiKeysPageData(ctx context.Context, createdKey string, notice string) (map[string]any, error) {
 	keys, err := handler.store.ListAPIKeys(ctx)
 	if err != nil {
@@ -620,6 +716,60 @@ func (handler *Handler) apiKeyByID(ctx context.Context, keyID string) (domain.AP
 	return domain.APIKey{}, storage.ErrNotFound
 }
 
+type apiKeySpec struct {
+	ID                 string
+	Name               string
+	Kind               string
+	UserID             string
+	OrganizationID     string
+	ProjectID          string
+	Status             string
+	AllowedProtocols   []string
+	AllowedModels      []string
+	RPMLimit           int
+	TPMLimit           int
+	ConcurrentLimit    int
+	DailyBudgetCents   int64
+	MonthlyBudgetCents int64
+	ExpiresAt          *time.Time
+	CreatedAt          time.Time
+}
+
+func newConsoleAPIKey(spec apiKeySpec) (string, domain.APIKey, error) {
+	clear, err := auth.GenerateAPIKey(strings.TrimSpace(spec.Kind))
+	if err != nil {
+		return "", domain.APIKey{}, err
+	}
+	createdAt := spec.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	id := strings.TrimSpace(spec.ID)
+	if id == "" {
+		id = newConsoleID("key")
+	}
+	key := domain.APIKey{
+		ID:                 id,
+		Name:               firstNonEmpty(spec.Name, "console key"),
+		KeyHash:            auth.HashAPIKey(clear),
+		Prefix:             auth.Prefix(clear),
+		UserID:             firstNonEmpty(spec.UserID, "local"),
+		OrganizationID:     firstNonEmpty(spec.OrganizationID, "default"),
+		ProjectID:          firstNonEmpty(spec.ProjectID, "default"),
+		Status:             firstNonEmpty(spec.Status, domain.StatusActive),
+		AllowedProtocols:   spec.AllowedProtocols,
+		AllowedModels:      spec.AllowedModels,
+		RPMLimit:           spec.RPMLimit,
+		TPMLimit:           spec.TPMLimit,
+		ConcurrentLimit:    spec.ConcurrentLimit,
+		DailyBudgetCents:   spec.DailyBudgetCents,
+		MonthlyBudgetCents: spec.MonthlyBudgetCents,
+		ExpiresAt:          spec.ExpiresAt,
+		CreatedAt:          createdAt,
+	}
+	return clear, key, nil
+}
+
 func (handler *Handler) providersPageData(ctx context.Context, notice string) (map[string]any, error) {
 	providers, err := handler.store.ListProviders(ctx)
 	if err != nil {
@@ -630,6 +780,17 @@ func (handler *Handler) providersPageData(ctx context.Context, notice string) (m
 		return nil, err
 	}
 	return map[string]any{"Title": "Providers", "Providers": providers, "Proxies": proxies, "Notice": notice}, nil
+}
+
+func (handler *Handler) providersViewData(ctx context.Context, r *http.Request, notice string) (map[string]any, error) {
+	data, err := handler.providersPageData(ctx, notice)
+	if err != nil {
+		return nil, err
+	}
+	if err := buildProvidersViewData(ctx, handler.store, data, r); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (handler *Handler) modelsPageData(ctx context.Context, notice string) (map[string]any, error) {
@@ -842,30 +1003,47 @@ func newConsoleID(prefix string) string {
 	return prefix + "_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
-func money(microCents int64) string {
-	return "$" + strconv.FormatFloat(float64(microCents)/100000000, 'f', 4, 64)
+func money(microCents int64, currency ...string) string {
+	amount := strconv.FormatFloat(float64(microCents)/100000000, 'f', 4, 64)
+	code := "USD"
+	if len(currency) > 0 {
+		if trimmed := strings.ToUpper(strings.TrimSpace(currency[0])); trimmed != "" {
+			code = trimmed
+		}
+	}
+	switch code {
+	case "CNY":
+		return "¥" + amount
+	case "USD":
+		return "$" + amount
+	default:
+		return code + " " + amount
+	}
 }
 
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
-		"displayTitle":          pageTitleLocalized,
-		"effectiveModelProxy":   effectiveModelProxy,
-		"modelProxySelectLabel": modelProxySelectLabel,
-		"msg":                   consoleText,
-		"money":                 money,
-		"countShare":            countShare,
-		"join":                  strings.Join,
-		"navClass":              navClass,
-		"orDash":                orDash,
-		"pairShare":             pairShare,
-		"pageEyebrow":           pageEyebrow,
-		"isOpenRouterProvider":  isOpenRouterProvider,
-		"protocolLabel":         protocolLabel,
-		"ratio":                 ratio,
-		"statusClass":           statusClass,
-		"statusText":            statusText,
-		"timefmt":               timefmt,
-		"usageSparkline":        usageSparkline,
+		"displayTitle":                          pageTitleLocalized,
+		"effectiveModelProxy":                   effectiveModelProxy,
+		"modelProxySelectLabel":                 modelProxySelectLabel,
+		"msg":                                   consoleText,
+		"money":                                 money,
+		"countShare":                            countShare,
+		"join":                                  strings.Join,
+		"navClass":                              navClass,
+		"orDash":                                orDash,
+		"pairShare":                             pairShare,
+		"pageEyebrow":                           pageEyebrow,
+		"isOpenRouterProvider":                  isOpenRouterProvider,
+		"providerProtocolSummary":               providerProtocolSummary,
+		"protocolLabel":                         protocolLabel,
+		"ratio":                                 ratio,
+		"supportsProtocol":                      domain.SupportsProtocol,
+		"supportsCompatibleModelImportProvider": supportsCompatibleModelImportProvider,
+		"statusClass":                           statusClass,
+		"statusText":                            statusText,
+		"timefmt":                               timefmt,
+		"usageSparkline":                        usageSparkline,
 	}
 }
 
@@ -914,8 +1092,8 @@ func pageEyebrow(title string) string {
 	}
 }
 
-func (handler *Handler) openRouterSyncNotice(r *http.Request, provider domain.Provider, summary openRouterSyncSummary, created bool) string {
-	providerName := firstNonEmpty(strings.TrimSpace(provider.Name), strings.TrimSpace(provider.ID), "OpenRouter")
+func (handler *Handler) providerSyncNotice(r *http.Request, provider domain.Provider, summary openRouterSyncSummary, created bool) string {
+	providerName := firstNonEmpty(strings.TrimSpace(provider.Name), strings.TrimSpace(provider.ID), "Provider")
 	if summary.SkippedConflicts > 0 {
 		if created {
 			return fmt.Sprintf(

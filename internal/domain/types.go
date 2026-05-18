@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -53,6 +54,19 @@ type Subject struct {
 	ConcurrentLimit    int
 	DailyBudgetCents   int64
 	MonthlyBudgetCents int64
+}
+
+type CodexInstallToken struct {
+	ID            string
+	TokenHash     string
+	CreatedBy     string
+	Platform      string
+	DefaultModel  string
+	AllowedModels []string
+	ExpiresAt     time.Time
+	CreatedAt     time.Time
+	UsedAt        *time.Time
+	APIKeyID      string
 }
 
 type QuotaRequest struct {
@@ -210,6 +224,36 @@ func IsOpenRouterProvider(provider Provider) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(strings.TrimSpace(provider.BaseURL)), "openrouter.ai")
+}
+
+func IsDeepSeekProvider(provider Provider) bool {
+	if strings.EqualFold(strings.TrimSpace(provider.ID), "deepseek") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(provider.BaseURL)), "deepseek.com")
+}
+
+func ProviderBaseURLForProtocol(provider Provider, protocol string) string {
+	trimmedBaseURL := strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/")
+	if trimmedBaseURL == "" {
+		return ""
+	}
+	if !IsDeepSeekProvider(provider) || NormalizeProtocol(protocol) != ProtocolAnthropic {
+		return trimmedBaseURL
+	}
+	parsed, err := url.Parse(trimmedBaseURL)
+	if err != nil {
+		return trimmedBaseURL
+	}
+	basePath := strings.TrimRight(parsed.Path, "/")
+	if strings.HasSuffix(basePath, "/v1") {
+		basePath = strings.TrimSuffix(basePath, "/v1")
+	}
+	if basePath == "/anthropic" || strings.HasPrefix(basePath, "/anthropic/") {
+		return strings.TrimRight(parsed.String(), "/")
+	}
+	parsed.Path = path.Join(basePath, "/anthropic")
+	return strings.TrimRight(parsed.String(), "/")
 }
 
 type ProxyProfile struct {

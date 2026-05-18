@@ -1,10 +1,12 @@
 package console_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -823,6 +825,113 @@ func TestConsoleModelRouteTestBoxUsesConfiguredProxy(t *testing.T) {
 	}
 }
 
+func TestConsoleChatPageIsPrimaryEntry(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.example/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-page", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "legacy-ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-4.1-mini", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 2, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := client.Get(server.URL + "/console/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat page status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	html := string(body)
+	if !strings.Contains(html, "chat-workspace-page") || !strings.Contains(html, "ops-chat") {
+		t.Fatalf("chat primary entry missing expected content: %s", html)
+	}
+	if strings.Contains(html, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
+		t.Fatalf("advanced chat settings should be collapsed by default: %s", html)
+	}
+	if !strings.Contains(html, "You are the production assistant inside the AIYolo console.") {
+		t.Fatalf("default production system prompt missing from chat page: %s", html)
+	}
+	if strings.Contains(html, "legacy-ops-chat") {
+		t.Fatalf("disallowed route leaked into curated chat workspace: %s", html)
+	}
+}
+
+func TestConsoleChatPageAdvancedSettingsCollapsedByDefault(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := client.Get(server.URL + "/console/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat page status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	html := string(body)
+	if strings.Contains(html, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
+		t.Fatalf("advanced chat settings should be collapsed by default: %s", html)
+	}
+	if strings.Contains(html, `data-chat-session-title`) || strings.Contains(html, `chat-stage-title`) {
+		t.Fatalf("chat page should not render the removed centered stage title: %s", html)
+	}
+}
+
+func TestConsoleRemovedWorkbenchRoutesReturnNotFound(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/console/chat/legacy", "/console/openui/", "/console/chat/bootstrap", "/console/chat/api/stream"} {
+		response, err := client.Get(server.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected %s to return 404, got %d", path, response.StatusCode)
+		}
+	}
+}
+
 func TestConsoleChatPageRunsConversationTurn(t *testing.T) {
 	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -844,7 +953,7 @@ func TestConsoleChatPageRunsConversationTurn(t *testing.T) {
 			t.Fatalf("latest user message missing from upstream payload: %s", payload)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"chatcmpl_console","object":"chat.completion","created":1710000000,"model":"openai/gpt-4.1-mini","choices":[{"index":0,"message":{"role":"assistant","content":"Route failover via the weighted provider list."},"finish_reason":"stop"}],"usage":{"prompt_tokens":21,"completion_tokens":9,"total_tokens":30}}`))
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_console","object":"chat.completion","created":1710000000,"model":"openai/gpt-5.5","choices":[{"index":0,"message":{"role":"assistant","content":"Route failover via the weighted provider list."},"finish_reason":"stop"}],"usage":{"prompt_tokens":21,"completion_tokens":9,"total_tokens":30}}`))
 	}))
 	defer providerBackend.Close()
 
@@ -859,7 +968,7 @@ func TestConsoleChatPageRunsConversationTurn(t *testing.T) {
 	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_ops-chat", ModelAlias: "ops-chat", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-4.1-mini", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_ops-chat", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_ops-chat", Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -949,7 +1058,7 @@ func TestConsoleChatPageFailureWritesUsageAndAudit(t *testing.T) {
 	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-4.1-mini", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1039,7 +1148,7 @@ func TestConsoleChatStreamEndpointFlushesOpenAITurn(t *testing.T) {
 	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_ops-stream", ModelAlias: "ops-stream", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-stream", ProviderID: "openrouter", UpstreamModel: "openai/gpt-4.1-mini", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_ops-stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-stream", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_ops-stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1106,41 +1215,26 @@ func TestConsoleChatStreamEndpointFlushesOpenAITurn(t *testing.T) {
 	}
 }
 
-func TestConsoleChatPageListsAndStreamsAnthropicRoute(t *testing.T) {
+func TestConsoleChatStreamEndpointAcceptsMultipartFormData(t *testing.T) {
 	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/messages" {
+		if r.URL.Path != "/v1/chat/completions" {
 			http.NotFound(w, r)
 			return
 		}
-		if r.Header.Get("x-api-key") != "sk-ant-stream" {
-			t.Fatalf("unexpected anthropic auth header: %s", r.Header.Get("x-api-key"))
-		}
-		if r.Header.Get("anthropic-version") != "2023-06-01" {
-			t.Fatalf("unexpected anthropic version header: %s", r.Header.Get("anthropic-version"))
-		}
-		body, _ := io.ReadAll(r.Body)
-		payload := string(body)
-		if !strings.Contains(payload, `"system":"Keep replies short."`) {
-			t.Fatalf("system prompt missing from anthropic payload: %s", payload)
-		}
-		if !strings.Contains(payload, `"role":"assistant","content":"Earlier Claude reply"`) {
-			t.Fatalf("assistant history missing from anthropic payload: %s", payload)
-		}
-		if !strings.Contains(payload, `"role":"user","content":"Explain the current route."`) {
-			t.Fatalf("latest user message missing from anthropic payload: %s", payload)
+		if r.Header.Get("Authorization") != "Bearer sk-chat-stream" {
+			t.Fatalf("unexpected auth header: %s", r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_ant\",\"usage\":{\"input_tokens\":11}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"Route \"}}]}\n\n"))
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
-		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Claude \"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"failover via weights.\"}}]}\n\n"))
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
-		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"stream reply\"}}\n\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4,\"total_tokens\":12}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer providerBackend.Close()
 
@@ -1149,14 +1243,111 @@ func TestConsoleChatPageListsAndStreamsAnthropicRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := store.UpsertProvider(ctx, domain.Provider{ID: "anthropic-main", Name: "Anthropic", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolAnthropic, MasterKey: "sk-ant-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_claude-stream", ModelAlias: "claude-sonnet", ProviderID: "anthropic-main", Currency: "USD", InputPricePerMillionTokens: 2000000, OutputPricePerMillionTokens: 4000000}); err != nil {
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_ops-stream", ModelAlias: "ops-stream", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "claude-sonnet", ProviderID: "anthropic-main", UpstreamModel: "claude-sonnet-4-5", Protocol: domain.ProtocolAnthropic, AllowedProtocols: []string{domain.ProtocolAnthropic}, PriceRuleID: "price_claude-stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-stream", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_ops-stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	if err := writer.WriteField("chat_client_session_id", "session-multipart"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("chat_public_name", "ops-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("chat_draft", "How would you route failover?"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("chat_history_json", "[]"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Accept", "application/x-ndjson")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat stream status=%d body=%s", response.StatusCode, payload)
+	}
+	streamBody, _ := io.ReadAll(response.Body)
+	events := decodeConsoleChatStreamEvents(t, streamBody)
+	var deltaText strings.Builder
+	var replaceHTML string
+	for _, event := range events {
+		if event.Type == "delta" {
+			deltaText.WriteString(event.Delta)
+		}
+		if event.Type == "replace" {
+			replaceHTML = event.HTML
+		}
+	}
+	if deltaText.String() != "Route failover via weights." {
+		t.Fatalf("unexpected streamed delta text: %q", deltaText.String())
+	}
+	if !strings.Contains(replaceHTML, "Route failover via weights.") {
+		t.Fatalf("stream replacement html missing assistant output: %s", replaceHTML)
+	}
+	if !strings.Contains(replaceHTML, "session-multipart") {
+		t.Fatalf("stream replacement html missing client session id: %s", replaceHTML)
+	}
+}
+
+func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.example/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-openrouter", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "deepseek", Name: "DeepSeek", BaseURL: "https://deepseek.example/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-deepseek", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "anthropic-main", Name: "Anthropic", BaseURL: "https://anthropic.example/v1", Protocol: domain.ProtocolAnthropic, MasterKey: "sk-ant-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range []domain.ModelRoute{
+		{PublicName: "claude-sonnet", ProviderID: "anthropic-main", UpstreamModel: "claude-sonnet-4-5", Protocol: domain.ProtocolAnthropic, AllowedProtocols: []string{domain.ProtocolAnthropic}, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "deepseek-v4-flash", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-flash", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 2, Weight: 100},
+		{PublicName: "deepseek-v4-pro", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "gpt-5.5", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "gpt-5.5-pro", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5-pro", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "gemini-3-flash", ProviderID: "openrouter", UpstreamModel: "google/gemini-3-flash-preview", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "gemini-3.1-pro-preview", ProviderID: "openrouter", UpstreamModel: "google/gemini-3.1-pro-preview", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "chatgpt-image-2", ProviderID: "openrouter", UpstreamModel: "chatgpt-image-2", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "gpt-4.1-mini", ProviderID: "openrouter", UpstreamModel: "openai/gpt-4.1-mini", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
+	} {
+		if err := store.UpsertModelRoute(ctx, route); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
@@ -1175,67 +1366,51 @@ func TestConsoleChatPageListsAndStreamsAnthropicRoute(t *testing.T) {
 	defer pageResponse.Body.Close()
 	pageBody, _ := io.ReadAll(pageResponse.Body)
 	pageHTML := string(pageBody)
-	if !strings.Contains(pageHTML, "claude-sonnet") || !strings.Contains(pageHTML, "Anthropic") {
-		t.Fatalf("anthropic route missing from chat page: %s", pageHTML)
+	if strings.Contains(pageHTML, "claude-sonnet") {
+		t.Fatalf("anthropic route should be filtered out of chat page: %s", pageHTML)
 	}
-
-	form := url.Values{
-		"chat_public_name":     {"claude-sonnet"},
-		"chat_system_prompt":   {"Keep replies short."},
-		"chat_draft":           {"Explain the current route."},
-		"chat_message_role":    {"user", "assistant"},
-		"chat_message_content": {"What route is active?", "Earlier Claude reply"},
+	if strings.Contains(pageHTML, "gpt-4.1-mini") {
+		t.Fatalf("non-curated route should be filtered out of chat page: %s", pageHTML)
 	}
-	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(form.Encode()))
-	if err != nil {
-		t.Fatal(err)
+	if strings.Contains(pageHTML, "google/gemini-3-flash-preview") {
+		t.Fatalf("legacy gemini flash route should be filtered out of chat page: %s", pageHTML)
 	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("Accept", "application/x-ndjson")
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
+	if strings.Contains(pageHTML, "chatgpt-image-2") {
+		t.Fatalf("image route should be filtered out of chat page: %s", pageHTML)
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		t.Fatalf("anthropic chat stream status=%d body=%s", response.StatusCode, body)
-	}
-	body, _ := io.ReadAll(response.Body)
-	events := decodeConsoleChatStreamEvents(t, body)
-	var deltaText strings.Builder
-	var replaceHTML string
-	for _, event := range events {
-		if event.Type == "delta" {
-			deltaText.WriteString(event.Delta)
-		}
-		if event.Type == "replace" {
-			replaceHTML = event.HTML
+	for _, expected := range []string{"deepseek-v4-pro", "gpt-5.4"} {
+		if !strings.Contains(pageHTML, expected) {
+			t.Fatalf("expected curated model slot %q in chat page: %s", expected, pageHTML)
 		}
 	}
-	if deltaText.String() != "Claude stream reply" {
-		t.Fatalf("unexpected anthropic streamed delta text: %q", deltaText.String())
+	for _, unexpected := range []string{"gpt-5.5", "gpt-5.5-pro", "gemini-3.1-pro-preview"} {
+		if strings.Contains(pageHTML, unexpected) {
+			t.Fatalf("unexpected curated model slot %q in chat page: %s", unexpected, pageHTML)
+		}
 	}
-	if !strings.Contains(replaceHTML, "Claude stream reply") {
-		t.Fatalf("anthropic replacement html missing assistant output: %s", replaceHTML)
+	if strings.Contains(pageHTML, "帮我总结当前 public model 对应的上游路由和潜在故障点") {
+		t.Fatalf("starter prompt cards should be removed from chat page: %s", pageHTML)
 	}
-	usage, err := store.ListUsage(ctx, 5)
-	if err != nil {
-		t.Fatal(err)
+	if strings.Contains(pageHTML, `aria-controls="chat-advanced" onclick="const panel=document.getElementById('chat-advanced');if(panel){panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'nearest'});}"`) {
+		t.Fatalf("tools shortcut should be hidden when no tools are available: %s", pageHTML)
 	}
-	if len(usage) != 1 {
-		t.Fatalf("expected one usage record, got %d", len(usage))
+	if strings.Contains(pageHTML, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
+		t.Fatalf("advanced chat settings should be collapsed by default: %s", pageHTML)
 	}
-	record := usage[0]
-	if !record.Stream || record.Protocol != domain.ProtocolAnthropic || record.TotalTokens != 18 || record.CostMicroCents != 50 || record.Endpoint != "/console/chat" {
-		t.Fatalf("unexpected anthropic streamed usage record: %+v", record)
+	if !strings.Contains(pageHTML, `data-chat-action="pick-attachments"`) {
+		t.Fatalf("attachment quick action should remain available through the icon button: %s", pageHTML)
 	}
-	audits, err := store.ListAudit(ctx, 5)
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(pageHTML, `value="deepseek-v4-pro" checked`) {
+		t.Fatalf("expected deepseek-v4-pro to be the default selected route: %s", pageHTML)
 	}
-	if len(audits) != 1 || !audits[0].Stream || audits[0].Protocol != domain.ProtocolAnthropic {
-		t.Fatalf("unexpected anthropic streamed audit records: %+v", audits)
+	if strings.Contains(pageHTML, `value="deepseek-v4-flash" checked`) {
+		t.Fatalf("deepseek-v4-flash should not win over deepseek-v4-pro: %s", pageHTML)
+	}
+	if strings.Contains(pageHTML, `value="deepseek-v4-flash"`) && strings.Contains(pageHTML, `value="deepseek-v4-pro"`) {
+		t.Fatalf("chat page should show only one deepseek v4 slot: %s", pageHTML)
+	}
+	if strings.Contains(pageHTML, `value="claude-sonnet"`) {
+		t.Fatalf("claude route input should not be rendered in chat page: %s", pageHTML)
 	}
 }
 
@@ -1448,6 +1623,166 @@ func TestConsoleDirectProxyResourceCannotBeEdited(t *testing.T) {
 	}
 }
 
+func TestConsoleCodexPageRequiresLogin(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Get(server.URL + "/console/codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	if location := response.Header.Get("Location"); location != "/console/login" {
+		t.Fatalf("location=%q", location)
+	}
+}
+
+func TestConsoleCodexInstallFlowCreatesScopedKeyOnce(t *testing.T) {
+	ctx := context.Background()
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(ctx, storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", CodexPublicBaseURL: "https://gateway.example.com", CodexInstallTokenTTL: 10 * time.Minute, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"default_model": {"gpt-5.4"}}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/codex/install-tokens", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	html := string(body)
+	commandMatch := regexp.MustCompile(`install\.ps1\?token=(codex_[a-f0-9]+)`).FindStringSubmatch(html)
+	if len(commandMatch) != 2 {
+		t.Fatalf("install token missing from response: %s", html)
+	}
+	token := commandMatch[1]
+	if !strings.Contains(html, "https://gateway.example.com/console/codex/install.ps1?token="+token) {
+		t.Fatalf("unexpected install link: %s", html)
+	}
+
+	scriptResponse, err := http.Get(server.URL + "/console/codex/install.ps1?token=" + token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scriptResponse.Body.Close()
+	if scriptResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(scriptResponse.Body)
+		t.Fatalf("script status=%d body=%s", scriptResponse.StatusCode, body)
+	}
+	scriptBody, _ := io.ReadAll(scriptResponse.Body)
+	script := string(scriptBody)
+	if !strings.Contains(script, "api_base_url = 'https://gateway.example.com/v1'") {
+		t.Fatalf("missing api base url in script: %s", script)
+	}
+	if !strings.Contains(script, "default_model = 'gpt-5.4'") {
+		t.Fatalf("missing selected default model in script: %s", script)
+	}
+	if strings.Contains(strings.ToLower(script), "setx openai_api_key") {
+		t.Fatalf("script should not persist OPENAI_API_KEY globally: %s", script)
+	}
+	for _, model := range []string{"gpt-5.4", "gpt-5.5", "gpt-5.5-pro"} {
+		if !strings.Contains(script, "'"+model+"'") {
+			t.Fatalf("script missing allowed model %s: %s", model, script)
+		}
+	}
+
+	keys, err := store.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+	key := keys[0]
+	if len(key.AllowedProtocols) != 1 || key.AllowedProtocols[0] != domain.ProtocolOpenAI {
+		t.Fatalf("unexpected allowed protocols: %+v", key.AllowedProtocols)
+	}
+	if strings.Join(key.AllowedModels, ",") != "gpt-5.4,gpt-5.5,gpt-5.5-pro" {
+		t.Fatalf("unexpected allowed models: %+v", key.AllowedModels)
+	}
+
+	reuseResponse, err := http.Get(server.URL + "/console/codex/install.ps1?token=" + token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reuseResponse.Body.Close()
+	if reuseResponse.StatusCode != http.StatusGone {
+		body, _ := io.ReadAll(reuseResponse.Body)
+		t.Fatalf("reuse status=%d body=%s", reuseResponse.StatusCode, body)
+	}
+	keys, err = store.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("token reuse should not create another key: %+v", keys)
+	}
+}
+
+func TestConsoleCodexArtifactProxyStreamsConfiguredWrapper(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/aiyolo.exe" {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte("wrapper-binary"))
+	}))
+	defer upstream.Close()
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", CodexWindowsWrapperURL: upstream.URL + "/aiyolo.exe", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/console/codex/artifacts/aiyolo.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	if string(body) != "wrapper-binary" {
+		t.Fatalf("unexpected body=%q", body)
+	}
+	if contentType := response.Header.Get("Content-Type"); contentType != "application/octet-stream" {
+		t.Fatalf("content-type=%q", contentType)
+	}
+}
+
 func loggedInConsoleClient(serverURL string) (*http.Client, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -1468,9 +1803,24 @@ func loggedInConsoleClient(serverURL string) (*http.Client, error) {
 }
 
 type consoleChatStreamTestEvent struct {
-	Type  string `json:"type"`
-	Delta string `json:"delta"`
-	HTML  string `json:"html"`
+	Type    string                        `json:"type"`
+	Delta   string                        `json:"delta"`
+	HTML    string                        `json:"html"`
+	Error   string                        `json:"error"`
+	Message *consoleChatStreamTestMessage `json:"message"`
+	Result  *consoleChatStreamTestResult  `json:"result"`
+}
+
+type consoleChatStreamTestMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type consoleChatStreamTestResult struct {
+	PublicName   string `json:"publicName"`
+	Output       string `json:"output"`
+	FinishReason string `json:"finishReason"`
+	TotalTokens  int    `json:"totalTokens"`
 }
 
 func decodeConsoleChatStreamEvents(t *testing.T, body []byte) []consoleChatStreamTestEvent {

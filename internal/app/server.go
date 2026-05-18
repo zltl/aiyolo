@@ -12,6 +12,7 @@ import (
 	chmiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
+	"github.com/zltl/aiyolo/internal/artifacts"
 	"github.com/zltl/aiyolo/internal/console"
 	"github.com/zltl/aiyolo/internal/gateway"
 	proxytransport "github.com/zltl/aiyolo/internal/proxy"
@@ -35,9 +36,16 @@ func (server *Server) Handler() http.Handler {
 	router.Get("/healthz", server.healthz)
 	router.Get("/metrics", server.metrics)
 	gatewayHandler := gateway.NewHandler(server.store, proxytransport.NewTransportFactory()).Routes()
+	consoleHandler := console.NewHandler(console.Config{SecretKey: server.cfg.SecretKey, AdminEmail: server.cfg.AdminEmail, AdminPassword: server.cfg.AdminPassword, Artifacts: server.cfg.Artifacts, ChatAttachments: server.cfg.ChatAttachments, CodexPublicBaseURL: server.cfg.CodexPublicBaseURL, CodexInstallTokenTTL: server.cfg.CodexInstallTokenTTL, CodexWindowsWrapperURL: server.cfg.CodexWindowsWrapperURL, CodexWindowsWrapperSHA256: server.cfg.CodexWindowsWrapperSHA256}, server.store)
+	if server.cfg.Artifacts.Enabled() {
+		if server.cfg.Artifacts.CanList() {
+			router.Get(server.cfg.Artifacts.NormalizedProxyBasePath()+"/index.json", artifacts.CatalogHandler(server.cfg.Artifacts).ServeHTTP)
+		}
+		router.Handle(server.cfg.Artifacts.NormalizedProxyBasePath()+"/*", artifacts.NewProxy(server.cfg.Artifacts))
+	}
 	router.Mount("/v1", gatewayHandler)
 	router.Mount("/api/v1", gatewayHandler)
-	router.Mount("/console", console.NewHandler(console.Config{SecretKey: server.cfg.SecretKey, AdminEmail: server.cfg.AdminEmail, AdminPassword: server.cfg.AdminPassword}, server.store).Routes())
+	router.Mount("/console", consoleHandler.Routes())
 	router.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/console/", http.StatusSeeOther) })
 	return router
 }

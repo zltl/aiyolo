@@ -35,22 +35,87 @@ type consoleChatTarget struct {
 }
 
 type consoleChatStreamEvent struct {
-	Type  string `json:"type"`
-	Delta string `json:"delta,omitempty"`
-	HTML  string `json:"html,omitempty"`
+	Type    string                 `json:"type"`
+	Delta   string                 `json:"delta,omitempty"`
+	Reasoning string               `json:"reasoning,omitempty"`
+	HTML    string                 `json:"html,omitempty"`
+	Error   string                 `json:"error,omitempty"`
+	Message *consoleChatAPIMessage `json:"message,omitempty"`
+	Result  *consoleChatAPIResult  `json:"result,omitempty"`
+}
+
+type consoleChatAPIMessage struct {
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	Reasoning string `json:"reasoning,omitempty"`
+}
+
+type consoleChatAPIResult struct {
+	PublicName    string `json:"publicName"`
+	ProviderName  string `json:"providerName"`
+	UpstreamModel string `json:"upstreamModel"`
+	Output        string `json:"output"`
+	Reasoning     string `json:"reasoning,omitempty"`
+	ResponseID    string `json:"responseId"`
+	FinishReason  string `json:"finishReason"`
+	DurationMS    int64  `json:"durationMs"`
+	TotalTokens   int    `json:"totalTokens"`
+}
+
+func consoleChatAPIResultView(result consoleChatResultView) consoleChatAPIResult {
+	return consoleChatAPIResult{
+		PublicName:    result.PublicName,
+		ProviderName:  result.ProviderName,
+		UpstreamModel: result.UpstreamModel,
+		Output:        result.Output,
+		Reasoning:     result.Reasoning,
+		ResponseID:    result.ResponseID,
+		FinishReason:  result.FinishReason,
+		DurationMS:    result.DurationMS,
+		TotalTokens:   result.TotalTokens,
+	}
 }
 
 type consoleChatStreamChunk struct {
 	Delta        string
+	Reasoning    string
 	ResponseID   string
 	FinishReason string
 	Usage        domain.UsageRecord
 	Err          error
 }
 
-type consoleChatTextMessagePayload struct {
+type consoleChatOpenAIMessagePayload struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
+}
+
+type consoleChatOpenAIContentPayload struct {
+	Type     string                            `json:"type"`
+	Text     string                            `json:"text,omitempty"`
+	ImageURL *consoleChatOpenAIImageURLPayload `json:"image_url,omitempty"`
+}
+
+type consoleChatOpenAIImageURLPayload struct {
+	URL string `json:"url"`
+}
+
+type consoleChatAnthropicMessagePayload struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
+type consoleChatAnthropicContentPayload struct {
+	Type   string                             `json:"type"`
+	Text   string                             `json:"text,omitempty"`
+	Title  string                             `json:"title,omitempty"`
+	Source *consoleChatAnthropicSourcePayload `json:"source,omitempty"`
+}
+
+type consoleChatAnthropicSourcePayload struct {
+	Type      string `json:"type"`
+	URL       string `json:"url,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
 }
 
 type consoleUpstreamError struct {
@@ -131,7 +196,7 @@ func (handler *Handler) resolveConsoleChatTarget(ctx context.Context, r *http.Re
 }
 
 func (handler *Handler) streamChat(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
+	if err := parseConsoleChatForm(r); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -147,7 +212,7 @@ func (handler *Handler) streamChat(w http.ResponseWriter, r *http.Request) {
 		handler.streamChatReplace(w, r, state)
 		return
 	}
-	if strings.TrimSpace(state.Form.Draft) == "" {
+	if strings.TrimSpace(state.Form.Draft) == "" && len(state.Form.Attachments) == 0 {
 		state.Error = handler.requestText(r, "先输入一条消息。", "Enter a message first.")
 		handler.streamChatReplace(w, r, state)
 		return
@@ -169,18 +234,22 @@ func (handler *Handler) streamChat(w http.ResponseWriter, r *http.Request) {
 	requestID := requestID(r)
 	consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
 	started := time.Now()
-	state.Messages = append(state.Messages, buildConsoleChatMessage(locale, "user", state.Form.Draft))
-	execution, err := runConsoleRawChatTurn(r.Context(), target.Protocol, target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft, true, func(delta string) error {
+	state.Messages = append(state.Messages, buildConsoleChatMessageWithAttachments(locale, "user", state.Form.Draft, state.Form.Attachments))
+	execution, err := runConsoleRawChatTurn(r.Context(), target.Protocol, target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments, true, func(delta string) error {
 		return handler.writeChatStreamEvent(w, consoleChatStreamEvent{Type: "delta", Delta: delta})
+	}, func(reasoning string) error {
+		return handler.writeChatStreamEvent(w, consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning})
 	})
 	persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, clientIP(r), r.UserAgent(), target.Protocol, target.Route, target.Provider, target.Profile, target.PricingRule, started, execution, err)
-	state.Form.Draft = ""
 	if err != nil {
 		state.Error = fmt.Sprintf(handler.requestText(r, "对话失败：%s", "Chat failed: %s"), err.Error())
 		_ = handler.streamChatReplace(w, r, state)
 		return
 	}
-	state.Messages = append(state.Messages, buildConsoleChatMessage(locale, "assistant", execution.Result.Output))
+	state.Form.Draft = ""
+	state.Form.Attachments = nil
+	execution.Result.Output = consoleChatDisplayOutput(locale, execution.Result)
+	state.Messages = append(state.Messages, buildConsoleChatMessageWithReasoning(locale, "assistant", execution.Result.Output, execution.Result.Reasoning))
 	state.Result = &execution.Result
 	_ = handler.streamChatReplace(w, r, state)
 }
@@ -222,9 +291,9 @@ func (handler *Handler) streamChatReplace(w http.ResponseWriter, r *http.Request
 	return handler.writeChatStreamEvent(w, consoleChatStreamEvent{Type: "replace", HTML: html})
 }
 
-func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, history []consoleChatMessageView, userInput string, stream bool, onDelta func(string) error) (consoleChatExecution, error) {
+func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
 	prompt := strings.TrimSpace(userInput)
-	if prompt == "" {
+	if prompt == "" && len(attachments) == 0 {
 		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest, Stream: stream}}, errors.New("message is empty")
 	}
 	if protocol != domain.ProtocolOpenAI && protocol != domain.ProtocolAnthropic {
@@ -243,7 +312,7 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 	if err != nil {
 		return consoleChatExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadGateway, Stream: stream}}, err
 	}
-	body, err := buildConsoleChatRequestBody(protocol, route, systemPrompt, history, prompt, stream)
+	body, err := buildConsoleChatRequestBody(protocol, route, systemPrompt, history, prompt, attachments, stream)
 	if err != nil {
 		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest, Stream: stream}}, err
 	}
@@ -268,7 +337,7 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 	if stream {
 		contentType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 		if contentType == "text/event-stream" {
-			return parseConsoleChatStreamResponse(response.Body, protocol, route, provider, started, onDelta)
+			return parseConsoleChatStreamResponse(response.Body, protocol, route, provider, started, onDelta, onReasoning)
 		}
 	}
 
@@ -279,14 +348,14 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 	return parseConsoleChatJSONResponse(responseBody, protocol, route, provider, response.StatusCode, stream, started)
 }
 
-func buildConsoleChatRequestBody(protocol string, route domain.ModelRoute, systemPrompt string, history []consoleChatMessageView, prompt string, stream bool) ([]byte, error) {
+func buildConsoleChatRequestBody(protocol string, route domain.ModelRoute, systemPrompt string, history []consoleChatMessageView, prompt string, attachments []consoleChatAttachmentView, stream bool) ([]byte, error) {
 	upstreamModel := firstNonEmpty(route.UpstreamModel, route.PublicName)
 	switch protocol {
 	case domain.ProtocolAnthropic:
 		payload := map[string]any{
 			"model":      upstreamModel,
 			"max_tokens": consoleChatMaxCompletionTokens,
-			"messages":   buildConsoleAnthropicMessages(history, prompt),
+			"messages":   buildConsoleAnthropicMessages(history, prompt, attachments),
 			"stream":     stream,
 		}
 		if systemPrompt = strings.TrimSpace(systemPrompt); systemPrompt != "" {
@@ -297,7 +366,7 @@ func buildConsoleChatRequestBody(protocol string, route domain.ModelRoute, syste
 		payload := map[string]any{
 			"model":      upstreamModel,
 			"max_tokens": consoleChatMaxCompletionTokens,
-			"messages":   buildConsoleOpenAIMessages(systemPrompt, history, prompt),
+			"messages":   buildConsoleOpenAIMessages(systemPrompt, history, prompt, attachments),
 			"stream":     stream,
 		}
 		if stream {
@@ -307,42 +376,119 @@ func buildConsoleChatRequestBody(protocol string, route domain.ModelRoute, syste
 	}
 }
 
-func buildConsoleOpenAIMessages(systemPrompt string, history []consoleChatMessageView, prompt string) []consoleChatTextMessagePayload {
-	messages := make([]consoleChatTextMessagePayload, 0, len(history)+2)
+func buildConsoleOpenAIMessages(systemPrompt string, history []consoleChatMessageView, prompt string, attachments []consoleChatAttachmentView) []consoleChatOpenAIMessagePayload {
+	messages := make([]consoleChatOpenAIMessagePayload, 0, len(history)+2)
 	if systemPrompt = strings.TrimSpace(systemPrompt); systemPrompt != "" {
-		messages = append(messages, consoleChatTextMessagePayload{Role: "system", Content: systemPrompt})
+		messages = append(messages, consoleChatOpenAIMessagePayload{Role: "system", Content: systemPrompt})
 	}
 	for _, message := range history {
 		role := normalizeConsoleChatRole(message.Role)
-		content := strings.TrimSpace(message.Content)
-		if role == "" || content == "" {
+		content := buildConsoleOpenAIMessageContent(strings.TrimSpace(message.Content), message.Attachments)
+		if role == "" || content == nil {
 			continue
 		}
-		messages = append(messages, consoleChatTextMessagePayload{Role: role, Content: content})
+		messages = append(messages, consoleChatOpenAIMessagePayload{Role: role, Content: content})
 	}
-	messages = append(messages, consoleChatTextMessagePayload{Role: "user", Content: strings.TrimSpace(prompt)})
+	messages = append(messages, consoleChatOpenAIMessagePayload{Role: "user", Content: buildConsoleOpenAIMessageContent(strings.TrimSpace(prompt), attachments)})
 	return messages
 }
 
-func buildConsoleAnthropicMessages(history []consoleChatMessageView, prompt string) []consoleChatTextMessagePayload {
-	messages := make([]consoleChatTextMessagePayload, 0, len(history)+1)
+func buildConsoleOpenAIMessageContent(text string, attachments []consoleChatAttachmentView) any {
+	parts := make([]consoleChatOpenAIContentPayload, 0, len(attachments)+1)
+	if text = strings.TrimSpace(text); text != "" {
+		parts = append(parts, consoleChatOpenAIContentPayload{Type: "text", Text: text})
+	}
+	for _, attachment := range attachments {
+		if strings.TrimSpace(attachment.URL) == "" {
+			continue
+		}
+		if consoleChatAttachmentIsImage(attachment.MediaType) {
+			parts = append(parts, consoleChatOpenAIContentPayload{Type: "image_url", ImageURL: &consoleChatOpenAIImageURLPayload{URL: attachment.URL}})
+			continue
+		}
+		parts = append(parts, consoleChatOpenAIContentPayload{Type: "text", Text: consoleChatAttachmentReferenceText(attachment)})
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	if len(parts) == 1 && parts[0].Type == "text" {
+		return parts[0].Text
+	}
+	return parts
+}
+
+func buildConsoleAnthropicMessages(history []consoleChatMessageView, prompt string, attachments []consoleChatAttachmentView) []consoleChatAnthropicMessagePayload {
+	messages := make([]consoleChatAnthropicMessagePayload, 0, len(history)+1)
 	for _, message := range history {
 		role := normalizeConsoleChatRole(message.Role)
-		content := strings.TrimSpace(message.Content)
-		if content == "" {
+		content := buildConsoleAnthropicMessageContent(strings.TrimSpace(message.Content), message.Attachments)
+		if content == nil {
 			continue
 		}
 		if role != "user" && role != "assistant" {
 			continue
 		}
-		messages = append(messages, consoleChatTextMessagePayload{Role: role, Content: content})
+		messages = append(messages, consoleChatAnthropicMessagePayload{Role: role, Content: content})
 	}
-	messages = append(messages, consoleChatTextMessagePayload{Role: "user", Content: strings.TrimSpace(prompt)})
+	messages = append(messages, consoleChatAnthropicMessagePayload{Role: "user", Content: buildConsoleAnthropicMessageContent(strings.TrimSpace(prompt), attachments)})
 	return messages
 }
 
+func buildConsoleAnthropicMessageContent(text string, attachments []consoleChatAttachmentView) any {
+	parts := make([]consoleChatAnthropicContentPayload, 0, len(attachments)+1)
+	if text = strings.TrimSpace(text); text != "" {
+		parts = append(parts, consoleChatAnthropicContentPayload{Type: "text", Text: text})
+	}
+	for _, attachment := range attachments {
+		if strings.TrimSpace(attachment.URL) == "" {
+			continue
+		}
+		switch {
+		case consoleChatAttachmentIsImage(attachment.MediaType):
+			parts = append(parts, consoleChatAnthropicContentPayload{Type: "image", Source: &consoleChatAnthropicSourcePayload{Type: "url", URL: attachment.URL, MediaType: attachment.MediaType}})
+		case consoleChatAttachmentIsDocument(attachment.MediaType):
+			parts = append(parts, consoleChatAnthropicContentPayload{Type: "document", Title: attachment.Name, Source: &consoleChatAnthropicSourcePayload{Type: "url", URL: attachment.URL, MediaType: attachment.MediaType}})
+		default:
+			parts = append(parts, consoleChatAnthropicContentPayload{Type: "text", Text: consoleChatAttachmentReferenceText(attachment)})
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	if len(parts) == 1 && parts[0].Type == "text" {
+		return parts[0].Text
+	}
+	return parts
+}
+
+func consoleChatAttachmentReferenceText(attachment consoleChatAttachmentView) string {
+	label := firstNonEmpty(strings.TrimSpace(attachment.Name), path.Base(strings.TrimSpace(attachment.ObjectKey)), "attachment")
+	if mediaType := strings.TrimSpace(attachment.MediaType); mediaType != "" {
+		return fmt.Sprintf("Attachment: %s (%s)\nURL: %s", label, mediaType, strings.TrimSpace(attachment.URL))
+	}
+	return fmt.Sprintf("Attachment: %s\nURL: %s", label, strings.TrimSpace(attachment.URL))
+}
+
+func consoleChatAttachmentIsImage(mediaType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(mediaType)), "image/")
+}
+
+func consoleChatAttachmentIsDocument(mediaType string) bool {
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	switch {
+	case mediaType == "application/pdf":
+		return true
+	case strings.HasPrefix(mediaType, "text/"):
+		return true
+	case mediaType == "application/json", mediaType == "text/csv", mediaType == "application/xml", mediaType == "text/xml":
+		return true
+	default:
+		return false
+	}
+}
+
 func buildConsoleChatUpstreamRequest(ctx context.Context, provider domain.Provider, protocol string, body []byte, stream bool) (*http.Request, error) {
-	upstreamURL, err := joinConsoleChatUpstreamURL(provider.BaseURL, consoleChatUpstreamEndpoint(protocol))
+	upstreamURL, err := joinConsoleChatUpstreamURL(domain.ProviderBaseURLForProtocol(provider, protocol), consoleChatUpstreamEndpoint(protocol))
 	if err != nil {
 		return nil, err
 	}
@@ -419,24 +565,26 @@ func parseConsoleChatJSONResponse(body []byte, protocol string, route domain.Mod
 	switch protocol {
 	case domain.ProtocolAnthropic:
 		result.Output = consoleTextContent(payload["content"])
+		result.Reasoning = consoleReasoningPayloadText(payload["content"])
 		result.FinishReason = firstNonEmpty(consoleValueString(payload["stop_reason"]), consoleValueString(payload["stop_reason"]))
 	default:
 		if choices, ok := payload["choices"].([]any); ok && len(choices) > 0 {
 			if choice, ok := choices[0].(map[string]any); ok {
 				if message, ok := choice["message"].(map[string]any); ok {
 					result.Output = consoleTextContent(message["content"])
+					result.Reasoning = consoleReasoningPayloadText(message)
 				}
 				result.FinishReason = consoleValueString(choice["finish_reason"])
 			}
 		}
 	}
 	if strings.TrimSpace(result.Output) == "" {
-		result.Output = "No text returned."
+		result.Output = consoleChatEmptyOutput
 	}
 	return consoleChatExecution{Result: result, Usage: usage, StatusCode: statusCode}, nil
 }
 
-func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domain.ModelRoute, provider domain.Provider, started time.Time, onDelta func(string) error) (consoleChatExecution, error) {
+func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domain.ModelRoute, provider domain.Provider, started time.Time, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
 	reader := bufio.NewReader(body)
 	usage := domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK, Stream: true}
 	result := consoleChatResultView{
@@ -446,6 +594,7 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 		UpstreamModel: firstNonEmpty(route.UpstreamModel, route.PublicName),
 	}
 	var output strings.Builder
+	var reasoning strings.Builder
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -453,6 +602,7 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 			if parseErr != nil {
 				usage.LatencyMS = time.Since(started).Milliseconds()
 				result.Output = strings.TrimSpace(output.String())
+				result.Reasoning = strings.TrimSpace(reasoning.String())
 				result.DurationMS = usage.LatencyMS
 				result.TotalTokens = usage.TotalTokens
 				return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, parseErr
@@ -470,6 +620,20 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 					if callbackErr := onDelta(chunk.Delta); callbackErr != nil {
 						usage.LatencyMS = time.Since(started).Milliseconds()
 						result.Output = strings.TrimSpace(output.String())
+						result.Reasoning = strings.TrimSpace(reasoning.String())
+						result.DurationMS = usage.LatencyMS
+						result.TotalTokens = usage.TotalTokens
+						return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, callbackErr
+					}
+				}
+			}
+			if chunk.Reasoning != "" {
+				reasoning.WriteString(chunk.Reasoning)
+				if onReasoning != nil {
+					if callbackErr := onReasoning(chunk.Reasoning); callbackErr != nil {
+						usage.LatencyMS = time.Since(started).Milliseconds()
+						result.Output = strings.TrimSpace(output.String())
+						result.Reasoning = strings.TrimSpace(reasoning.String())
 						result.DurationMS = usage.LatencyMS
 						result.TotalTokens = usage.TotalTokens
 						return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, callbackErr
@@ -483,6 +647,7 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 			}
 			usage.LatencyMS = time.Since(started).Milliseconds()
 			result.Output = strings.TrimSpace(output.String())
+			result.Reasoning = strings.TrimSpace(reasoning.String())
 			result.DurationMS = usage.LatencyMS
 			result.TotalTokens = usage.TotalTokens
 			return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, err
@@ -493,8 +658,9 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
 	}
 	result.Output = strings.TrimSpace(output.String())
+	result.Reasoning = strings.TrimSpace(reasoning.String())
 	if result.Output == "" {
-		result.Output = "No text returned."
+		result.Output = consoleChatEmptyOutput
 	}
 	result.DurationMS = usage.LatencyMS
 	result.TotalTokens = usage.TotalTokens
@@ -530,10 +696,12 @@ func parseConsoleChatStreamChunk(line []byte, protocol string) (consoleChatStrea
 		case "content_block_start":
 			if block, ok := payload["content_block"].(map[string]any); ok {
 				chunk.Delta = consoleTextContent(block["text"])
+				chunk.Reasoning = consoleReasoningPayloadText(block)
 			}
 		case "content_block_delta":
 			if delta, ok := payload["delta"].(map[string]any); ok {
 				chunk.Delta = consoleTextContent(delta["text"])
+				chunk.Reasoning = consoleReasoningPayloadText(delta)
 			}
 		case "message_delta":
 			if delta, ok := payload["delta"].(map[string]any); ok {
@@ -555,6 +723,7 @@ func parseConsoleChatStreamChunk(line []byte, protocol string) (consoleChatStrea
 		if choice, ok := choices[0].(map[string]any); ok {
 			if delta, ok := choice["delta"].(map[string]any); ok {
 				chunk.Delta = consoleTextContent(delta["content"])
+				chunk.Reasoning = consoleReasoningPayloadText(delta)
 			}
 			if finish := consoleValueString(choice["finish_reason"]); finish != "" {
 				chunk.FinishReason = finish
@@ -662,6 +831,10 @@ func consoleTextContent(value any) string {
 		parts := make([]string, 0, len(typed))
 		for _, item := range typed {
 			if block, ok := item.(map[string]any); ok {
+				blockType := strings.ToLower(consoleValueString(block["type"]))
+				if blockType != "" && blockType != "text" && blockType != "output_text" {
+					continue
+				}
 				if text, ok := block["text"].(string); ok {
 					parts = append(parts, text)
 				}
@@ -673,12 +846,71 @@ func consoleTextContent(value any) string {
 	}
 }
 
+func consoleReasoningPayloadText(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(consoleReasoningPayloadText(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "")
+	case map[string]any:
+		blockType := strings.ToLower(consoleValueString(typed["type"]))
+		switch blockType {
+		case "thinking", "thinking_delta", "reasoning", "reasoning_delta", "summary_text":
+			return firstNonEmptyRaw(
+				consoleRawValueString(typed["thinking"]),
+				consoleRawValueString(typed["reasoning"]),
+				consoleRawValueString(typed["text"]),
+				consoleRawValueString(typed["content"]),
+			)
+		case "", "message", "delta":
+		default:
+			if typed["reasoning"] == nil && typed["reasoning_content"] == nil && typed["thinking"] == nil && typed["thinking_content"] == nil {
+				return ""
+			}
+		}
+		return firstNonEmptyRaw(
+			consoleRawValueString(typed["reasoning_content"]),
+			consoleReasoningPayloadText(typed["reasoning"]),
+			consoleRawValueString(typed["thinking_content"]),
+			consoleReasoningPayloadText(typed["thinking"]),
+		)
+	default:
+		return ""
+	}
+}
+
+func firstNonEmptyRaw(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func consoleValueString(value any) string {
 	switch typed := value.(type) {
 	case string:
 		return strings.TrimSpace(typed)
 	case fmt.Stringer:
 		return strings.TrimSpace(typed.String())
+	default:
+		return ""
+	}
+}
+
+func consoleRawValueString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
 	default:
 		return ""
 	}
