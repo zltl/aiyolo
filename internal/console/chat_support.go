@@ -19,10 +19,11 @@ import (
 )
 
 const (
-	consoleChatEndpoint            = "/console/chat"
-	consoleChatFormMaxMemory       = 1 << 20
-	consoleChatMaxCompletionTokens = 768
-	consoleChatEmptyOutput         = "No text returned."
+	consoleChatEndpoint                  = "/console/chat"
+	consoleChatFormMaxMemory             = 1 << 20
+	consoleChatDefaultCompletionTokens   = 768
+	consoleChatReasoningCompletionTokens = 4096
+	consoleChatEmptyOutput               = "No text returned."
 )
 
 type consoleChatRouteView struct {
@@ -42,12 +43,13 @@ type consoleChatFormView struct {
 }
 
 type consoleChatAttachmentView struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	ObjectKey string `json:"objectKey"`
-	URL       string `json:"url"`
-	MediaType string `json:"mediaType"`
-	SizeBytes int64  `json:"sizeBytes"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ObjectKey  string `json:"objectKey"`
+	URL        string `json:"url"`
+	BrowserURL string `json:"browserUrl,omitempty"`
+	MediaType  string `json:"mediaType"`
+	SizeBytes  int64  `json:"sizeBytes"`
 }
 
 type consoleChatMessageView struct {
@@ -65,6 +67,14 @@ type consoleChatPromptView struct {
 }
 
 var consoleChatAllowedExactModels = []string{"deepseek-v4-pro", "gpt-5.4"}
+
+func consoleChatCompletionTokens(route domain.ModelRoute) int {
+	modelID := strings.ToLower(strings.TrimSpace(firstNonEmpty(route.UpstreamModel, route.PublicName)))
+	if strings.Contains(modelID, "deepseek-v4-pro") {
+		return consoleChatReasoningCompletionTokens
+	}
+	return consoleChatDefaultCompletionTokens
+}
 
 type consoleChatResultView struct {
 	PublicName    string
@@ -96,6 +106,7 @@ type consoleChatPageState struct {
 	AttachmentUploadURL     string
 	AttachmentUploadEnabled bool
 	AttachmentMaxBytes      int64
+	SessionStore            consoleChatSessionStoreView
 }
 
 func (state consoleChatPageState) data() map[string]any {
@@ -113,6 +124,7 @@ func (state consoleChatPageState) data() map[string]any {
 		"ChatAttachmentUploadURL":     state.AttachmentUploadURL,
 		"ChatAttachmentUploadEnabled": state.AttachmentUploadEnabled,
 		"ChatAttachmentMaxBytes":      state.AttachmentMaxBytes,
+		"ChatSessionStoreJSON":        consoleChatJSON(state.SessionStore),
 	}
 }
 
@@ -130,6 +142,51 @@ func parseConsoleChatForm(r *http.Request) error {
 		return r.ParseMultipartForm(consoleChatFormMaxMemory)
 	}
 	return r.ParseForm()
+}
+
+func consoleChatRequestHasSubmittedState(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if strings.TrimSpace(r.FormValue("chat_history_json")) != "" {
+		return true
+	}
+	if len(r.Form["chat_message_role"]) > 0 {
+		return true
+	}
+	if strings.TrimSpace(r.FormValue("chat_draft")) != "" {
+		return true
+	}
+	if strings.TrimSpace(r.FormValue("chat_draft_attachments_json")) != "" {
+		return true
+	}
+	return strings.TrimSpace(r.FormValue("chat_client_session_id")) != ""
+}
+
+func consoleChatRequestedSessionID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return firstNonEmpty(strings.TrimSpace(r.FormValue("chat_client_session_id")), strings.TrimSpace(r.URL.Query().Get("session")))
+}
+
+func consoleChatCanonicalSessionURL(r *http.Request, activeSessionID string) string {
+	if r == nil {
+		return ""
+	}
+	activeSessionID = strings.TrimSpace(activeSessionID)
+	if activeSessionID == "" {
+		return ""
+	}
+	requestedSessionID := strings.TrimSpace(r.URL.Query().Get("session"))
+	if requestedSessionID == activeSessionID {
+		return ""
+	}
+	nextURL := *r.URL
+	query := nextURL.Query()
+	query.Set("session", activeSessionID)
+	nextURL.RawQuery = query.Encode()
+	return nextURL.String()
 }
 
 func defaultConsoleChatSystemPrompt(locale string) string {
@@ -244,6 +301,7 @@ func normalizeConsoleChatAttachment(cfg artifacts.Config, attachment consoleChat
 		attachment.SizeBytes = 0
 	}
 	attachment.URL = cfg.PublicObjectURL(attachment.ObjectKey)
+	attachment.BrowserURL = firstNonEmpty(cfg.ProxyObjectURL(attachment.ObjectKey), attachment.URL)
 	if strings.TrimSpace(attachment.URL) == "" {
 		return consoleChatAttachmentView{}, false
 	}
@@ -329,7 +387,7 @@ func consoleChatRouteSlotPriority(route domain.ModelRoute, slot string) int {
 	default:
 		return 4
 	}
-	}
+}
 
 func shouldPreferConsoleChatRoute(candidate, current domain.ModelRoute, slot string) bool {
 	candidatePriority := consoleChatRouteSlotPriority(candidate, slot)
@@ -463,7 +521,7 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 	locale := resolveConsoleLocale(r)
 	state := consoleChatPageState{
 		Form: consoleChatFormView{
-			ClientSessionID: strings.TrimSpace(r.FormValue("chat_client_session_id")),
+			ClientSessionID: consoleChatRequestedSessionID(r),
 			PublicName:      strings.TrimSpace(r.FormValue("chat_public_name")),
 			SystemPrompt:    strings.TrimSpace(r.FormValue("chat_system_prompt")),
 			Draft:           strings.TrimSpace(r.FormValue("chat_draft")),
@@ -475,6 +533,19 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 		AttachmentUploadURL:     consoleChatAttachmentUploadPath,
 		AttachmentUploadEnabled: handler.cfg.ChatAttachments.CanUpload(),
 		AttachmentMaxBytes:      consoleChatAttachmentMaxBytes,
+	}
+	sessionStore, activeSession, err := handler.loadConsoleChatSessionStore(ctx, r, state.Form.ClientSessionID)
+	if err != nil {
+		return consoleChatPageState{}, err
+	}
+	state.SessionStore = sessionStore
+	if activeSession != nil && !consoleChatRequestHasSubmittedState(r) {
+		state.Form.ClientSessionID = activeSession.ID
+		state.Form.PublicName = firstNonEmpty(state.Form.PublicName, activeSession.PublicName)
+		state.Form.SystemPrompt = firstNonEmpty(state.Form.SystemPrompt, activeSession.SystemPrompt)
+		state.Form.Draft = firstNonEmpty(state.Form.Draft, activeSession.Draft)
+		state.Form.Attachments = cloneConsoleChatAttachments(activeSession.DraftAttachments)
+		state.Messages = cloneConsoleChatMessages(activeSession.Messages)
 	}
 	if state.Form.PublicName == "" && len(state.Routes) > 0 {
 		state.Form.PublicName = state.Routes[0].PublicName
@@ -501,6 +572,12 @@ func (handler *Handler) chat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if !consoleChatRequestHasSubmittedState(r) && !isHTMXRequest(r) {
+		if nextURL := consoleChatCanonicalSessionURL(r, state.Form.ClientSessionID); nextURL != "" {
+			http.Redirect(w, r, nextURL, http.StatusSeeOther)
+			return
+		}
 	}
 	handler.renderChat(w, r, state)
 }
@@ -544,9 +621,12 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 	consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
 	started := time.Now()
 	state.Messages = append(state.Messages, buildConsoleChatMessageWithAttachments(locale, openai.ChatMessageRoleUser, state.Form.Draft, state.Form.Attachments))
-	execution, err := runConsoleChatTurn(r.Context(), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments)
-	persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, clientIP(r), r.UserAgent(), target.Protocol, target.Route, target.Provider, target.Profile, target.PricingRule, started, execution, err)
+	executionProtocol := handler.consoleChatExecutionProtocol(target.Route, target.Provider, state.Messages[:len(state.Messages)-1], state.Form.Attachments)
+	execution, err := handler.runConsoleChatTurn(r.Context(), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments)
+	persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, executionProtocol, target.Route, target.Provider, target.PricingRule, started, execution)
 	if err != nil {
+		state.Messages = consoleChatAppendResultMessage(locale, state.Messages, execution.Result)
+		handler.syncConsoleChatPageSession(context.WithoutCancel(r.Context()), r, &state, state.Messages, consoleChatSessionStatusForError(execution.Result), requestID, execution.Result.ResponseID, err.Error())
 		state.Error = fmt.Sprintf(handler.requestText(r, "对话失败：%s", "Chat failed: %s"), err.Error())
 		handler.renderChat(w, r, state)
 		return
@@ -555,6 +635,7 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 	state.Form.Attachments = nil
 	execution.Result.Output = consoleChatDisplayOutput(locale, execution.Result)
 	state.Messages = append(state.Messages, buildConsoleChatMessageWithReasoning(locale, openai.ChatMessageRoleAssistant, execution.Result.Output, execution.Result.Reasoning))
+	handler.syncConsoleChatPageSession(context.WithoutCancel(r.Context()), r, &state, state.Messages, consoleChatSessionStatusCompleted, requestID, execution.Result.ResponseID, "")
 	state.Result = &execution.Result
 	handler.renderChat(w, r, state)
 }
@@ -601,35 +682,9 @@ func buildConsoleChatUsageRecord(requestID, userID, protocol string, route domai
 	return usage
 }
 
-func persistConsoleChatOutcome(ctx context.Context, store storage.Store, requestID, userID, clientAddress, userAgent, protocol string, route domain.ModelRoute, provider domain.Provider, profile domain.ProxyProfile, pricingRule domain.PricingRule, started time.Time, execution consoleChatExecution, cause error) {
+func persistConsoleChatOutcome(ctx context.Context, store storage.Store, requestID, userID, protocol string, route domain.ModelRoute, provider domain.Provider, pricingRule domain.PricingRule, started time.Time, execution consoleChatExecution) {
 	usage := buildConsoleChatUsageRecord(requestID, userID, protocol, route, provider, pricingRule, started, execution)
 	if err := store.InsertUsage(ctx, usage); err != nil {
 		log.Printf("insert console chat usage request_id=%s err=%v", requestID, err)
-	}
-	event := domain.AuditEvent{
-		ID:             newID("audit"),
-		RequestID:      requestID,
-		UserID:         userID,
-		ClientIP:       clientAddress,
-		UserAgent:      userAgent,
-		Protocol:       protocol,
-		Endpoint:       consoleChatEndpoint,
-		ModelAlias:     route.PublicName,
-		ProviderID:     provider.ID,
-		UpstreamModel:  firstNonEmpty(route.UpstreamModel, route.PublicName),
-		ProxyProfileID: profile.ID,
-		Stream:         usage.Stream,
-		StatusCode:     usage.StatusCode,
-		ErrorCode:      consoleChatErrorCode(cause),
-		LatencyMS:      usage.LatencyMS,
-		InputTokens:    usage.InputTokens,
-		OutputTokens:   usage.OutputTokens,
-		CostMicroCents: usage.CostMicroCents,
-		EventType:      "console_chat",
-		Message:        strings.TrimSpace(firstNonEmpty(errorString(cause), "Console chat turn completed.")),
-		CreatedAt:      usage.CreatedAt,
-	}
-	if err := store.InsertAudit(ctx, event); err != nil {
-		log.Printf("insert console chat audit request_id=%s err=%v", requestID, err)
 	}
 }

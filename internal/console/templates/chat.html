@@ -4,8 +4,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{.DisplayTitle}} - AIYolo Chat</title>
-  <link rel="stylesheet" href="/console/static/console.css?v=chat-gemini-20260519md8">
+  <title>{{.DisplayTitle}} - AIYolo 对话</title>
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260523k">
 </head>
 <body class="chat-workspace-body">
   {{template "chat-content" .}}
@@ -15,42 +15,32 @@
 
 {{define "chat-content"}}
 <div id="chat-content" class="chat-workspace-page">
-  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-locale="{{.Locale}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
+  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-session-save-url="/console/chat/session" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
     <aside class="chat-sidebar">
       <div class="chat-sidebar-surface">
         <div class="chat-sidebar-top">
           <div class="chat-sidebar-brand">
-            <span class="chat-workspace-orb" aria-hidden="true"><span></span></span>
             <div class="chat-sidebar-brand-copy">
               <strong>AIYolo</strong>
-              <p>{{msg .Locale "Console Chat" "Console Chat"}}</p>
+              <p>{{msg .Locale "控制台对话" "Console Chat"}}</p>
             </div>
           </div>
           <a class="ghost-button chat-sidebar-new" href="/console/chat">{{msg .Locale "发起新对话" "Start new chat"}}</a>
         </div>
 
         <section class="chat-sidebar-section">
-          <div class="chat-sidebar-head">
-            <div>
-              <p class="chat-sidebar-label">{{msg .Locale "本地会话" "Local sessions"}}</p>
-              <strong>{{msg .Locale "重命名、删除并在多标签页间同步" "Rename, delete, and sync across tabs"}}</strong>
-            </div>
-            <span class="chat-sidebar-counter" data-chat-session-counter>0</span>
-          </div>
-          <div class="chat-session-store" data-chat-session-store>
-            <div class="chat-sidebar-empty">
-              <p>{{msg .Locale "本地会话会在这里保留，并自动同步到其他已打开的 chat 标签页。" "Local conversations will appear here and sync to other open chat tabs."}}</p>
-            </div>
-          </div>
+          <div class="chat-session-store" data-chat-session-store></div>
         </section>
 
         <details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details">
           <summary class="chat-sidebar-summary">
             <div>
               <p class="chat-sidebar-label">{{msg .Locale "高级设置" "Advanced"}}</p>
-              <strong>{{msg .Locale "System prompt" "System prompt"}}</strong>
+              <strong>{{msg .Locale "系统提示词" "System prompt"}}</strong>
             </div>
-            <span class="chat-sidebar-summary-indicator" aria-hidden="true"></span>
+            <span class="chat-sidebar-summary-indicator" aria-hidden="true">
+              <i class="chat-control-icon" data-lucide="chevron-down"></i>
+            </span>
           </summary>
           <div class="chat-sidebar-details-body">
             <label class="chat-system-field">
@@ -63,34 +53,7 @@
     </aside>
 
     <section class="chat-stage">
-      <header class="chat-stage-topbar">
-        <div class="chat-stage-topbar-side chat-stage-topbar-left">
-          <button class="chat-sidebar-toggle" type="button" data-chat-action="toggle-sidebar" aria-label="{{msg .Locale "切换左侧栏" "Toggle sidebar"}}" aria-expanded="true">
-            <span class="chat-sidebar-toggle-lines" aria-hidden="true"></span>
-          </button>
-          <span class="chat-stage-app">{{msg .Locale "AIYolo Chat" "AIYolo Chat"}}</span>
-          {{if .SelectedChatRoute.PublicName}}
-          <span class="chat-stage-model">{{.SelectedChatRoute.PublicName}}</span>
-          {{else}}
-          <span class="chat-stage-model is-muted">{{msg .Locale "未选择模型" "No model selected"}}</span>
-          {{end}}
-        </div>
-        <div class="chat-stage-topbar-side chat-stage-topbar-right">
-          <div class="chat-locale-switch" aria-label="{{msg .Locale "语言切换" "Language switch"}}">
-            {{range .LocaleOptions}}
-            <a class="{{if .Active}}chat-locale-pill is-active{{else}}chat-locale-pill{{end}}" href="{{.Href}}">{{.Label}}</a>
-            {{end}}
-          </div>
-          <a class="chat-console-link" href="/console/">{{msg .Locale "控制台" "Console"}}</a>
-          {{if .SelectedChatRoute.PublicName}}
-          <span class="chat-stage-chip">{{.SelectedChatRoute.ProviderName}} · {{protocolLabel .SelectedChatRoute.Protocol}}</span>
-          {{end}}
-          {{with .ChatResult}}
-          <span class="chat-stage-chip">{{.TotalTokens}} tokens · {{.DurationMS}}ms</span>
-          {{end}}
-        </div>
-      </header>
-
+      <div class="chat-stage-main">
       {{if .ChatError}}
       <div class="flash flash-error chat-inline-flash" role="alert">{{.ChatError}}</div>
       {{end}}
@@ -100,14 +63,13 @@
         {{if .ChatMessages}}
         {{range .ChatMessages}}
         <article class="chat-message {{if eq .Role "user"}}is-user{{else if eq .Role "assistant"}}is-assistant{{else}}is-system{{end}}">
-          <div class="chat-message-meta">
-            <div class="chat-avatar" aria-hidden="true">{{if eq .Role "user"}}U{{else if eq .Role "assistant"}}AI{{else}}S{{end}}</div>
-            <span class="chat-message-label">{{.Label}}</span>
-          </div>
           <div class="chat-bubble">
             {{if .Reasoning}}
             <details class="chat-reasoning">
-              <summary class="chat-reasoning-summary">{{msg $.Locale "思考过程" "Reasoning"}}</summary>
+              <summary class="chat-reasoning-summary">
+                <span class="chat-reasoning-summary-label">{{msg $.Locale "思考过程" "Reasoning"}}</span>
+                <span class="chat-reasoning-summary-icon" aria-hidden="true"><i class="chat-control-icon" data-lucide="chevron-down"></i></span>
+              </summary>
               <div class="chat-reasoning-copy">{{.Reasoning}}</div>
             </details>
             {{end}}
@@ -127,14 +89,13 @@
         {{end}}
         {{else}}
         <div class="chat-empty-state">
-          <div class="chat-empty-mark" aria-hidden="true"><span></span></div>
           {{if .SelectedChatRoute.PublicName}}
           <p class="chat-empty-route">{{.SelectedChatRoute.PublicName}} · {{.SelectedChatRoute.ProviderName}}</p>
           {{else}}
           <p class="chat-empty-route">{{msg .Locale "先从输入框右下选择一个模型" "Choose a model from the composer first"}}</p>
           {{end}}
-          <h2>{{msg .Locale "Hello! How can I help you today?" "Hello! How can I help you today?"}}</h2>
-          <p>{{msg .Locale "页面布局改成了更接近 Gemini 的对话视图，但仍然沿用 AIYolo 当前的路由、代理、计费和审计链路。" "This page now follows a Gemini-like conversation layout while still using AIYolo's existing routing, proxy, billing, and audit chain."}}</p>
+          <h2>{{msg .Locale "今天想聊点什么？" "Hello! How can I help you today?"}}</h2>
+          <p>{{msg .Locale "页面布局改成了更接近 Gemini 的对话视图，但仍然沿用 AIYolo 当前的路由、代理和计费链路。" "This page now follows a Gemini-like conversation layout while still using AIYolo's existing routing, proxy, and billing flow."}}</p>
         </div>
         {{end}}
         </div>
@@ -143,6 +104,7 @@
       <input type="hidden" name="chat_client_session_id" value="{{.ChatForm.ClientSessionID}}">
       <input type="hidden" name="chat_history_json" value='{{.ChatHistoryJSON}}'>
       <input type="hidden" name="chat_draft_attachments_json" value='{{.ChatDraftAttachmentsJSON}}'>
+      <input id="chat-session-store-json" type="hidden" value='{{.ChatSessionStoreJSON}}'>
       {{range .ChatMessages}}
       <input type="hidden" name="chat_message_role" value="{{.Role}}">
       <input type="hidden" name="chat_message_content" value="{{.Content}}">
@@ -153,7 +115,7 @@
           <input id="chat-attachment-input" class="chat-hidden-input" type="file" multiple {{if not .ChatAttachmentUploadEnabled}}disabled{{end}}>
           <label class="chat-draft-field" for="chat-draft">
             <span class="chat-visually-hidden">{{msg .Locale "消息" "Message"}}</span>
-            <textarea id="chat-draft" name="chat_draft" rows="4" placeholder="{{msg .Locale "问一个和路由、代理、成本或模型行为有关的问题" "Ask about routing, proxies, cost, or model behavior"}}" {{if not .ChatRoutes}}disabled{{end}}>{{.ChatForm.Draft}}</textarea>
+            <textarea id="chat-draft" name="chat_draft" rows="1" placeholder="{{msg .Locale "问一个和路由、代理、成本或模型行为有关的问题" "Ask about routing, proxies, cost, or model behavior"}}" {{if not .ChatRoutes}}disabled{{end}}>{{.ChatForm.Draft}}</textarea>
           </label>
           <div class="chat-draft-attachments" data-chat-draft-attachments {{if not .ChatForm.Attachments}}hidden{{end}}>
             {{range .ChatForm.Attachments}}
@@ -169,16 +131,19 @@
           <div class="chat-composer-footer">
             <div class="chat-composer-left">
               {{if .ChatAttachmentUploadEnabled}}
-              <button class="chat-icon-button" type="button" data-chat-action="pick-attachments" aria-label="{{msg .Locale "添加附件" "Add attachment"}}">+</button>
+              <button class="chat-icon-button" type="button" data-chat-action="pick-attachments" aria-label="{{msg .Locale "添加附件" "Add attachment"}}" title="{{msg .Locale "添加附件" "Add attachment"}}">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21.44 11.05 12.25 20.24a6 6 0 1 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.82-2.83l8.49-8.48"></path></svg>
+              </button>
               {{end}}
-              <span class="chat-composer-note">{{if .SelectedChatRoute.PublicName}}{{.SelectedChatRoute.PublicName}} · {{.SelectedChatRoute.UpstreamModel}}{{else}}{{msg .Locale "选择模型后即可开始对话" "Pick a model to start chatting"}}{{end}}</span>
             </div>
             <div class="chat-composer-right">
               {{if .ChatRoutes}}
               <details class="chat-model-picker">
-                <summary class="chat-model-picker-trigger">
-                  <span class="chat-model-picker-label">{{msg .Locale "模型" "Model"}}</span>
+                <summary class="chat-model-picker-trigger" aria-label="{{msg .Locale "选择模型" "Choose model"}}">
                   <span class="chat-model-picker-value" data-chat-model-picker-copy>{{if .SelectedChatRoute.PublicName}}{{.SelectedChatRoute.PublicName}}{{else}}{{msg .Locale "选择模型" "Choose model"}}{{end}}</span>
+                  <span class="chat-model-picker-icon" aria-hidden="true">
+                    <i class="chat-control-icon" data-lucide="chevron-down"></i>
+                  </span>
                 </summary>
                 <div class="chat-model-picker-menu" role="radiogroup" aria-label="{{msg .Locale "对话模型" "Conversation model"}}">
                   {{range .ChatRoutes}}
@@ -191,17 +156,20 @@
                 </div>
               </details>
               {{end}}
-              <button class="primary-button chat-send-button" type="submit" {{if not .ChatRoutes}}disabled{{end}}>
-                <span>{{msg .Locale "发送" "Send"}}</span>
-                <span class="chat-send-glyph" aria-hidden="true">↑</span>
+              <span class="chat-queue-indicator" data-chat-queue-indicator hidden></span>
+              <button class="primary-button chat-send-button" type="button" data-chat-action="composer-primary" aria-label="{{msg .Locale "开始发送" "Start sending"}}" hidden>
+                <span class="chat-send-glyph" data-chat-primary-start aria-hidden="true"><i class="chat-control-icon" data-lucide="send-horizontal"></i></span>
+                <span class="chat-send-glyph" data-chat-primary-stop aria-hidden="true" hidden><i class="chat-control-icon" data-lucide="square"></i></span>
               </button>
             </div>
           </div>
         </div>
 
       </div>
+      </div>
     </section>
   </form>
-  <script src="/console/static/chat.js?v=chat-gemini-20260519md5"></script>
+  <script src="https://unpkg.com/lucide@1.16.0/dist/umd/lucide.min.js"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260523md26"></script>
 </div>
 {{end}}

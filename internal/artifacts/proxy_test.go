@@ -40,3 +40,13 @@ func TestPublicObjectURLUsesNormalizedDomains(t *testing.T) {
 		t.Fatalf("public url=%q", got)
 	}
 }
+
+func TestObjectKeyDoesNotDuplicateConfiguredPrefix(t *testing.T) {
+	cfg := Config{PublicBaseURL: "https://files.example.com", S3: S3Config{Prefix: "chat"}}
+	if got := cfg.ObjectKey("chat/admin-example.com/2026/05/23/upload.png"); got != "chat/admin-example.com/2026/05/23/upload.png" {
+		t.Fatalf("object key=%q", got)
+	}
+	if got := cfg.PublicObjectURL("chat/admin-example.com/2026/05/23/upload.png"); got != "https://files.example.com/chat/admin-example.com/2026/05/23/upload.png" {
+		t.Fatalf("public url=%q", got)
+	}
+}

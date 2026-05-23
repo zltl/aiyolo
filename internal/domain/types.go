@@ -19,6 +19,11 @@ const (
 	ProxyTypeDirect = "direct"
 	ProxyTypeHTTP   = "http"
 	ProxyTypeSOCKS5 = "socks5"
+
+	DefaultProviderTimeoutSeconds           = 90
+	DefaultProviderStreamIdleTimeoutSeconds = 300
+	DefaultProxyTimeoutSeconds              = 60
+	DefaultProxyStreamIdleTimeoutSeconds    = 300
 )
 
 type APIKey struct {
@@ -101,38 +106,39 @@ type QuotaReservation struct {
 }
 
 type Provider struct {
-	ID              string
-	Name            string
-	BaseURL         string
-	Protocol        string
-	SupportedProtocols []string
-	MasterKey       string
-	DefaultProxyID  string
-	Priority        int
-	Weight          int
-	Status          string
-	TimeoutSeconds  int
-	RateLimitHint   string
-	LastHealthCheck *time.Time
-	LastError       string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                       string
+	Name                     string
+	BaseURL                  string
+	Protocol                 string
+	SupportedProtocols       []string
+	MasterKey                string
+	DefaultProxyID           string
+	Priority                 int
+	Weight                   int
+	Status                   string
+	TimeoutSeconds           int
+	StreamIdleTimeoutSeconds int
+	RateLimitHint            string
+	LastHealthCheck          *time.Time
+	LastError                string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 type ModelRoute struct {
-	PublicName     string
-	ProviderID     string
-	UpstreamModel  string
-	Protocol       string
+	PublicName       string
+	ProviderID       string
+	UpstreamModel    string
+	Protocol         string
 	AllowedProtocols []string
-	ProxyProfileID string
-	PriceRuleID    string
-	Enabled        bool
-	Priority       int
-	Weight         int
-	ContextTokens  int
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ProxyProfileID   string
+	PriceRuleID      string
+	Enabled          bool
+	Priority         int
+	Weight           int
+	ContextTokens    int
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 func NormalizeProtocol(value string) string {
@@ -197,6 +203,17 @@ func ProviderPrimaryProtocol(provider Provider) string {
 	return ProtocolOpenAI
 }
 
+func EffectiveProviderTimeoutSeconds(provider Provider) int {
+	if provider.TimeoutSeconds > 0 {
+		return provider.TimeoutSeconds
+	}
+	return DefaultProviderTimeoutSeconds
+}
+
+func EffectiveProviderStreamIdleTimeoutSeconds(provider Provider) int {
+	return effectiveStreamIdleTimeoutSeconds(provider.StreamIdleTimeoutSeconds, EffectiveProviderTimeoutSeconds(provider), DefaultProviderStreamIdleTimeoutSeconds)
+}
+
 func RouteAllowedProtocols(route ModelRoute, provider Provider) []string {
 	values := NormalizeProtocols(route.AllowedProtocols)
 	if len(values) > 0 {
@@ -257,18 +274,40 @@ func ProviderBaseURLForProtocol(provider Provider, protocol string) string {
 }
 
 type ProxyProfile struct {
-	ID             string
-	Name           string
-	Type           string
-	Endpoint       string
-	Auth           string
-	Region         string
-	TimeoutSeconds int
-	HealthCheckURL string
-	Status         string
-	LastError      string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID                       string
+	Name                     string
+	Type                     string
+	Endpoint                 string
+	Auth                     string
+	Region                   string
+	TimeoutSeconds           int
+	StreamIdleTimeoutSeconds int
+	HealthCheckURL           string
+	Status                   string
+	LastError                string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+}
+
+func EffectiveProxyProfileTimeoutSeconds(profile ProxyProfile) int {
+	if profile.TimeoutSeconds > 0 {
+		return profile.TimeoutSeconds
+	}
+	return DefaultProxyTimeoutSeconds
+}
+
+func EffectiveProxyProfileStreamIdleTimeoutSeconds(profile ProxyProfile) int {
+	return effectiveStreamIdleTimeoutSeconds(profile.StreamIdleTimeoutSeconds, EffectiveProxyProfileTimeoutSeconds(profile), DefaultProxyStreamIdleTimeoutSeconds)
+}
+
+func effectiveStreamIdleTimeoutSeconds(explicit, regular, fallback int) int {
+	if explicit > 0 {
+		return explicit
+	}
+	if regular > fallback {
+		return regular
+	}
+	return fallback
 }
 
 func NormalizeProxyProfile(profile ProxyProfile) (ProxyProfile, error) {
@@ -308,7 +347,10 @@ func NormalizeProxyProfile(profile ProxyProfile) (ProxyProfile, error) {
 		profile.Endpoint = endpoint
 	}
 	if profile.TimeoutSeconds <= 0 {
-		profile.TimeoutSeconds = 60
+		profile.TimeoutSeconds = DefaultProxyTimeoutSeconds
+	}
+	if profile.StreamIdleTimeoutSeconds <= 0 {
+		profile.StreamIdleTimeoutSeconds = EffectiveProxyProfileStreamIdleTimeoutSeconds(profile)
 	}
 	if profile.Status == "" {
 		profile.Status = StatusEnabled
@@ -362,6 +404,27 @@ type PricingRule struct {
 	EffectiveTo                     *time.Time
 }
 
+type ConsoleChatSession struct {
+	ID                   string
+	UserID               string
+	Title                string
+	CustomTitle          bool
+	PublicName           string
+	SystemPrompt         string
+	Draft                string
+	DraftAttachmentsJSON string
+	Status               string
+	MessagesJSON         string
+	MessageCount         int
+	LastRequestID        string
+	LastResponseID       string
+	LastError            string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	LastMessageAt        *time.Time
+	CompletedAt          *time.Time
+}
+
 type UsageRecord struct {
 	RequestID           string
 	UserID              string
@@ -398,32 +461,6 @@ type APIKeyUsageSummary struct {
 	Monthly UsageTotals `json:"monthly"`
 }
 
-type AuditEvent struct {
-	ID             string
-	RequestID      string
-	TraceID        string
-	UserID         string
-	APIKeyID       string
-	ClientIP       string
-	UserAgent      string
-	Protocol       string
-	Endpoint       string
-	ModelAlias     string
-	ProviderID     string
-	UpstreamModel  string
-	ProxyProfileID string
-	StatusCode     int
-	ErrorCode      string
-	LatencyMS      int64
-	InputTokens    int
-	OutputTokens   int
-	CostMicroCents int64
-	Stream         bool
-	EventType      string
-	Message        string
-	CreatedAt      time.Time
-}
-
 type DashboardData struct {
 	RequestCount   int64
 	ErrorCount     int64
@@ -431,7 +468,6 @@ type DashboardData struct {
 	InputTokens    int64
 	OutputTokens   int64
 	CostMicroCents int64
-	RecentAudits   []AuditEvent
 	RecentUsage    []UsageRecord
 	ModelCosts     []ModelCost
 }
@@ -478,7 +514,6 @@ type ConsoleUserSummary struct {
 type UserDirectory struct {
 	Settings            ConsoleAuthSettings
 	Summaries           []ConsoleUserSummary
-	RecentAudit         []AuditEvent
 	ObservedUsers       int64
 	ActiveAPIKeys       int64
 	ReadyOAuthProviders int64

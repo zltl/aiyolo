@@ -8,11 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/zltl/aiyolo/internal/domain"
@@ -21,9 +26,12 @@ import (
 )
 
 const (
-	consoleChatStreamPath      = "/console/chat/stream"
-	consoleAnthropicVersion    = "2023-06-01"
-	consoleChatStreamMediaType = "application/x-ndjson; charset=utf-8"
+	consoleChatStreamPath            = "/console/chat/stream"
+	consoleAnthropicVersion          = "2023-06-01"
+	consoleChatStreamMediaType       = "application/x-ndjson; charset=utf-8"
+	consoleChatHeartbeatInterval     = 10 * time.Second
+	consoleChatAutoContinuationLimit = 2
+	consoleChatContinuationPrompt    = "Continue exactly from where you stopped without repeating the text already shown."
 )
 
 type consoleChatTarget struct {
@@ -35,13 +43,13 @@ type consoleChatTarget struct {
 }
 
 type consoleChatStreamEvent struct {
-	Type    string                 `json:"type"`
-	Delta   string                 `json:"delta,omitempty"`
-	Reasoning string               `json:"reasoning,omitempty"`
-	HTML    string                 `json:"html,omitempty"`
-	Error   string                 `json:"error,omitempty"`
-	Message *consoleChatAPIMessage `json:"message,omitempty"`
-	Result  *consoleChatAPIResult  `json:"result,omitempty"`
+	Type      string                 `json:"type"`
+	Delta     string                 `json:"delta,omitempty"`
+	Reasoning string                 `json:"reasoning,omitempty"`
+	HTML      string                 `json:"html,omitempty"`
+	Error     string                 `json:"error,omitempty"`
+	Message   *consoleChatAPIMessage `json:"message,omitempty"`
+	Result    *consoleChatAPIResult  `json:"result,omitempty"`
 }
 
 type consoleChatAPIMessage struct {
@@ -62,6 +70,69 @@ type consoleChatAPIResult struct {
 	TotalTokens   int    `json:"totalTokens"`
 }
 
+type consoleChatEventStreamWriter struct {
+	handler  *Handler
+	w        http.ResponseWriter
+	mu       sync.Mutex
+	activity chan struct{}
+}
+
+func newConsoleChatEventStreamWriter(handler *Handler, w http.ResponseWriter) *consoleChatEventStreamWriter {
+	return &consoleChatEventStreamWriter{
+		handler:  handler,
+		w:        w,
+		activity: make(chan struct{}, 1),
+	}
+}
+
+func (writer *consoleChatEventStreamWriter) Write(event consoleChatStreamEvent) error {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if err := writer.handler.writeChatStreamEvent(writer.w, event); err != nil {
+		return err
+	}
+	select {
+	case writer.activity <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (writer *consoleChatEventStreamWriter) StartHeartbeat(ctx context.Context, interval time.Duration, onError func(error)) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if interval <= 0 {
+			return
+		}
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-writer.activity:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(interval)
+			case <-timer.C:
+				if err := writer.Write(consoleChatStreamEvent{Type: "heartbeat"}); err != nil {
+					if onError != nil {
+						onError(err)
+					}
+					return
+				}
+				timer.Reset(interval)
+			}
+		}
+	}()
+	return done
+}
+
 func consoleChatAPIResultView(result consoleChatResultView) consoleChatAPIResult {
 	return consoleChatAPIResult{
 		PublicName:    result.PublicName,
@@ -76,11 +147,41 @@ func consoleChatAPIResultView(result consoleChatResultView) consoleChatAPIResult
 	}
 }
 
+func consoleChatStreamResultAvailable(result consoleChatResultView) bool {
+	return strings.TrimSpace(result.PublicName) != ""
+}
+
+func consoleChatDisplayedResult(locale string, result consoleChatResultView) consoleChatResultView {
+	if !consoleChatStreamResultAvailable(result) {
+		return result
+	}
+	result.Output = consoleChatDisplayOutput(locale, result)
+	return result
+}
+
+func consoleChatStreamMessage(locale string, result consoleChatResultView) *consoleChatAPIMessage {
+	if strings.TrimSpace(result.Output) == "" && strings.TrimSpace(result.Reasoning) == "" {
+		return nil
+	}
+	displayed := consoleChatDisplayedResult(locale, result)
+	return &consoleChatAPIMessage{Role: "assistant", Content: displayed.Output, Reasoning: displayed.Reasoning}
+}
+
+func consoleChatStreamResult(locale string, result consoleChatResultView) *consoleChatAPIResult {
+	if !consoleChatStreamResultAvailable(result) {
+		return nil
+	}
+	displayed := consoleChatDisplayedResult(locale, result)
+	apiResult := consoleChatAPIResultView(displayed)
+	return &apiResult
+}
+
 type consoleChatStreamChunk struct {
 	Delta        string
 	Reasoning    string
 	ResponseID   string
 	FinishReason string
+	Done         bool
 	Usage        domain.UsageRecord
 	Err          error
 }
@@ -116,6 +217,7 @@ type consoleChatAnthropicSourcePayload struct {
 	Type      string `json:"type"`
 	URL       string `json:"url,omitempty"`
 	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 type consoleUpstreamError struct {
@@ -231,27 +333,97 @@ func (handler *Handler) streamChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	handler.startChatEventStream(w)
+	executionCtx, executionCancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	defer executionCancel()
+	streamCtx, streamCancel := context.WithCancel(r.Context())
+	defer streamCancel()
 	requestID := requestID(r)
 	consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
 	started := time.Now()
-	state.Messages = append(state.Messages, buildConsoleChatMessageWithAttachments(locale, "user", state.Form.Draft, state.Form.Attachments))
-	execution, err := runConsoleRawChatTurn(r.Context(), target.Protocol, target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments, true, func(delta string) error {
-		return handler.writeChatStreamEvent(w, consoleChatStreamEvent{Type: "delta", Delta: delta})
-	}, func(reasoning string) error {
-		return handler.writeChatStreamEvent(w, consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning})
+	executionProtocol := handler.consoleChatExecutionProtocol(target.Route, target.Provider, state.Messages, state.Form.Attachments)
+	log.Printf("console chat stream start request_id=%s user_id=%s model=%s provider=%s protocol=%s proxy_profile=%s attachments=%d prompt_chars=%d provider_timeout_s=%d stream_idle_timeout_s=%d", requestID, consoleUserID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, len(state.Form.Attachments), len(strings.TrimSpace(state.Form.Draft)), domain.EffectiveProviderTimeoutSeconds(target.Provider), consoleChatStreamIdleTimeoutSeconds(target.Provider, target.Profile))
+	streamWriter := newConsoleChatEventStreamWriter(handler, w)
+	var clientDisconnected atomic.Bool
+	heartbeatErrCh := make(chan error, 1)
+	heartbeatDone := streamWriter.StartHeartbeat(streamCtx, consoleChatHeartbeatInterval, func(err error) {
+		log.Printf("console chat stream heartbeat_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, err)
+		clientDisconnected.Store(true)
+		select {
+		case heartbeatErrCh <- err:
+		default:
+		}
+		streamCancel()
 	})
-	persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, clientIP(r), r.UserAgent(), target.Protocol, target.Route, target.Provider, target.Profile, target.PricingRule, started, execution, err)
+	state.Messages = append(state.Messages, buildConsoleChatMessageWithAttachments(locale, "user", state.Form.Draft, state.Form.Attachments))
+	execution, err := handler.runConsoleChatTurnWithContinuation(executionCtx, executionProtocol, target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments, true, func(delta string) error {
+		if clientDisconnected.Load() {
+			return nil
+		}
+		if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "delta", Delta: delta}); writeErr != nil {
+			clientDisconnected.Store(true)
+			streamCancel()
+		}
+		return nil
+	}, func(reasoning string) error {
+		if clientDisconnected.Load() {
+			return nil
+		}
+		if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning}); writeErr != nil {
+			clientDisconnected.Store(true)
+			streamCancel()
+		}
+		return nil
+	})
+	executionCancel()
+	streamCancel()
+	<-heartbeatDone
+	if r.Context().Err() != nil {
+		clientDisconnected.Store(true)
+	}
+	select {
+	case heartbeatErr := <-heartbeatErrCh:
+		if heartbeatErr != nil && !clientDisconnected.Load() && (err == nil || errors.Is(err, context.Canceled)) {
+			err = heartbeatErr
+		}
+	default:
+	}
 	if err != nil {
-		state.Error = fmt.Sprintf(handler.requestText(r, "对话失败：%s", "Chat failed: %s"), err.Error())
-		_ = handler.streamChatReplace(w, r, state)
+		log.Printf("console chat stream interrupted request_id=%s user_id=%s model=%s provider=%s protocol=%s proxy_profile=%s reason_code=%s status=%d finish_reason=%q duration_ms=%d output_chars=%d reasoning_chars=%d total_tokens=%d err=%v", requestID, consoleUserID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, consoleChatErrorCode(err), execution.StatusCode, execution.Result.FinishReason, execution.Result.DurationMS, len(strings.TrimSpace(execution.Result.Output)), len(strings.TrimSpace(execution.Result.Reasoning)), execution.Result.TotalTokens, err)
+	} else {
+		log.Printf("console chat stream completed request_id=%s user_id=%s model=%s provider=%s protocol=%s proxy_profile=%s status=%d finish_reason=%q duration_ms=%d output_chars=%d reasoning_chars=%d total_tokens=%d", requestID, consoleUserID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, execution.StatusCode, execution.Result.FinishReason, execution.Result.DurationMS, len(strings.TrimSpace(execution.Result.Output)), len(strings.TrimSpace(execution.Result.Reasoning)), execution.Result.TotalTokens)
+	}
+	persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, executionProtocol, target.Route, target.Provider, target.PricingRule, started, execution)
+	if err != nil {
+		failureDetail := handler.consoleChatStreamFailureDetail(r, err, target.Provider, target.Profile)
+		state.Error = fmt.Sprintf(handler.requestText(r, "对话失败：%s", "Chat failed: %s"), failureDetail)
+		state.Messages = consoleChatAppendResultMessage(locale, state.Messages, execution.Result)
+		handler.syncConsoleChatPageSession(context.WithoutCancel(r.Context()), r, &state, state.Messages, consoleChatSessionStatusForError(execution.Result), requestID, execution.Result.ResponseID, failureDetail)
+		if clientDisconnected.Load() {
+			return
+		}
+		if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "error", Error: state.Error, Message: consoleChatStreamMessage(locale, execution.Result), Result: consoleChatStreamResult(locale, execution.Result)}); writeErr != nil {
+			log.Printf("console chat stream error_event_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, target.Protocol, target.Profile.ID, writeErr)
+		}
+		if replaceErr := handler.streamChatReplace(w, r, state); replaceErr != nil {
+			log.Printf("console chat stream replace_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, target.Protocol, target.Profile.ID, replaceErr)
+		}
 		return
 	}
 	state.Form.Draft = ""
 	state.Form.Attachments = nil
-	execution.Result.Output = consoleChatDisplayOutput(locale, execution.Result)
+	execution.Result = consoleChatDisplayedResult(locale, execution.Result)
 	state.Messages = append(state.Messages, buildConsoleChatMessageWithReasoning(locale, "assistant", execution.Result.Output, execution.Result.Reasoning))
+	handler.syncConsoleChatPageSession(context.WithoutCancel(r.Context()), r, &state, state.Messages, consoleChatSessionStatusCompleted, requestID, execution.Result.ResponseID, "")
+	if clientDisconnected.Load() {
+		return
+	}
+	if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "done", Message: consoleChatStreamMessage(locale, execution.Result), Result: consoleChatStreamResult(locale, execution.Result)}); writeErr != nil {
+		log.Printf("console chat stream done_event_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, target.Protocol, target.Profile.ID, writeErr)
+	}
 	state.Result = &execution.Result
-	_ = handler.streamChatReplace(w, r, state)
+	if replaceErr := handler.streamChatReplace(w, r, state); replaceErr != nil {
+		log.Printf("console chat stream replace_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, target.Protocol, target.Profile.ID, replaceErr)
+	}
 }
 
 func (handler *Handler) startChatEventStream(w http.ResponseWriter) {
@@ -305,10 +477,14 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 		timeoutSeconds = 90
 	}
 
-	chatCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	chatCtx := ctx
+	cancel := func() {}
+	if !stream {
+		chatCtx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	}
 	defer cancel()
 
-	httpClient, err := proxytransport.NewTransportFactory().HTTPClient(chatCtx, provider, profile)
+	httpClient, err := proxytransport.NewTransportFactory().HTTPClient(chatCtx, provider, profile, stream)
 	if err != nil {
 		return consoleChatExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadGateway, Stream: stream}}, err
 	}
@@ -348,13 +524,172 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 	return parseConsoleChatJSONResponse(responseBody, protocol, route, provider, response.StatusCode, stream, started)
 }
 
+func runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
+	workingHistory := cloneConsoleChatMessages(history)
+	currentPrompt := strings.TrimSpace(userInput)
+	currentAttachments := cloneConsoleChatAttachments(attachments)
+	started := time.Now()
+	aggregate := consoleChatExecution{
+		Result: consoleChatResultView{
+			PublicName:    route.PublicName,
+			ProviderID:    provider.ID,
+			ProviderName:  firstNonEmpty(provider.Name, provider.ID),
+			UpstreamModel: firstNonEmpty(route.UpstreamModel, route.PublicName),
+		},
+		Usage: domain.UsageRecord{Currency: "USD", Stream: stream},
+	}
+	var combinedOutput strings.Builder
+	var combinedReasoning strings.Builder
+
+	for attempt := 0; ; attempt++ {
+		var turnOutput strings.Builder
+		var turnReasoning strings.Builder
+		deltaCallback := onDelta
+		reasoningCallback := onReasoning
+		if stream {
+			deltaCallback = func(delta string) error {
+				turnOutput.WriteString(delta)
+				if onDelta != nil {
+					return onDelta(delta)
+				}
+				return nil
+			}
+			reasoningCallback = func(reasoning string) error {
+				turnReasoning.WriteString(reasoning)
+				if onReasoning != nil {
+					return onReasoning(reasoning)
+				}
+				return nil
+			}
+		}
+
+		execution, err := runConsoleRawChatTurn(ctx, protocol, provider, route, profile, systemPrompt, workingHistory, currentPrompt, currentAttachments, stream, deltaCallback, reasoningCallback)
+		if turnOutput.Len() == 0 {
+			turnOutput.WriteString(consoleChatContinuationContent(execution.Result))
+		}
+		if turnReasoning.Len() == 0 {
+			turnReasoning.WriteString(strings.TrimSpace(execution.Result.Reasoning))
+		}
+		if turnOutput.Len() > 0 {
+			combinedOutput.WriteString(turnOutput.String())
+		}
+		if text := strings.TrimSpace(turnReasoning.String()); text != "" {
+			if combinedReasoning.Len() > 0 {
+				combinedReasoning.WriteString("\n\n")
+			}
+			combinedReasoning.WriteString(text)
+		}
+		mergeConsoleChatExecutionTotals(&aggregate, execution)
+		finalizeConsoleChatExecutionAggregate(&aggregate, route, provider, started, combinedOutput.String(), combinedReasoning.String())
+		if err != nil {
+			return aggregate, err
+		}
+		if !consoleChatFinishReasonNeedsContinuation(execution.Result.FinishReason) || attempt >= consoleChatAutoContinuationLimit {
+			return aggregate, nil
+		}
+
+		workingHistory = append(workingHistory, consoleChatMessageView{Role: "user", Content: currentPrompt, Attachments: cloneConsoleChatAttachments(currentAttachments)})
+		if assistantContent := strings.TrimSpace(turnOutput.String()); assistantContent != "" {
+			workingHistory = append(workingHistory, consoleChatMessageView{Role: "assistant", Content: assistantContent})
+		}
+		currentPrompt = consoleChatContinuationPrompt
+		currentAttachments = nil
+	}
+}
+
+func consoleChatContinuationContent(result consoleChatResultView) string {
+	content := result.Output
+	if content == consoleChatEmptyOutput {
+		return ""
+	}
+	return content
+}
+
+func consoleChatFinishReasonNeedsContinuation(finishReason string) bool {
+	switch strings.ToLower(strings.TrimSpace(finishReason)) {
+	case "length", "max_tokens":
+		return true
+	default:
+		return false
+	}
+}
+
+func mergeConsoleChatExecutionTotals(target *consoleChatExecution, next consoleChatExecution) {
+	if target == nil {
+		return
+	}
+	if next.StatusCode != 0 {
+		target.StatusCode = next.StatusCode
+	}
+	if next.Result.PublicName != "" {
+		target.Result.PublicName = next.Result.PublicName
+	}
+	if next.Result.ProviderID != "" {
+		target.Result.ProviderID = next.Result.ProviderID
+	}
+	if next.Result.ProviderName != "" {
+		target.Result.ProviderName = next.Result.ProviderName
+	}
+	if next.Result.UpstreamModel != "" {
+		target.Result.UpstreamModel = next.Result.UpstreamModel
+	}
+	if next.Result.ResponseID != "" {
+		target.Result.ResponseID = next.Result.ResponseID
+	}
+	if next.Result.FinishReason != "" {
+		target.Result.FinishReason = next.Result.FinishReason
+	}
+	addConsoleChatUsageTotals(&target.Usage, next.Usage)
+}
+
+func addConsoleChatUsageTotals(target *domain.UsageRecord, next domain.UsageRecord) {
+	if target == nil {
+		return
+	}
+	target.InputTokens += next.InputTokens
+	target.OutputTokens += next.OutputTokens
+	target.CacheCreationTokens += next.CacheCreationTokens
+	target.CacheReadTokens += next.CacheReadTokens
+	target.TotalTokens += next.TotalTokens
+	target.CostMicroCents += next.CostMicroCents
+	target.Stream = target.Stream || next.Stream
+	if next.StatusCode != 0 {
+		target.StatusCode = next.StatusCode
+	}
+	if target.Currency == "" && next.Currency != "" {
+		target.Currency = next.Currency
+	}
+}
+
+func finalizeConsoleChatExecutionAggregate(target *consoleChatExecution, route domain.ModelRoute, provider domain.Provider, started time.Time, output string, reasoning string) {
+	if target == nil {
+		return
+	}
+	target.Result.PublicName = firstNonEmpty(target.Result.PublicName, route.PublicName)
+	target.Result.ProviderID = firstNonEmpty(target.Result.ProviderID, provider.ID)
+	target.Result.ProviderName = firstNonEmpty(target.Result.ProviderName, provider.Name, provider.ID)
+	target.Result.UpstreamModel = firstNonEmpty(target.Result.UpstreamModel, route.UpstreamModel, route.PublicName)
+	target.Usage.Currency = firstNonEmpty(target.Usage.Currency, "USD")
+	target.Usage.LatencyMS = time.Since(started).Milliseconds()
+	if target.Usage.TotalTokens == 0 {
+		target.Usage.TotalTokens = target.Usage.InputTokens + target.Usage.OutputTokens + target.Usage.CacheCreationTokens + target.Usage.CacheReadTokens
+	}
+	target.Result.Output = strings.TrimSpace(output)
+	if target.Result.Output == "" {
+		target.Result.Output = consoleChatEmptyOutput
+	}
+	target.Result.Reasoning = strings.TrimSpace(reasoning)
+	target.Result.DurationMS = target.Usage.LatencyMS
+	target.Result.TotalTokens = target.Usage.TotalTokens
+}
+
 func buildConsoleChatRequestBody(protocol string, route domain.ModelRoute, systemPrompt string, history []consoleChatMessageView, prompt string, attachments []consoleChatAttachmentView, stream bool) ([]byte, error) {
 	upstreamModel := firstNonEmpty(route.UpstreamModel, route.PublicName)
 	switch protocol {
 	case domain.ProtocolAnthropic:
 		payload := map[string]any{
 			"model":      upstreamModel,
-			"max_tokens": consoleChatMaxCompletionTokens,
+			"max_tokens": consoleChatCompletionTokens(route),
 			"messages":   buildConsoleAnthropicMessages(history, prompt, attachments),
 			"stream":     stream,
 		}
@@ -365,7 +700,7 @@ func buildConsoleChatRequestBody(protocol string, route domain.ModelRoute, syste
 	default:
 		payload := map[string]any{
 			"model":      upstreamModel,
-			"max_tokens": consoleChatMaxCompletionTokens,
+			"max_tokens": consoleChatCompletionTokens(route),
 			"messages":   buildConsoleOpenAIMessages(systemPrompt, history, prompt, attachments),
 			"stream":     stream,
 		}
@@ -445,9 +780,9 @@ func buildConsoleAnthropicMessageContent(text string, attachments []consoleChatA
 		}
 		switch {
 		case consoleChatAttachmentIsImage(attachment.MediaType):
-			parts = append(parts, consoleChatAnthropicContentPayload{Type: "image", Source: &consoleChatAnthropicSourcePayload{Type: "url", URL: attachment.URL, MediaType: attachment.MediaType}})
+			parts = append(parts, consoleChatAnthropicContentPayload{Type: "image", Source: consoleChatAnthropicAttachmentSource(attachment)})
 		case consoleChatAttachmentIsDocument(attachment.MediaType):
-			parts = append(parts, consoleChatAnthropicContentPayload{Type: "document", Title: attachment.Name, Source: &consoleChatAnthropicSourcePayload{Type: "url", URL: attachment.URL, MediaType: attachment.MediaType}})
+			parts = append(parts, consoleChatAnthropicContentPayload{Type: "document", Title: attachment.Name, Source: consoleChatAnthropicAttachmentSource(attachment)})
 		default:
 			parts = append(parts, consoleChatAnthropicContentPayload{Type: "text", Text: consoleChatAttachmentReferenceText(attachment)})
 		}
@@ -459,6 +794,38 @@ func buildConsoleAnthropicMessageContent(text string, attachments []consoleChatA
 		return parts[0].Text
 	}
 	return parts
+}
+
+func consoleChatAnthropicAttachmentSource(attachment consoleChatAttachmentView) *consoleChatAnthropicSourcePayload {
+	if mediaType, data, ok := consoleChatAttachmentDataPayload(attachment); ok {
+		return &consoleChatAnthropicSourcePayload{Type: "base64", MediaType: mediaType, Data: data}
+	}
+	return &consoleChatAnthropicSourcePayload{Type: "url", URL: attachment.URL, MediaType: attachment.MediaType}
+}
+
+func consoleChatAttachmentDataPayload(attachment consoleChatAttachmentView) (string, string, bool) {
+	trimmedURL := strings.TrimSpace(attachment.URL)
+	if !strings.HasPrefix(trimmedURL, "data:") {
+		return "", "", false
+	}
+	raw := strings.TrimPrefix(trimmedURL, "data:")
+	header, data, ok := strings.Cut(raw, ",")
+	if !ok {
+		return "", "", false
+	}
+	header = strings.TrimSpace(header)
+	data = strings.TrimSpace(data)
+	if header == "" || data == "" || !strings.HasSuffix(strings.ToLower(header), ";base64") {
+		return "", "", false
+	}
+	mediaType := strings.TrimSpace(strings.TrimSuffix(header, ";base64"))
+	if mediaType == "" {
+		mediaType = strings.TrimSpace(attachment.MediaType)
+	}
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	return mediaType, data, true
 }
 
 func consoleChatAttachmentReferenceText(attachment consoleChatAttachmentView) string {
@@ -595,6 +962,7 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 	}
 	var output strings.Builder
 	var reasoning strings.Builder
+	completed := false
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -614,6 +982,9 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 			if chunk.FinishReason != "" {
 				result.FinishReason = chunk.FinishReason
 			}
+			if chunk.Done || chunk.FinishReason != "" {
+				completed = true
+			}
 			if chunk.Delta != "" {
 				output.WriteString(chunk.Delta)
 				if onDelta != nil {
@@ -623,7 +994,7 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 						result.Reasoning = strings.TrimSpace(reasoning.String())
 						result.DurationMS = usage.LatencyMS
 						result.TotalTokens = usage.TotalTokens
-						return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, callbackErr
+						return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, fmt.Errorf("write streamed delta to client: %w", callbackErr)
 					}
 				}
 			}
@@ -636,13 +1007,21 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 						result.Reasoning = strings.TrimSpace(reasoning.String())
 						result.DurationMS = usage.LatencyMS
 						result.TotalTokens = usage.TotalTokens
-						return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, callbackErr
+						return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, fmt.Errorf("write streamed reasoning to client: %w", callbackErr)
 					}
 				}
 			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				if !completed {
+					usage.LatencyMS = time.Since(started).Milliseconds()
+					result.Output = strings.TrimSpace(output.String())
+					result.Reasoning = strings.TrimSpace(reasoning.String())
+					result.DurationMS = usage.LatencyMS
+					result.TotalTokens = usage.TotalTokens
+					return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, fmt.Errorf("upstream stream ended before completion marker: %w", io.ErrUnexpectedEOF)
+				}
 				break
 			}
 			usage.LatencyMS = time.Since(started).Milliseconds()
@@ -650,7 +1029,7 @@ func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domai
 			result.Reasoning = strings.TrimSpace(reasoning.String())
 			result.DurationMS = usage.LatencyMS
 			result.TotalTokens = usage.TotalTokens
-			return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, err
+			return consoleChatExecution{Result: result, Usage: usage, StatusCode: usage.StatusCode}, fmt.Errorf("read streamed response: %w", err)
 		}
 	}
 	usage.LatencyMS = time.Since(started).Milliseconds()
@@ -673,7 +1052,16 @@ func parseConsoleChatStreamChunk(line []byte, protocol string) (consoleChatStrea
 		return consoleChatStreamChunk{}, nil
 	}
 	raw := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-	if raw == "" || raw == "[DONE]" {
+	if raw == "" {
+		return consoleChatStreamChunk{}, nil
+	}
+	if raw == "[DONE]" {
+		return consoleChatStreamChunk{Done: true}, nil
+	}
+	if protocol == domain.ProtocolAnthropic && strings.EqualFold(raw, "message_stop") {
+		return consoleChatStreamChunk{Done: true}, nil
+	}
+	if raw == "" {
 		return consoleChatStreamChunk{}, nil
 	}
 	rawBytes := []byte(raw)
@@ -709,6 +1097,8 @@ func parseConsoleChatStreamChunk(line []byte, protocol string) (consoleChatStrea
 					chunk.FinishReason = finish
 				}
 			}
+		case "message_stop":
+			chunk.Done = true
 		}
 		if chunk.ResponseID == "" {
 			chunk.ResponseID = consoleValueString(payload["id"])
@@ -947,5 +1337,67 @@ func consoleChatErrorCode(err error) string {
 		}
 		return "console_chat_failed"
 	}
+	switch {
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "stream_unexpected_eof"
+	case consoleChatErrorIsStreamTimeout(err):
+		return "stream_idle_timeout"
+	case consoleChatErrorIsClientDisconnect(err):
+		return "client_disconnected"
+	case errors.Is(err, context.Canceled):
+		return "stream_canceled"
+	}
 	return modelTestErrorCode(err)
+}
+
+func consoleChatErrorIsStreamTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func consoleChatErrorIsClientDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+}
+
+func consoleChatStreamIdleTimeoutSeconds(provider domain.Provider, profile domain.ProxyProfile) int {
+	timeoutSeconds := domain.EffectiveProviderStreamIdleTimeoutSeconds(provider)
+	if profile.StreamIdleTimeoutSeconds > 0 {
+		return profile.StreamIdleTimeoutSeconds
+	}
+	if profile.TimeoutSeconds > 0 && timeoutSeconds < profile.TimeoutSeconds {
+		return profile.TimeoutSeconds
+	}
+	return timeoutSeconds
+}
+
+func (handler *Handler) consoleChatStreamFailureDetail(r *http.Request, err error, provider domain.Provider, profile domain.ProxyProfile) string {
+	if err == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(err.Error())
+	var upstreamErr *consoleUpstreamError
+	if errors.As(err, &upstreamErr) {
+		return raw
+	}
+	switch {
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return fmt.Sprintf(handler.requestText(r, "上游流在返回完成标记前提前断开（%s）。", "The upstream stream closed before sending a completion marker (%s)."), raw)
+	case consoleChatErrorIsStreamTimeout(err):
+		return fmt.Sprintf(handler.requestText(r, "等待上游下一段输出超时，已超过 %d 秒的流空闲超时（%s）。", "Timed out waiting for the next upstream chunk after exceeding the %d-second stream idle timeout (%s)."), consoleChatStreamIdleTimeoutSeconds(provider, profile), raw)
+	case consoleChatErrorIsClientDisconnect(err):
+		return fmt.Sprintf(handler.requestText(r, "浏览器连接已断开，网关停止继续写入流（%s）。", "The browser connection closed, so the gateway stopped writing the stream (%s)."), raw)
+	case errors.Is(err, context.Canceled):
+		return fmt.Sprintf(handler.requestText(r, "流式请求在完成前被取消（%s）。", "The stream was canceled before completion (%s)."), raw)
+	default:
+		return raw
+	}
 }

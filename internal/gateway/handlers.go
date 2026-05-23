@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -108,7 +108,7 @@ type routerMetadata struct {
 	IsByok        bool   `json:"is_byok"`
 	Summary       string `json:"summary"`
 	Endpoints     struct {
-		Total     int                    `json:"total"`
+		Total     int                      `json:"total"`
 		Available []routerMetadataEndpoint `json:"available"`
 	} `json:"endpoints"`
 	Attempts []routerMetadataAttempt `json:"attempts"`
@@ -120,19 +120,19 @@ type providerPriceLimits struct {
 }
 
 type providerPreferences struct {
-	Order              []string
-	Only               []string
-	Ignore             []string
-	Sort               string
-	AllowFallbacks     bool
-	HasAllowFallbacks  bool
-	RequireParameters  bool
-	HasMaxPrice        bool
-	MaxPrice           providerPriceLimits
-	DataCollection     string
-	HasDataCollection  bool
-	ZDR                bool
-	HasZDR             bool
+	Order             []string
+	Only              []string
+	Ignore            []string
+	Sort              string
+	AllowFallbacks    bool
+	HasAllowFallbacks bool
+	RequireParameters bool
+	HasMaxPrice       bool
+	MaxPrice          providerPriceLimits
+	DataCollection    string
+	HasDataCollection bool
+	ZDR               bool
+	HasZDR            bool
 }
 
 type compatibleRequest struct {
@@ -301,7 +301,6 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 					log.Printf("touch api key request_id=%s err=%v", requestID, err)
 				}
 				handler.logRequest(gatewayLogInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: entry.ModelAlias, ProviderID: entry.ProviderID, UpstreamModel: entry.UpstreamModel, Stream: false, StatusCode: entry.StatusCode, Started: started, Usage: usage, Message: "response cache hit"})
-				handler.audit(context.WithoutCancel(r.Context()), auditInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: entry.ModelAlias, ProviderID: entry.ProviderID, UpstreamModel: entry.UpstreamModel, StatusCode: entry.StatusCode, Started: started, ClientIP: clientIP(r), UserAgent: r.UserAgent(), Usage: usage, EventType: "api_call", Message: "response cache hit"})
 				return
 			}
 		}
@@ -319,7 +318,6 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 		}
 		writeProtocolError(w, status, code, message, protocol, nil)
 		handler.logRequest(gatewayLogInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: request.Model, StatusCode: status, ErrorCode: code, Started: started, Stream: request.Stream, Message: message})
-		handler.audit(r.Context(), auditInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: request.Model, StatusCode: status, ErrorCode: code, Started: started, ClientIP: clientIP(r), UserAgent: r.UserAgent(), EventType: "api_call", Message: message})
 		return
 	}
 	primaryCandidate := candidates[0]
@@ -351,7 +349,6 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 		}
 		writeProtocolError(w, statusCode, code, err.Error(), protocol, nil)
 		handler.logRequest(gatewayLogInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: primaryCandidate.Route.PublicName, ProviderID: primaryCandidate.Provider.ID, UpstreamModel: primaryCandidate.Route.UpstreamModel, ProxyProfileID: primaryCandidate.Profile.ID, Stream: request.Stream, StatusCode: statusCode, ErrorCode: code, Started: started, Message: err.Error()})
-		handler.audit(context.WithoutCancel(r.Context()), auditInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: primaryCandidate.Route.PublicName, ProviderID: primaryCandidate.Provider.ID, UpstreamModel: primaryCandidate.Route.UpstreamModel, ProxyProfileID: primaryCandidate.Profile.ID, StatusCode: statusCode, ErrorCode: code, Started: started, ClientIP: clientIP(r), UserAgent: r.UserAgent(), EventType: "quota_check", Message: err.Error()})
 		return
 	}
 	var response *http.Response
@@ -360,7 +357,7 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 	attempts := make([]routerMetadataAttempt, 0, len(candidates))
 	for index, candidate := range candidates {
 		selectedCandidate = candidate
-		client, err := handler.transports.HTTPClient(r.Context(), candidate.Provider, candidate.Profile)
+		client, err := handler.transports.HTTPClient(r.Context(), candidate.Provider, candidate.Profile, request.Stream)
 		if err != nil {
 			lastErr = err
 			attempts = append(attempts, routerMetadataAttempt{Index: index + 1, Provider: candidate.Provider.ID, Model: candidate.Route.UpstreamModel, Status: "failed", FailureClass: "network_error"})
@@ -418,7 +415,6 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 		}
 		writeProtocolError(w, http.StatusBadGateway, "upstream_error", message, protocol, metadataErrorPayload(includeRouterMetadata, metadata))
 		handler.logRequest(gatewayLogInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: selectedCandidate.Route.PublicName, ProviderID: selectedCandidate.Provider.ID, UpstreamModel: selectedCandidate.Route.UpstreamModel, ProxyProfileID: selectedCandidate.Profile.ID, Stream: request.Stream, StatusCode: http.StatusBadGateway, ErrorCode: "upstream_error", Started: started, Usage: usage, Message: message})
-		handler.audit(context.WithoutCancel(r.Context()), auditInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: selectedCandidate.Route.PublicName, ProviderID: selectedCandidate.Provider.ID, UpstreamModel: selectedCandidate.Route.UpstreamModel, ProxyProfileID: selectedCandidate.Profile.ID, StatusCode: http.StatusBadGateway, ErrorCode: "upstream_error", Started: started, ClientIP: clientIP(r), UserAgent: r.UserAgent(), Usage: usage, EventType: "api_call", Message: message})
 		return
 	}
 	defer response.Body.Close()
@@ -509,7 +505,6 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 		log.Printf("touch api key request_id=%s err=%v", requestID, err)
 	}
 	handler.logRequest(gatewayLogInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: selectedCandidate.Route.PublicName, ProviderID: selectedCandidate.Provider.ID, UpstreamModel: selectedCandidate.Route.UpstreamModel, ProxyProfileID: selectedCandidate.Profile.ID, Stream: request.Stream, StatusCode: response.StatusCode, Started: started, Usage: usage})
-	handler.audit(context.WithoutCancel(r.Context()), auditInput{RequestID: requestID, Subject: subject, Protocol: protocol, Endpoint: endpoint, ModelAlias: selectedCandidate.Route.PublicName, ProviderID: selectedCandidate.Provider.ID, UpstreamModel: selectedCandidate.Route.UpstreamModel, ProxyProfileID: selectedCandidate.Profile.ID, StatusCode: response.StatusCode, Started: started, ClientIP: clientIP(r), UserAgent: r.UserAgent(), Stream: request.Stream, Usage: usage, EventType: "api_call"})
 }
 
 func (handler *Handler) keyInfo(w http.ResponseWriter, r *http.Request) {
@@ -530,15 +525,15 @@ func (handler *Handler) keyInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	response := struct {
 		Data struct {
-			ID                     string                 `json:"id"`
-			Name                   string                 `json:"name"`
-			Status                 string                 `json:"status"`
-			CreatedAt              time.Time              `json:"created_at"`
-			LastUsedAt             *time.Time             `json:"last_used_at,omitempty"`
-			IncludeByokInLimit     bool                   `json:"include_byok_in_limit"`
-			ByokUsage              domain.UsageTotals     `json:"byok_usage"`
-			Usage                  domain.APIKeyUsageSummary `json:"usage"`
-			Limits                 struct {
+			ID                 string                    `json:"id"`
+			Name               string                    `json:"name"`
+			Status             string                    `json:"status"`
+			CreatedAt          time.Time                 `json:"created_at"`
+			LastUsedAt         *time.Time                `json:"last_used_at,omitempty"`
+			IncludeByokInLimit bool                      `json:"include_byok_in_limit"`
+			ByokUsage          domain.UsageTotals        `json:"byok_usage"`
+			Usage              domain.APIKeyUsageSummary `json:"usage"`
+			Limits             struct {
 				RPM                    int   `json:"rpm"`
 				TPM                    int   `json:"tpm"`
 				Concurrent             int   `json:"concurrent"`
@@ -1147,13 +1142,13 @@ func (handler *Handler) buildUpstreamRequest(ctx context.Context, clientRequest 
 
 func copyRequestHeaders(dst, src http.Header, protocol string) {
 	allowed := map[string]bool{
-		"accept":              true,
-		"content-type":        true,
-		"user-agent":          true,
+		"accept":                             true,
+		"content-type":                       true,
+		"user-agent":                         true,
 		"x-openrouter-experimental-metadata": true,
-		"openai-organization": true,
-		"openai-project":      true,
-		"anthropic-version":   true,
+		"openai-organization":                true,
+		"openai-project":                     true,
+		"anthropic-version":                  true,
 	}
 	for name, values := range src {
 		lower := strings.ToLower(name)
@@ -1708,26 +1703,6 @@ func intNumber(value any) int {
 	}
 }
 
-type auditInput struct {
-	RequestID      string
-	Subject        domain.Subject
-	Protocol       string
-	Endpoint       string
-	ModelAlias     string
-	ProviderID     string
-	UpstreamModel  string
-	ProxyProfileID string
-	StatusCode     int
-	ErrorCode      string
-	Started        time.Time
-	ClientIP       string
-	UserAgent      string
-	Stream         bool
-	Usage          domain.UsageRecord
-	EventType      string
-	Message        string
-}
-
 type gatewayLogInput struct {
 	RequestID      string
 	Subject        domain.Subject
@@ -1776,40 +1751,6 @@ func (handler *Handler) logRequest(input gatewayLogInput) {
 		input.Message,
 	)
 }
-
-func (handler *Handler) audit(ctx context.Context, input auditInput) {
-	if input.EventType == "" {
-		input.EventType = "api_call"
-	}
-	event := domain.AuditEvent{
-		ID:             newID("audit"),
-		RequestID:      input.RequestID,
-		UserID:         input.Subject.UserID,
-		APIKeyID:       input.Subject.APIKeyID,
-		ClientIP:       input.ClientIP,
-		UserAgent:      input.UserAgent,
-		Protocol:       input.Protocol,
-		Endpoint:       input.Endpoint,
-		ModelAlias:     input.ModelAlias,
-		ProviderID:     input.ProviderID,
-		UpstreamModel:  input.UpstreamModel,
-		ProxyProfileID: input.ProxyProfileID,
-		StatusCode:     input.StatusCode,
-		ErrorCode:      input.ErrorCode,
-		LatencyMS:      time.Since(input.Started).Milliseconds(),
-		InputTokens:    input.Usage.InputTokens,
-		OutputTokens:   input.Usage.OutputTokens,
-		CostMicroCents: input.Usage.CostMicroCents,
-		Stream:         input.Stream,
-		EventType:      input.EventType,
-		Message:        input.Message,
-		CreatedAt:      time.Now().UTC(),
-	}
-	if err := handler.store.InsertAudit(ctx, event); err != nil {
-		log.Printf("insert audit request_id=%s err=%v", input.RequestID, err)
-	}
-}
-
 func requestID(r *http.Request) string {
 	if value := strings.TrimSpace(r.Header.Get("x-request-id")); value != "" {
 		return value

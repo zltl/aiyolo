@@ -1,11 +1,13 @@
 package console_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/zltl/aiyolo/internal/app"
+	"github.com/zltl/aiyolo/internal/artifacts"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
 )
@@ -77,6 +80,310 @@ func TestConsoleLoginAndCreateAPIKey(t *testing.T) {
 	}
 	if len(keys) != 1 || keys[0].Name != "dev key" || keys[0].KeyHash == "" {
 		t.Fatalf("unexpected keys: %+v", keys)
+	}
+}
+
+func TestConsoleChatPagePersistsSessionTurn(t *testing.T) {
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_persist","choices":[{"index":0,"message":{"role":"assistant","content":"Route failover via the weighted provider list."},"finish_reason":"stop"}],"usage":{"prompt_tokens":21,"completion_tokens":9,"total_tokens":30}}`))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_persist", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_persist", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"chat_client_session_id": {"session-persist"},
+		"chat_public_name":       {"gpt-5.4"},
+		"chat_system_prompt":     {"Keep answers grounded in the selected route."},
+		"chat_draft":             {"How would you route failover?"},
+		"chat_message_role":      {"user", "assistant"},
+		"chat_message_content":   {"What is the current route?", "Earlier reply about latency"},
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("HX-Request", "true")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat status=%d body=%s", response.StatusCode, body)
+	}
+	session, err := store.GetConsoleChatSession(ctx, "admin@example.com", "session-persist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Status != "completed" {
+		t.Fatalf("session status=%q", session.Status)
+	}
+	if session.MessageCount != 4 {
+		t.Fatalf("session message_count=%d", session.MessageCount)
+	}
+	if !strings.Contains(session.MessagesJSON, "Earlier reply about latency") || !strings.Contains(session.MessagesJSON, "Route failover via the weighted provider list.") {
+		t.Fatalf("unexpected session transcript: %s", session.MessagesJSON)
+	}
+	if session.LastRequestID == "" || session.LastResponseID != "chatcmpl_persist" {
+		t.Fatalf("unexpected session ids: %+v", session)
+	}
+}
+
+func TestConsoleChatPageLoadsPersistedServerSession(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	sessionUpdatedAt := time.Now().UTC()
+	if err := store.UpsertConsoleChatSession(ctx, domain.ConsoleChatSession{
+		ID:           "session-resume",
+		UserID:       "admin@example.com",
+		Title:        "Recovered thread",
+		CustomTitle:  true,
+		PublicName:   "gpt-5.4",
+		SystemPrompt: "Stay grounded.",
+		Status:       "completed",
+		MessagesJSON: `[{"id":"msg_resume_user","role":"user","label":"You","content":"Resume me"},{"id":"msg_resume_assistant","role":"assistant","label":"AIYolo","content":"Recovered output"}]`,
+		MessageCount: 2,
+		CreatedAt:    sessionUpdatedAt,
+		UpdatedAt:    sessionUpdatedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := client.Get(server.URL + "/console/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("chat page status=%d body=%s", response.StatusCode, body)
+	}
+	if got := response.Header.Get("Location"); got != "/console/chat?session=session-resume" {
+		response.Body.Close()
+		t.Fatalf("unexpected canonical redirect location: %s", got)
+	}
+	response.Body.Close()
+
+	response, err = client.Get(server.URL + "/console/chat?session=session-resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat page status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	html := string(body)
+	if !strings.Contains(html, "Recovered output") {
+		t.Fatalf("persisted assistant output missing from chat page: %s", html)
+	}
+	if !strings.Contains(html, "Recovered thread") {
+		t.Fatalf("persisted session title missing from chat page: %s", html)
+	}
+	if !strings.Contains(html, `name="chat_client_session_id" value="session-resume"`) {
+		t.Fatalf("persisted session id missing from chat page: %s", html)
+	}
+	if !strings.Contains(html, `id="chat-session-store-json"`) {
+		t.Fatalf("server session store payload missing from chat page: %s", html)
+	}
+}
+
+func TestConsoleChatPageRedirectsToCanonicalSessionQuery(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := store.UpsertConsoleChatSession(ctx, domain.ConsoleChatSession{
+		ID:           "session-canonical",
+		UserID:       "admin@example.com",
+		Title:        "Canonical thread",
+		CustomTitle:  true,
+		PublicName:   "gpt-5.4",
+		SystemPrompt: "Stay grounded.",
+		Status:       "completed",
+		MessagesJSON: `[{"id":"msg_canonical_user","role":"user","label":"You","content":"Canon"},{"id":"msg_canonical_assistant","role":"assistant","label":"AIYolo","content":"Canonical output"}]`,
+		MessageCount: 2,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	loginForm := url.Values{"email": {"admin@example.com"}, "password": {"password"}}
+	loginResponse, err := client.PostForm(server.URL+"/console/login", loginForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loginResponse.Body.Close()
+	if loginResponse.StatusCode != http.StatusSeeOther {
+		t.Fatalf("login status=%d", loginResponse.StatusCode)
+	}
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/console/chat", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cookie := range loginResponse.Cookies() {
+		request.AddCookie(cookie)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("expected redirect to canonical session URL, status=%d body=%s", response.StatusCode, body)
+	}
+	if got := response.Header.Get("Location"); got != "/console/chat?session=session-canonical" {
+		t.Fatalf("unexpected canonical redirect location: %s", got)
+	}
+}
+
+func TestConsoleChatPageLoadsRequestedServerSessionFromQuery(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := store.UpsertConsoleChatSession(ctx, domain.ConsoleChatSession{
+		ID:           "session-newer",
+		UserID:       "admin@example.com",
+		Title:        "Newest thread",
+		CustomTitle:  true,
+		PublicName:   "gpt-5.4",
+		SystemPrompt: "Stay grounded.",
+		Status:       "completed",
+		MessagesJSON: `[{"id":"msg_newer_user","role":"user","label":"You","content":"Newest"},{"id":"msg_newer_assistant","role":"assistant","label":"AIYolo","content":"Newest output"}]`,
+		MessageCount: 2,
+		CreatedAt:    now,
+		UpdatedAt:    now.Add(1 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertConsoleChatSession(ctx, domain.ConsoleChatSession{
+		ID:           "session-shared",
+		UserID:       "admin@example.com",
+		Title:        "Shared thread",
+		CustomTitle:  true,
+		PublicName:   "gpt-5.4",
+		SystemPrompt: "Stay grounded.",
+		Status:       "completed",
+		MessagesJSON: `[{"id":"msg_shared_user","role":"user","label":"You","content":"Shared"},{"id":"msg_shared_assistant","role":"assistant","label":"AIYolo","content":"Shared output"}]`,
+		MessageCount: 2,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := client.Get(server.URL + "/console/chat?session=session-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat page status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	html := string(body)
+	if !strings.Contains(html, "Shared output") {
+		t.Fatalf("requested shared session output missing from chat page: %s", html)
+	}
+	if !strings.Contains(html, `&#34;activeSessionId&#34;:&#34;session-shared&#34;`) {
+		t.Fatalf("requested active session missing from store payload: %s", html)
+	}
+	newerIndex := strings.Index(html, `&#34;id&#34;:&#34;session-newer&#34;`)
+	sharedIndex := strings.Index(html, `&#34;id&#34;:&#34;session-shared&#34;`)
+	if newerIndex == -1 || sharedIndex == -1 {
+		t.Fatalf("session ids missing from store payload: %s", html)
+	}
+	if newerIndex > sharedIndex {
+		t.Fatalf("requested older session should not move ahead of newer session in store payload: %s", html)
+	}
+	if !strings.Contains(html, `name="chat_client_session_id" value="session-shared"`) {
+		t.Fatalf("requested session id missing from chat page: %s", html)
+	}
+	if strings.Contains(html, `/console/locale?lang=`) {
+		t.Fatalf("locale switch should not be rendered anymore: %s", html)
 	}
 }
 
@@ -349,7 +656,7 @@ func TestConsoleOAuthLoginAfterSavingSettings(t *testing.T) {
 		t.Fatalf("dashboard status=%d body=%s", dashboardResponse.StatusCode, body)
 	}
 	dashboardBody, _ := io.ReadAll(dashboardResponse.Body)
-	if !strings.Contains(string(dashboardBody), "Dashboard") {
+	if !strings.Contains(string(dashboardBody), "总览") {
 		t.Fatalf("dashboard body missing title: %s", dashboardBody)
 	}
 }
@@ -404,10 +711,10 @@ func TestConsoleModelsProviderSelectionFiltersUpstreamOptions(t *testing.T) {
 	if !strings.Contains(html, `<option value="openai/gpt-4.1-mini"></option>`) || !strings.Contains(html, `<option value="google/gemini-2.5-flash"></option>`) {
 		t.Fatalf("openrouter upstream options missing: %s", html)
 	}
-	if !strings.Contains(html, "Context currently shows the saved value and may not be verified.") {
+	if !strings.Contains(html, "当前显示的是已保存的上下文值，不保证已经核验。") {
 		t.Fatalf("saved context note missing: %s", html)
 	}
-	if !strings.Contains(html, "Saved context") {
+	if !strings.Contains(html, "已存上下文") {
 		t.Fatalf("saved context label missing: %s", html)
 	}
 	if strings.Contains(html, `<option value="claude-sonnet-4-5"></option>`) {
@@ -495,7 +802,7 @@ func TestConsoleCanResyncModelsFromExistingOpenRouterProvider(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	html := string(body)
-	if !strings.Contains(html, "Re-imported 2 models from OpenRouter") || !strings.Contains(html, "kept 1 conflicting routes") {
+	if !strings.Contains(html, "已从 OpenRouter 重新导入 2 个模型，并保留了 1 条同名路由。") {
 		t.Fatalf("resync notice missing expected summary: %s", html)
 	}
 
@@ -546,13 +853,13 @@ func TestConsoleCanResyncModelsFromExistingOpenRouterProvider(t *testing.T) {
 	}
 	modelsBody, _ := io.ReadAll(modelsResponse.Body)
 	modelsHTML := string(modelsBody)
-	if !strings.Contains(modelsHTML, "Pricing") || !strings.Contains(modelsHTML, "$0.1500 / 1M in") || !strings.Contains(modelsHTML, "$0.6000 / 1M out") {
+	if !strings.Contains(modelsHTML, "计费") || !strings.Contains(modelsHTML, "$0.1500 / 百万输入") || !strings.Contains(modelsHTML, "$0.6000 / 百万输出") {
 		t.Fatalf("pricing details missing from models page: %s", modelsHTML)
 	}
-	if !strings.Contains(modelsHTML, "Use provider default · xray-balancer-socks5") {
+	if !strings.Contains(modelsHTML, "继承提供方默认代理 · xray-balancer-socks5") {
 		t.Fatalf("model form should expose provider default proxy fallback: %s", modelsHTML)
 	}
-	if !regexp.MustCompile(`(?s)<strong>openrouter/auto</strong>.*?<dt>Proxy</dt>\s*<dd>xray-balancer-socks5</dd>`).MatchString(modelsHTML) {
+	if !regexp.MustCompile(`(?s)<strong>openrouter/auto</strong>.*?<dt>代理</dt>\s*<dd>xray-balancer-socks5</dd>`).MatchString(modelsHTML) {
 		t.Fatalf("imported openrouter route should render the effective provider default proxy: %s", modelsHTML)
 	}
 }
@@ -633,20 +940,9 @@ func TestConsoleModelRouteTestBox(t *testing.T) {
 	if record.InputTokens != 8 || record.OutputTokens != 4 || record.TotalTokens != 12 || record.CostMicroCents != 16 || record.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected usage accounting: %+v", record)
 	}
-	audits, err := store.ListAudit(ctx, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(audits) != 1 {
-		t.Fatalf("expected one audit event, got %d", len(audits))
-	}
-	audit := audits[0]
-	if audit.RequestID != record.RequestID || audit.UserID != "admin@example.com" || audit.EventType != "console_model_test" || audit.StatusCode != http.StatusOK || audit.CostMicroCents != 16 {
-		t.Fatalf("unexpected audit event: %+v", audit)
-	}
 }
 
-func TestConsoleModelRouteTestFailureWritesUsageAndAudit(t *testing.T) {
+func TestConsoleModelRouteTestFailureWritesUsage(t *testing.T) {
 	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			http.NotFound(w, r)
@@ -709,16 +1005,6 @@ func TestConsoleModelRouteTestFailureWritesUsageAndAudit(t *testing.T) {
 	}
 	if usage[0].StatusCode != http.StatusForbidden || usage[0].CostMicroCents != 0 || usage[0].TotalTokens != 0 {
 		t.Fatalf("unexpected failed usage record: %+v", usage[0])
-	}
-	audits, err := store.ListAudit(ctx, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(audits) != 1 {
-		t.Fatalf("expected one audit event, got %d", len(audits))
-	}
-	if audits[0].EventType != "console_model_test" || audits[0].StatusCode != http.StatusForbidden || audits[0].ErrorCode != "region_blocked" {
-		t.Fatalf("unexpected failed audit event: %+v", audits[0])
 	}
 }
 
@@ -834,7 +1120,7 @@ func TestConsoleChatPageIsPrimaryEntry(t *testing.T) {
 	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.example/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-page", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "legacy-ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-4.1-mini", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 2, Weight: 100}); err != nil {
@@ -860,17 +1146,299 @@ func TestConsoleChatPageIsPrimaryEntry(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	html := string(body)
-	if !strings.Contains(html, "chat-workspace-page") || !strings.Contains(html, "ops-chat") {
+	if !strings.Contains(html, "chat-workspace-page") || !strings.Contains(html, "gpt-5.4") {
 		t.Fatalf("chat primary entry missing expected content: %s", html)
 	}
 	if strings.Contains(html, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
 		t.Fatalf("advanced chat settings should be collapsed by default: %s", html)
 	}
-	if !strings.Contains(html, "You are the production assistant inside the AIYolo console.") {
+	if !strings.Contains(html, "You are an AI assistant provided by AIYolo.") {
 		t.Fatalf("default production system prompt missing from chat page: %s", html)
 	}
 	if strings.Contains(html, "legacy-ops-chat") {
 		t.Fatalf("disallowed route leaked into curated chat workspace: %s", html)
+	}
+}
+
+func TestConsoleChatSessionSavePersistsDraftAttachmentsAndRestoresOnPageLoad(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.example/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-draft", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{
+		HTTPAddr:      ":0",
+		SecretKey:     "test-secret",
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "password",
+		ChatAttachments: artifacts.Config{
+			PublicBaseURL: "https://chat-assets.example",
+			ProxyBasePath: "/console/chat/attachments/files",
+			S3: artifacts.S3Config{
+				Endpoint:        "https://s3.example.com",
+				Bucket:          "chat",
+				Prefix:          "chat",
+				AccessKeyID:     "key",
+				AccessKeySecret: "secret",
+			},
+		},
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		IdleTimeout:  5 * time.Second,
+	}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := `{"id":"session-draft","title":"gpt-5.4","customTitle":false,"publicName":"gpt-5.4","systemPrompt":"Stay grounded.","draft":"Sketch before send","draftAttachments":[{"id":"att-draft","name":"whiteboard.png","objectKey":"drafts/whiteboard.png","mediaType":"image/png","sizeBytes":128}],"messages":[]}`
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/session", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("save session status=%d body=%s", response.StatusCode, body)
+	}
+	session, err := store.GetConsoleChatSession(ctx, "admin@example.com", "session-draft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Title != "新会话" {
+		t.Fatalf("draft-only session title=%q", session.Title)
+	}
+	if session.Draft != "Sketch before send" {
+		t.Fatalf("draft=%q", session.Draft)
+	}
+	if !strings.Contains(session.DraftAttachmentsJSON, "whiteboard.png") || !strings.Contains(session.DraftAttachmentsJSON, "drafts/whiteboard.png") {
+		t.Fatalf("draft attachments not persisted: %s", session.DraftAttachmentsJSON)
+	}
+
+	pageResponse, err := client.Get(server.URL + "/console/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pageResponse.StatusCode != http.StatusSeeOther {
+		pageBody, _ := io.ReadAll(pageResponse.Body)
+		pageResponse.Body.Close()
+		t.Fatalf("expected canonical draft redirect, status=%d body=%s", pageResponse.StatusCode, pageBody)
+	}
+	if got := pageResponse.Header.Get("Location"); got != "/console/chat?session=session-draft" {
+		pageResponse.Body.Close()
+		t.Fatalf("unexpected draft redirect location: %s", got)
+	}
+	pageResponse.Body.Close()
+
+	pageResponse, err = client.Get(server.URL + "/console/chat?session=session-draft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pageResponse.Body.Close()
+	pageBody, _ := io.ReadAll(pageResponse.Body)
+	pageHTML := string(pageBody)
+	if !strings.Contains(pageHTML, `name="chat_client_session_id" value="session-draft"`) {
+		t.Fatalf("draft session id missing from page: %s", pageHTML)
+	}
+	if !strings.Contains(pageHTML, "Sketch before send") {
+		t.Fatalf("draft text missing from page: %s", pageHTML)
+	}
+	if !strings.Contains(pageHTML, "whiteboard.png") {
+		t.Fatalf("draft attachment missing from page: %s", pageHTML)
+	}
+	if !strings.Contains(pageHTML, `class="chat-icon-button" type="button" data-chat-action="pick-attachments"`) {
+		t.Fatalf("attachment action should render as an icon button: %s", pageHTML)
+	}
+}
+
+func TestConsoleChatSessionSaveGeneratesAISummarizedTitle(t *testing.T) {
+	var providerHits atomic.Int32
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		providerHits.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		payload := string(body)
+		if !strings.Contains(payload, `你负责给聊天会话生成标题。只输出一个简短标题，不要引号、序号、前缀、句号或额外解释。尽量使用对话本身的语言，控制在 12 个词以内。`) {
+			t.Fatalf("title generation system prompt missing from upstream payload: %s", payload)
+		}
+		if !strings.Contains(payload, `How would you route failover?`) || !strings.Contains(payload, `Route failover via weighted providers.`) {
+			t.Fatalf("conversation transcript missing from title generation payload: %s", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_title","choices":[{"index":0,"message":{"role":"assistant","content":"Title: Weighted route failover."},"finish_reason":"stop"}],"usage":{"prompt_tokens":18,"completion_tokens":4,"total_tokens":22}}`))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-title", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := `{"id":"session-title","title":"How would you route failover?","customTitle":false,"publicName":"gpt-5.4","systemPrompt":"Stay grounded.","draft":"","messages":[{"id":"msg-user","role":"user","label":"You","content":"How would you route failover?"},{"id":"msg-assistant","role":"assistant","label":"AIYolo","content":"Route failover via weighted providers."}]}`
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/session", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("save session status=%d body=%s", response.StatusCode, body)
+	}
+	var saved struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Title != "Weighted route failover" {
+		t.Fatalf("response title=%q", saved.Title)
+	}
+	session, err := store.GetConsoleChatSession(ctx, "admin@example.com", "session-title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Title != "Weighted route failover" {
+		t.Fatalf("stored title=%q", session.Title)
+	}
+	if providerHits.Load() != 1 {
+		t.Fatalf("expected one title generation request, got %d", providerHits.Load())
+	}
+}
+
+func TestConsoleChatSessionSavePreservesUpdatedAtWithoutMessageActivity(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	messages := []map[string]any{
+		{"id": "msg-user", "role": "user", "label": "You", "content": "How would you route failover?"},
+		{"id": "msg-assistant", "role": "assistant", "label": "AIYolo", "content": "Route failover via weighted providers."},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedAt := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	createdAt := updatedAt.Add(-45 * time.Minute)
+	lastMessageAt := updatedAt
+	if err := store.UpsertConsoleChatSession(ctx, domain.ConsoleChatSession{
+		UserID:        "admin@example.com",
+		ID:            "session-stable",
+		Title:         "How would you route failover?",
+		PublicName:    "gpt-5.4",
+		SystemPrompt:  "Stay grounded.",
+		MessagesJSON:  string(messagesJSON),
+		MessageCount:  len(messages),
+		CreatedAt:     createdAt,
+		UpdatedAt:     updatedAt,
+		LastMessageAt: &lastMessageAt,
+		Status:        "ready",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"id":           "session-stable",
+		"title":        "How would you route failover?",
+		"customTitle":  false,
+		"publicName":   "gpt-5.4",
+		"systemPrompt": "Stay grounded.",
+		"draft":        "note later",
+		"messages":     messages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/session", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("save session status=%d body=%s", response.StatusCode, body)
+	}
+	var saved struct {
+		UpdatedAt time.Time `json:"updatedAt"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&saved); err != nil {
+		t.Fatal(err)
+	}
+	if !saved.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("response updatedAt=%s want=%s", saved.UpdatedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+	}
+
+	session, err := store.GetConsoleChatSession(ctx, "admin@example.com", "session-stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Draft != "note later" {
+		t.Fatalf("draft=%q", session.Draft)
+	}
+	if !session.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("stored updatedAt=%s want=%s", session.UpdatedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+	}
+	if session.LastMessageAt == nil || !session.LastMessageAt.Equal(lastMessageAt) {
+		if session.LastMessageAt == nil {
+			t.Fatal("lastMessageAt was cleared")
+		}
+		t.Fatalf("stored lastMessageAt=%s want=%s", session.LastMessageAt.Format(time.RFC3339Nano), lastMessageAt.Format(time.RFC3339Nano))
 	}
 }
 
@@ -899,11 +1467,32 @@ func TestConsoleChatPageAdvancedSettingsCollapsedByDefault(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	html := string(body)
+	if strings.Contains(html, "chat-sidebar-toggle") || strings.Contains(html, "chat-console-link") {
+		t.Fatalf("chat page should not render the removed sidebar and console buttons: %s", html)
+	}
+	if strings.Contains(html, "chat-shell is-sidebar-collapsed") {
+		t.Fatalf("chat page should keep the sidebar visible by default: %s", html)
+	}
 	if strings.Contains(html, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
 		t.Fatalf("advanced chat settings should be collapsed by default: %s", html)
 	}
+	if strings.Contains(html, "Server sessions") || strings.Contains(html, "Stored on the server and resumable after disconnects") || strings.Contains(html, "Sessions are stored on the server so completed or partial output can be recovered after a disconnect.") {
+		t.Fatalf("chat page should omit the removed server-session copy: %s", html)
+	}
 	if strings.Contains(html, `data-chat-session-title`) || strings.Contains(html, `chat-stage-title`) {
 		t.Fatalf("chat page should not render the removed centered stage title: %s", html)
+	}
+	if strings.Contains(html, `data-chat-primary-label`) {
+		t.Fatalf("chat page should render icon-only primary composer action: %s", html)
+	}
+	if !strings.Contains(html, `data-chat-primary-start`) || !strings.Contains(html, `data-chat-primary-stop`) {
+		t.Fatalf("chat page should render start and stop icons for the primary composer action: %s", html)
+	}
+	if !strings.Contains(html, `https://unpkg.com/lucide@1.16.0/dist/umd/lucide.min.js`) {
+		t.Fatalf("chat page should load lucide for chat control icons: %s", html)
+	}
+	if !strings.Contains(html, `data-lucide="send-horizontal"`) || !strings.Contains(html, `data-lucide="square"`) {
+		t.Fatalf("chat page should render lucide placeholders for the primary composer action: %s", html)
 	}
 }
 
@@ -953,7 +1542,7 @@ func TestConsoleChatPageRunsConversationTurn(t *testing.T) {
 			t.Fatalf("latest user message missing from upstream payload: %s", payload)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"chatcmpl_console","object":"chat.completion","created":1710000000,"model":"openai/gpt-5.5","choices":[{"index":0,"message":{"role":"assistant","content":"Route failover via the weighted provider list."},"finish_reason":"stop"}],"usage":{"prompt_tokens":21,"completion_tokens":9,"total_tokens":30}}`))
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_console","object":"chat.completion","created":1710000000,"model":"openai/gpt-5.4","choices":[{"index":0,"message":{"role":"assistant","content":"Route failover via the weighted provider list."},"finish_reason":"stop"}],"usage":{"prompt_tokens":21,"completion_tokens":9,"total_tokens":30}}`))
 	}))
 	defer providerBackend.Close()
 
@@ -965,10 +1554,10 @@ func TestConsoleChatPageRunsConversationTurn(t *testing.T) {
 	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_ops-chat", ModelAlias: "ops-chat", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_console", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_ops-chat", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_console", Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -982,7 +1571,7 @@ func TestConsoleChatPageRunsConversationTurn(t *testing.T) {
 	}
 
 	form := url.Values{
-		"chat_public_name":     {"ops-chat"},
+		"chat_public_name":     {"gpt-5.4"},
 		"chat_system_prompt":   {"Keep answers grounded in the selected route."},
 		"chat_draft":           {"How would you route failover?"},
 		"chat_message_role":    {"user", "assistant"},
@@ -1019,26 +1608,171 @@ func TestConsoleChatPageRunsConversationTurn(t *testing.T) {
 		t.Fatalf("expected one usage record, got %d", len(usage))
 	}
 	record := usage[0]
-	if record.UserID != "admin@example.com" || record.ProviderID != "openrouter" || record.ModelAlias != "ops-chat" || record.Protocol != domain.ProtocolOpenAI || record.Endpoint != "/console/chat" {
+	if record.UserID != "admin@example.com" || record.ProviderID != "openrouter" || record.ModelAlias != "gpt-5.4" || record.Protocol != domain.ProtocolOpenAI || record.Endpoint != "/console/chat" {
 		t.Fatalf("unexpected usage identity: %+v", record)
 	}
 	if record.InputTokens != 21 || record.OutputTokens != 9 || record.TotalTokens != 30 || record.CostMicroCents != 39 || record.StatusCode != http.StatusOK {
 		t.Fatalf("unexpected usage accounting: %+v", record)
 	}
-	audits, err := store.ListAudit(ctx, 5)
+}
+
+func TestConsoleChatStreamPersistsCompletedSessionAfterClientDisconnect(t *testing.T) {
+	allowFinish := make(chan struct{})
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_resume\",\"choices\":[{\"delta\":{\"content\":\"Route \"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-allowFinish
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"continues after disconnect.\"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":5,\"total_tokens\":13}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_resume", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_resume", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(audits) != 1 {
-		t.Fatalf("expected one audit event, got %d", len(audits))
+
+	form := url.Values{
+		"chat_client_session_id": {"session-disconnect"},
+		"chat_public_name":       {"gpt-5.4"},
+		"chat_draft":             {"How would you route failover?"},
 	}
-	audit := audits[0]
-	if audit.RequestID != record.RequestID || audit.UserID != "admin@example.com" || audit.EventType != "console_chat" || audit.StatusCode != http.StatusOK || audit.CostMicroCents != 39 {
-		t.Fatalf("unexpected audit event: %+v", audit)
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/x-ndjson")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	if !strings.Contains(line, `"type":"delta"`) {
+		response.Body.Close()
+		t.Fatalf("unexpected first stream line: %s", line)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(allowFinish)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		session, err := store.GetConsoleChatSession(ctx, "admin@example.com", "session-disconnect")
+		if err == nil && session.Status == "completed" && strings.Contains(session.MessagesJSON, "Route continues after disconnect.") {
+			return
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("session not persisted before timeout: %v", err)
+			}
+			t.Fatalf("session not completed before timeout: %+v", session)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
-func TestConsoleChatPageFailureWritesUsageAndAudit(t *testing.T) {
+func TestConsoleChatPageShowsReasoningWithoutFinalAnswer(t *testing.T) {
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_reasoning","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"Inspect route weights before selecting a provider.","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":0,"total_tokens":12}}`))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_reasoning", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_reasoning", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"chat_public_name": {"gpt-5.4"}, "chat_draft": {"How would you route failover?"}}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("HX-Request", "true")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	html := string(body)
+	if !strings.Contains(html, "Inspect route weights before selecting a provider.") {
+		t.Fatalf("reasoning missing from chat html: %s", html)
+	}
+	if !strings.Contains(html, "The model returned reasoning but no final answer text.") {
+		t.Fatalf("reasoning-only placeholder missing from chat html: %s", html)
+	}
+	if !strings.Contains(html, "chat-reasoning") {
+		t.Fatalf("reasoning panel missing from chat html: %s", html)
+	}
+}
+
+func TestConsoleChatPageFailureWritesUsage(t *testing.T) {
 	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			http.NotFound(w, r)
@@ -1058,7 +1792,7 @@ func TestConsoleChatPageFailureWritesUsageAndAudit(t *testing.T) {
 	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1071,7 +1805,7 @@ func TestConsoleChatPageFailureWritesUsageAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	form := url.Values{"chat_public_name": {"ops-chat"}, "chat_draft": {"How would you route failover?"}}
+	form := url.Values{"chat_public_name": {"gpt-5.4"}, "chat_draft": {"How would you route failover?"}}
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat", strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatal(err)
@@ -1101,16 +1835,6 @@ func TestConsoleChatPageFailureWritesUsageAndAudit(t *testing.T) {
 	}
 	if usage[0].StatusCode != http.StatusTooManyRequests || usage[0].CostMicroCents != 0 || usage[0].TotalTokens != 0 || usage[0].Endpoint != "/console/chat" {
 		t.Fatalf("unexpected failed usage record: %+v", usage[0])
-	}
-	audits, err := store.ListAudit(ctx, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(audits) != 1 {
-		t.Fatalf("expected one audit event, got %d", len(audits))
-	}
-	if audits[0].EventType != "console_chat" || audits[0].StatusCode != http.StatusTooManyRequests || audits[0].ErrorCode != "rate_limit" {
-		t.Fatalf("unexpected failed audit event: %+v", audits[0])
 	}
 }
 
@@ -1145,10 +1869,10 @@ func TestConsoleChatStreamEndpointFlushesOpenAITurn(t *testing.T) {
 	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_ops-stream", ModelAlias: "ops-stream", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_stream", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-stream", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_ops-stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1161,7 +1885,7 @@ func TestConsoleChatStreamEndpointFlushesOpenAITurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	form := url.Values{"chat_public_name": {"ops-stream"}, "chat_draft": {"How would you route failover?"}}
+	form := url.Values{"chat_public_name": {"gpt-5.4"}, "chat_draft": {"How would you route failover?"}}
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatal(err)
@@ -1180,10 +1904,14 @@ func TestConsoleChatStreamEndpointFlushesOpenAITurn(t *testing.T) {
 	body, _ := io.ReadAll(response.Body)
 	events := decodeConsoleChatStreamEvents(t, body)
 	var deltaText strings.Builder
+	var doneResult *consoleChatStreamTestResult
 	var replaceHTML string
 	for _, event := range events {
 		if event.Type == "delta" {
 			deltaText.WriteString(event.Delta)
+		}
+		if event.Type == "done" {
+			doneResult = event.Result
 		}
 		if event.Type == "replace" {
 			replaceHTML = event.HTML
@@ -1191,6 +1919,9 @@ func TestConsoleChatStreamEndpointFlushesOpenAITurn(t *testing.T) {
 	}
 	if deltaText.String() != "Route failover via weights." {
 		t.Fatalf("unexpected streamed delta text: %q", deltaText.String())
+	}
+	if doneResult == nil || doneResult.Output != "Route failover via weights." || doneResult.FinishReason != "stop" || doneResult.TotalTokens != 12 {
+		t.Fatalf("unexpected done event: %+v", doneResult)
 	}
 	if !strings.Contains(replaceHTML, "Route failover via weights.") {
 		t.Fatalf("stream replacement html missing assistant output: %s", replaceHTML)
@@ -1206,12 +1937,201 @@ func TestConsoleChatStreamEndpointFlushesOpenAITurn(t *testing.T) {
 	if !record.Stream || record.Protocol != domain.ProtocolOpenAI || record.TotalTokens != 12 || record.CostMicroCents != 16 || record.Endpoint != "/console/chat" {
 		t.Fatalf("unexpected streamed usage record: %+v", record)
 	}
-	audits, err := store.ListAudit(ctx, 5)
+}
+
+func TestConsoleChatStreamAllowsActiveLongRunningStream(t *testing.T) {
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-chat-stream" {
+			t.Fatalf("unexpected auth header: %s", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"Route \"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(700 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"failover via weights.\"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(700 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4,\"total_tokens\":12}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_stream", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(audits) != 1 || !audits[0].Stream || audits[0].EventType != "console_chat" {
-		t.Fatalf("unexpected streamed audit records: %+v", audits)
+
+	form := url.Values{"chat_public_name": {"gpt-5.4"}, "chat_draft": {"How would you route failover?"}}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/x-ndjson")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat stream status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	events := decodeConsoleChatStreamEvents(t, body)
+	var deltaText strings.Builder
+	var doneResult *consoleChatStreamTestResult
+	var replaceHTML string
+	for _, event := range events {
+		if event.Type == "delta" {
+			deltaText.WriteString(event.Delta)
+		}
+		if event.Type == "done" {
+			doneResult = event.Result
+		}
+		if event.Type == "replace" {
+			replaceHTML = event.HTML
+		}
+	}
+	if deltaText.String() != "Route failover via weights." {
+		t.Fatalf("unexpected streamed delta text: %q", deltaText.String())
+	}
+	if doneResult == nil || doneResult.Output != "Route failover via weights." || doneResult.TotalTokens != 12 {
+		t.Fatalf("unexpected done event: %+v", doneResult)
+	}
+	if !strings.Contains(replaceHTML, "Route failover via weights.") {
+		t.Fatalf("stream replacement html missing assistant output: %s", replaceHTML)
+	}
+	usage, err := store.ListUsage(ctx, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || !usage[0].Stream || usage[0].TotalTokens != 12 {
+		t.Fatalf("unexpected streamed usage record: %+v", usage)
+	}
+}
+
+func TestConsoleChatStreamEndpointEmitsReasoningAndPlaceholder(t *testing.T) {
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_reasoning\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect route weights. \"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Check provider health.\"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":3,\"total_tokens\":11}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_stream", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"chat_public_name": {"gpt-5.4"}, "chat_draft": {"How would you route failover?"}}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/x-ndjson")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat stream status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	events := decodeConsoleChatStreamEvents(t, body)
+	var reasoningText strings.Builder
+	var doneResult *consoleChatStreamTestResult
+	var replaceHTML string
+	for _, event := range events {
+		if event.Type == "reasoning" {
+			reasoningText.WriteString(event.Reasoning)
+		}
+		if event.Type == "done" {
+			doneResult = event.Result
+		}
+		if event.Type == "replace" {
+			replaceHTML = event.HTML
+		}
+	}
+	if reasoningText.String() != "Inspect route weights. Check provider health." {
+		t.Fatalf("unexpected streamed reasoning text: %q", reasoningText.String())
+	}
+	if doneResult == nil || doneResult.Output != "The model returned reasoning but no final answer text." || doneResult.TotalTokens != 11 {
+		t.Fatalf("unexpected reasoning done event: %+v", doneResult)
+	}
+	if !strings.Contains(replaceHTML, "Inspect route weights. Check provider health.") {
+		t.Fatalf("stream replacement html missing reasoning: %s", replaceHTML)
+	}
+	if !strings.Contains(replaceHTML, "The model returned reasoning but no final answer text.") {
+		t.Fatalf("stream replacement html missing reasoning-only placeholder: %s", replaceHTML)
+	}
+	usage, err := store.ListUsage(ctx, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].TotalTokens != 11 {
+		t.Fatalf("unexpected streamed reasoning usage records: %+v", usage)
 	}
 }
 
@@ -1246,10 +2166,10 @@ func TestConsoleChatStreamEndpointAcceptsMultipartFormData(t *testing.T) {
 	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_ops-stream", ModelAlias: "ops-stream", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_stream", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "ops-stream", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_ops-stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1267,7 +2187,7 @@ func TestConsoleChatStreamEndpointAcceptsMultipartFormData(t *testing.T) {
 	if err := writer.WriteField("chat_client_session_id", "session-multipart"); err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.WriteField("chat_public_name", "ops-stream"); err != nil {
+	if err := writer.WriteField("chat_public_name", "gpt-5.4"); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.WriteField("chat_draft", "How would you route failover?"); err != nil {
@@ -1315,6 +2235,175 @@ func TestConsoleChatStreamEndpointAcceptsMultipartFormData(t *testing.T) {
 	}
 	if !strings.Contains(replaceHTML, "session-multipart") {
 		t.Fatalf("stream replacement html missing client session id: %s", replaceHTML)
+	}
+}
+
+func TestConsoleChatStreamEndpointEmitsHeartbeatDuringIdleGap(t *testing.T) {
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"Route \"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(10500 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"failover via weights.\"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4,\"total_tokens\":12}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_stream", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"chat_public_name": {"gpt-5.4"}, "chat_draft": {"How would you route failover?"}}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/x-ndjson")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat stream status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	events := decodeConsoleChatStreamEvents(t, body)
+	heartbeatCount := 0
+	for _, event := range events {
+		if event.Type == "heartbeat" {
+			heartbeatCount++
+		}
+	}
+	if heartbeatCount == 0 {
+		t.Fatalf("expected at least one heartbeat event, got %+v", events)
+	}
+}
+
+func TestConsoleChatStreamEndpointEmitsErrorEventWithPartialOutput(t *testing.T) {
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"Partial answer.\"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(1200 * time.Millisecond)
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30, StreamIdleTimeoutSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt54_stream", ModelAlias: "gpt-5.4", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt54_stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"chat_public_name": {"gpt-5.4"}, "chat_draft": {"How would you route failover?"}}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/x-ndjson")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat stream status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	events := decodeConsoleChatStreamEvents(t, body)
+	var errorEvent *consoleChatStreamTestEvent
+	var replaceHTML string
+	for index := range events {
+		if events[index].Type == "error" {
+			errorEvent = &events[index]
+		}
+		if events[index].Type == "replace" {
+			replaceHTML = events[index].HTML
+		}
+	}
+	if errorEvent == nil || !strings.Contains(errorEvent.Error, "Chat failed:") {
+		t.Fatalf("expected error event, got %+v", events)
+	}
+	if !strings.Contains(errorEvent.Error, "completion marker") {
+		t.Fatalf("expected explicit upstream completion marker reason, got %q", errorEvent.Error)
+	}
+	if errorEvent.Message == nil || errorEvent.Message.Content != "Partial answer." {
+		t.Fatalf("error event should preserve partial output: %+v", errorEvent)
+	}
+	if !strings.Contains(replaceHTML, "Partial answer.") {
+		t.Fatalf("stream replacement html missing partial assistant output: %s", replaceHTML)
+	}
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, "console chat stream interrupted") || !strings.Contains(logOutput, "reason_code=stream_unexpected_eof") {
+		t.Fatalf("expected interrupted stream log with explicit reason code, got %s", logOutput)
 	}
 }
 
@@ -1397,8 +2486,11 @@ func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
 	if strings.Contains(pageHTML, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
 		t.Fatalf("advanced chat settings should be collapsed by default: %s", pageHTML)
 	}
-	if !strings.Contains(pageHTML, `data-chat-action="pick-attachments"`) {
-		t.Fatalf("attachment quick action should remain available through the icon button: %s", pageHTML)
+	if strings.Contains(pageHTML, `data-chat-action="pick-attachments"`) {
+		t.Fatalf("attachment quick action should stay hidden when attachment upload is disabled: %s", pageHTML)
+	}
+	if !strings.Contains(pageHTML, `data-chat-attachment-upload-enabled="false"`) {
+		t.Fatalf("chat page should surface disabled attachment upload state: %s", pageHTML)
 	}
 	if !strings.Contains(pageHTML, `value="deepseek-v4-pro" checked`) {
 		t.Fatalf("expected deepseek-v4-pro to be the default selected route: %s", pageHTML)
@@ -1497,16 +2589,20 @@ func TestConsoleProxyResourceCanBeEdited(t *testing.T) {
 	if !strings.Contains(html, `name="endpoint" value="socks5://127.0.0.1:10808"`) {
 		t.Fatalf("proxy edit form did not canonicalize socks5 endpoint: %s", html)
 	}
+	if !strings.Contains(html, `name="stream_idle_timeout_seconds" type="number" min="1" value="300"`) {
+		t.Fatalf("proxy edit form did not load stream idle timeout: %s", html)
+	}
 
 	form := url.Values{
-		"id":               {"edge-socks"},
-		"name":             {"Edge SOCKS Updated"},
-		"type":             {"socks5"},
-		"endpoint":         {"127.0.0.1:20808"},
-		"region":           {"jp"},
-		"timeout_seconds":  {"80"},
-		"health_check_url": {"https://probe.example.com/healthz"},
-		"status":           {domain.StatusEnabled},
+		"id":                          {"edge-socks"},
+		"name":                        {"Edge SOCKS Updated"},
+		"type":                        {"socks5"},
+		"endpoint":                    {"127.0.0.1:20808"},
+		"region":                      {"jp"},
+		"timeout_seconds":             {"80"},
+		"stream_idle_timeout_seconds": {"420"},
+		"health_check_url":            {"https://probe.example.com/healthz"},
+		"status":                      {domain.StatusEnabled},
 	}
 	updateRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/proxies", strings.NewReader(form.Encode()))
 	if err != nil {
@@ -1527,7 +2623,7 @@ func TestConsoleProxyResourceCanBeEdited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.Name != "Edge SOCKS Updated" || profile.Endpoint != "socks5://127.0.0.1:20808" || profile.Region != "jp" || profile.TimeoutSeconds != 80 || profile.HealthCheckURL != "https://probe.example.com/healthz" || profile.Status != domain.StatusEnabled {
+	if profile.Name != "Edge SOCKS Updated" || profile.Endpoint != "socks5://127.0.0.1:20808" || profile.Region != "jp" || profile.TimeoutSeconds != 80 || profile.StreamIdleTimeoutSeconds != 420 || profile.HealthCheckURL != "https://probe.example.com/healthz" || profile.Status != domain.StatusEnabled {
 		t.Fatalf("proxy was not updated: %+v", profile)
 	}
 	if profile.Auth != "user:pass" {
@@ -1618,7 +2714,7 @@ func TestConsoleDirectProxyResourceCannotBeEdited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.Name != domain.ProxyTypeDirect || profile.Status != domain.StatusEnabled || profile.TimeoutSeconds != 60 {
+	if profile.Name != domain.ProxyTypeDirect || profile.Status != domain.StatusEnabled || profile.TimeoutSeconds != 60 || profile.StreamIdleTimeoutSeconds != 300 {
 		t.Fatalf("direct proxy should remain unchanged: %+v", profile)
 	}
 }
@@ -1803,17 +2899,19 @@ func loggedInConsoleClient(serverURL string) (*http.Client, error) {
 }
 
 type consoleChatStreamTestEvent struct {
-	Type    string                        `json:"type"`
-	Delta   string                        `json:"delta"`
-	HTML    string                        `json:"html"`
-	Error   string                        `json:"error"`
-	Message *consoleChatStreamTestMessage `json:"message"`
-	Result  *consoleChatStreamTestResult  `json:"result"`
+	Type      string                        `json:"type"`
+	Delta     string                        `json:"delta"`
+	Reasoning string                        `json:"reasoning"`
+	HTML      string                        `json:"html"`
+	Error     string                        `json:"error"`
+	Message   *consoleChatStreamTestMessage `json:"message"`
+	Result    *consoleChatStreamTestResult  `json:"result"`
 }
 
 type consoleChatStreamTestMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	Reasoning string `json:"reasoning"`
 }
 
 type consoleChatStreamTestResult struct {

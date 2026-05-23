@@ -237,6 +237,49 @@ func TestStreamingFlushAndUsage(t *testing.T) {
 	}
 }
 
+func TestStreamingAllowsActiveLongRunningStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(700 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(700 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	store := testStore(t, upstream.URL)
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openai-test", Name: "OpenAI Test", BaseURL: upstream.URL, Protocol: domain.ProtocolOpenAI, MasterKey: "upstream-openai", DefaultProxyID: "direct", Status: domain.StatusEnabled, TimeoutSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	response := doRequest(t, server.URL+"/v1/chat/completions", http.MethodPost, []byte(`{"model":"public-chat","stream":true,"messages":[{"role":"user","content":"hi"}]}`), map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	payload := string(body)
+	if !strings.Contains(payload, `"content":"he"`) || !strings.Contains(payload, `"content":"llo"`) || !strings.Contains(payload, "data: [DONE]") {
+		t.Fatalf("unexpected streaming payload: %s", payload)
+	}
+	usage := lastUsage(t, store)
+	if !usage.Stream || usage.TotalTokens != 5 {
+		t.Fatalf("unexpected streaming usage: %+v", usage)
+	}
+}
+
 func TestOpenRouterSupportsOpenAIAndAnthropic(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -582,9 +625,9 @@ func TestGatewayKeyInfoAndGenerationLookup(t *testing.T) {
 				} `json:"monthly"`
 			} `json:"usage"`
 			Limits struct {
-				RPM         int   `json:"rpm"`
-				TPM         int   `json:"tpm"`
-				DailyCents  int64 `json:"daily_budget_cents"`
+				RPM          int   `json:"rpm"`
+				TPM          int   `json:"tpm"`
+				DailyCents   int64 `json:"daily_budget_cents"`
 				MonthlyCents int64 `json:"monthly_budget_cents"`
 			} `json:"limits"`
 		} `json:"data"`
@@ -678,11 +721,11 @@ func TestGatewayReturnsRouterMetadataWhenRequested(t *testing.T) {
 				} `json:"available"`
 			} `json:"endpoints"`
 			Attempts []struct {
-				Index       int    `json:"index"`
-				Provider    string `json:"provider"`
-				Model       string `json:"model"`
-				Status      string `json:"status"`
-				StatusCode  int    `json:"status_code"`
+				Index        int    `json:"index"`
+				Provider     string `json:"provider"`
+				Model        string `json:"model"`
+				Status       string `json:"status"`
+				StatusCode   int    `json:"status_code"`
 				FailureClass string `json:"failure_class"`
 			} `json:"attempts"`
 		} `json:"aiyolo_metadata"`

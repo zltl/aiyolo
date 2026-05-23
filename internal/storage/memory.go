@@ -20,8 +20,8 @@ type MemoryStore struct {
 	pricingRules map[string]domain.PricingRule
 	proxies      map[string]domain.ProxyProfile
 	consoleAuth  *domain.ConsoleAuthSettings
+	chatSessions map[string]domain.ConsoleChatSession
 	usage        []domain.UsageRecord
-	audits       []domain.AuditEvent
 	limits       map[string]memoryLimitWindow
 	reservations map[string]domain.QuotaReservation
 }
@@ -39,6 +39,7 @@ func NewMemoryStore() *MemoryStore {
 		routes:       make(map[string]domain.ModelRoute),
 		pricingRules: make(map[string]domain.PricingRule),
 		proxies:      make(map[string]domain.ProxyProfile),
+		chatSessions: make(map[string]domain.ConsoleChatSession),
 		limits:       make(map[string]memoryLimitWindow),
 		reservations: make(map[string]domain.QuotaReservation),
 	}
@@ -229,6 +230,8 @@ func (store *MemoryStore) UpsertProvider(_ context.Context, provider domain.Prov
 	now := time.Now().UTC()
 	provider.SupportedProtocols = nonNilStrings(domain.ProviderSupportedProtocols(provider))
 	provider.Protocol = domain.ProviderPrimaryProtocol(provider)
+	provider.TimeoutSeconds = domain.EffectiveProviderTimeoutSeconds(provider)
+	provider.StreamIdleTimeoutSeconds = domain.EffectiveProviderStreamIdleTimeoutSeconds(provider)
 	if provider.CreatedAt.IsZero() {
 		provider.CreatedAt = now
 	}
@@ -465,22 +468,6 @@ func (store *MemoryStore) SummarizeAPIKeyUsage(_ context.Context, apiKeyID strin
 	return summary, nil
 }
 
-func (store *MemoryStore) InsertAudit(_ context.Context, event domain.AuditEvent) error {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if event.CreatedAt.IsZero() {
-		event.CreatedAt = time.Now().UTC()
-	}
-	store.audits = append(store.audits, event)
-	return nil
-}
-
-func (store *MemoryStore) ListAudit(_ context.Context, limit int) ([]domain.AuditEvent, error) {
-	store.mu.RLock()
-	defer store.mu.RUnlock()
-	return recentAudit(store.audits, limit), nil
-}
-
 func (store *MemoryStore) Dashboard(context.Context) (domain.DashboardData, error) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
@@ -511,7 +498,6 @@ func (store *MemoryStore) Dashboard(context.Context) (domain.DashboardData, erro
 		data.ModelCosts = append(data.ModelCosts, *cost)
 	}
 	sort.Slice(data.ModelCosts, func(i, j int) bool { return data.ModelCosts[i].CostMicroCents > data.ModelCosts[j].CostMicroCents })
-	data.RecentAudits = recentAudit(store.audits, 10)
 	data.RecentUsage = recentUsage(store.usage, 10)
 	return data, nil
 }
@@ -638,17 +624,6 @@ func (store *MemoryStore) UserDirectory(context.Context) (domain.UserDirectory, 
 			summary.LastAPIKeyPrefix = keyPrefixes[usage.APIKeyID]
 		}
 	}
-	for _, event := range store.audits {
-		if strings.TrimSpace(event.UserID) == "" {
-			continue
-		}
-		summary := summaries[event.UserID]
-		if summary == nil {
-			summary = &domain.ConsoleUserSummary{UserID: event.UserID}
-			summaries[event.UserID] = summary
-		}
-		summary.LastSeen = laterTime(summary.LastSeen, event.CreatedAt)
-	}
 	for _, summary := range summaries {
 		data.Summaries = append(data.Summaries, *summary)
 	}
@@ -663,7 +638,6 @@ func (store *MemoryStore) UserDirectory(context.Context) (domain.UserDirectory, 
 		return left.UserID < right.UserID
 	})
 	data.ObservedUsers = int64(len(data.Summaries))
-	data.RecentAudit = recentAudit(store.audits, 8)
 	return data, nil
 }
 
@@ -687,22 +661,75 @@ func (store *MemoryStore) SaveConsoleAuthSettings(_ context.Context, settings do
 	return nil
 }
 
+func (store *MemoryStore) UpsertConsoleChatSession(_ context.Context, session domain.ConsoleChatSession) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	session = sanitizeConsoleChatSessionStrings(session)
+	if session.CreatedAt.IsZero() {
+		session.CreatedAt = time.Now().UTC()
+	}
+	if session.UpdatedAt.IsZero() {
+		session.UpdatedAt = session.CreatedAt
+	}
+	store.chatSessions[consoleChatSessionStorageKey(session.UserID, session.ID)] = session
+	return nil
+}
+
+func (store *MemoryStore) ListConsoleChatSessions(_ context.Context, userID string, limit int) ([]domain.ConsoleChatSession, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	sessions := make([]domain.ConsoleChatSession, 0, len(store.chatSessions))
+	for _, session := range store.chatSessions {
+		if session.UserID != userID {
+			continue
+		}
+		sessions = append(sessions, session)
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		if !sessions[i].UpdatedAt.Equal(sessions[j].UpdatedAt) {
+			return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+		}
+		if !sessions[i].CreatedAt.Equal(sessions[j].CreatedAt) {
+			return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
+	if limit > 0 && len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	return sessions, nil
+}
+
+func (store *MemoryStore) GetConsoleChatSession(_ context.Context, userID string, id string) (domain.ConsoleChatSession, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	session, ok := store.chatSessions[consoleChatSessionStorageKey(userID, id)]
+	if !ok {
+		return domain.ConsoleChatSession{}, ErrNotFound
+	}
+	return session, nil
+}
+
+func (store *MemoryStore) DeleteConsoleChatSession(_ context.Context, userID string, id string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	key := consoleChatSessionStorageKey(userID, id)
+	if _, ok := store.chatSessions[key]; !ok {
+		return ErrNotFound
+	}
+	delete(store.chatSessions, key)
+	return nil
+}
+
+func consoleChatSessionStorageKey(userID, id string) string {
+	return userID + "\x00" + id
+}
+
 func recentUsage(values []domain.UsageRecord, limit int) []domain.UsageRecord {
 	if limit <= 0 || limit > len(values) {
 		limit = len(values)
 	}
 	result := make([]domain.UsageRecord, 0, limit)
-	for i := len(values) - 1; i >= 0 && len(result) < limit; i-- {
-		result = append(result, values[i])
-	}
-	return result
-}
-
-func recentAudit(values []domain.AuditEvent, limit int) []domain.AuditEvent {
-	if limit <= 0 || limit > len(values) {
-		limit = len(values)
-	}
-	result := make([]domain.AuditEvent, 0, limit)
 	for i := len(values) - 1; i >= 0 && len(result) < limit; i-- {
 		result = append(result, values[i])
 	}

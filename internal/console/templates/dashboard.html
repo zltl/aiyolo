@@ -42,7 +42,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16c2-2 4-4 7-4s4 4 7 4 4-3 6-6"></path><path d="M20 10h3v3"></path></svg>
         </span>
       </div>
-      <p class="stat-copy">{{msg .Locale "从 usage ledger 聚合的近 24 小时费用。" "Spend aggregated from the usage ledger over the last 24 hours."}}</p>
+      <p class="stat-copy">{{msg .Locale "从用量账本聚合的近 24 小时费用。" "Spend aggregated from the usage ledger over the last 24 hours."}}</p>
       <div class="sparkline" aria-hidden="true">
         <svg viewBox="0 0 120 40" preserveAspectRatio="none"><path d="{{usageSparkline .ChartUsage "spend" 12}}"/></svg>
       </div>
@@ -51,7 +51,7 @@
   <div class="secondary-metric-grid">
     <article class="micro-card">
       <div class="micro-head">
-        <span>{{msg .Locale "Estimated 占比" "Estimated share"}}</span>
+        <span>{{msg .Locale "估算占比" "Estimated share"}}</span>
         <strong>{{ratio .Data.EstimatedCount .Data.RequestCount}}</strong>
       </div>
       <div class="meter-track compact"><span class="meter-fill forest-fill" style="width: {{ratio .Data.EstimatedCount .Data.RequestCount}}"></span></div>
@@ -65,14 +65,14 @@
     </article>
     <article class="micro-card">
       <div class="micro-head">
-        <span>{{msg .Locale "输入 Tokens" "Input tokens"}}</span>
+        <span>{{msg .Locale "输入令牌" "Input tokens"}}</span>
         <strong>{{.Data.InputTokens}}</strong>
       </div>
       <div class="meter-track compact"><span class="meter-fill sea-fill" style="width: {{pairShare .Data.InputTokens .Data.OutputTokens}}"></span></div>
     </article>
     <article class="micro-card">
       <div class="micro-head">
-        <span>{{msg .Locale "输出 Tokens" "Output tokens"}}</span>
+        <span>{{msg .Locale "输出令牌" "Output tokens"}}</span>
         <strong>{{.Data.OutputTokens}}</strong>
       </div>
       <div class="meter-track compact"><span class="meter-fill ink-fill" style="width: {{pairShare .Data.OutputTokens .Data.InputTokens}}"></span></div>
@@ -148,36 +148,6 @@
       <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
       <h3>{{msg .Locale "最近还没有请求" "No recent requests yet"}}</h3>
       <p>{{msg .Locale "接入 OpenAI-compatible 或 Anthropic-compatible 调用后，这里会出现最近的流量轨迹。" "After routing OpenAI-compatible or Anthropic-compatible traffic, the latest request trace will appear here."}}</p>
-    </div>
-    {{end}}
-  </section>
-
-  <section class="panel">
-    <div class="section-head">
-      <div>
-        <p class="section-kicker">{{msg .Locale "审计轨迹" "Audit trail"}}</p>
-        <h2>{{msg .Locale "最近审计" "Latest audit"}}</h2>
-      </div>
-      <span class="badge tone-neutral">{{len .Data.RecentAudits}} {{msg .Locale "条事件" "events"}}</span>
-    </div>
-    {{if .Data.RecentAudits}}
-    <div class="activity-stack">
-      {{range .Data.RecentAudits}}
-      <article class="activity-item">
-        <div class="activity-top">
-          <strong>{{.EventType}}</strong>
-          <span class="badge tone-neutral">{{.StatusCode}}</span>
-        </div>
-        <p class="panel-copy">{{if .Message}}{{.Message}}{{else}}<span class="mono">{{.RequestID}}</span>{{end}}</p>
-        <span class="meta">{{orDash .ModelAlias}} · {{orDash .ProviderID}} · {{timefmt .CreatedAt}}</span>
-      </article>
-      {{end}}
-    </div>
-    {{else}}
-    <div class="empty-state empty-state-rich">
-      <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
-      <h3>{{msg .Locale "还没有审计记录" "No audit events yet"}}</h3>
-      <p>{{msg .Locale "登录、配置变更和 API 调用开始写入后，这里会提供最近的时间线。" "Once sign-ins, config changes, and API calls are written, the latest timeline will show up here."}}</p>
     </div>
     {{end}}
   </section>

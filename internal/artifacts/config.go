@@ -75,6 +75,14 @@ func (cfg Config) PublicObjectURL(objectKey string) string {
 	return base + "/" + key
 }
 
+func (cfg Config) ProxyObjectURL(objectKey string) string {
+	key := NormalizeObjectKey(objectKey)
+	if key == "" {
+		return ""
+	}
+	return path.Join(cfg.NormalizedProxyBasePath(), key)
+}
+
 func (cfg Config) ResolveProxyTarget(requestPath string) (string, error) {
 	key := cfg.ObjectKey(requestPath)
 	if key == "" {
@@ -103,6 +111,9 @@ func (cfg S3Config) ObjectKey(objectKey string) string {
 	}
 	prefix := NormalizeObjectKey(cfg.Prefix)
 	if prefix == "" {
+		return key
+	}
+	if key == prefix || strings.HasPrefix(key, prefix+"/") {
 		return key
 	}
 	return prefix + "/" + key

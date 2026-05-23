@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -338,6 +339,8 @@ func (store *PostgresStore) SettleQuota(ctx context.Context, reservation domain.
 func (store *PostgresStore) UpsertProvider(ctx context.Context, provider domain.Provider) error {
 	provider.SupportedProtocols = nonNilStrings(domain.ProviderSupportedProtocols(provider))
 	provider.Protocol = domain.ProviderPrimaryProtocol(provider)
+	provider.TimeoutSeconds = domain.EffectiveProviderTimeoutSeconds(provider)
+	provider.StreamIdleTimeoutSeconds = domain.EffectiveProviderStreamIdleTimeoutSeconds(provider)
 	secret, err := store.box.Encrypt(provider.MasterKey)
 	if err != nil {
 		return err
@@ -348,15 +351,15 @@ func (store *PostgresStore) UpsertProvider(ctx context.Context, provider domain.
 	}
 	provider.UpdatedAt = now
 	_, err = store.pool.Exec(ctx, `
-INSERT INTO providers (id, name, base_url, protocol, supported_protocols, master_key_ciphertext, default_proxy_id, priority, weight, status, timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-ON CONFLICT (id) DO UPDATE SET name = excluded.name, base_url = excluded.base_url, protocol = excluded.protocol, supported_protocols = excluded.supported_protocols, master_key_ciphertext = CASE WHEN excluded.master_key_ciphertext = '' THEN providers.master_key_ciphertext ELSE excluded.master_key_ciphertext END, default_proxy_id = excluded.default_proxy_id, priority = excluded.priority, weight = excluded.weight, status = excluded.status, timeout_seconds = excluded.timeout_seconds, rate_limit_hint = excluded.rate_limit_hint, last_health_check = excluded.last_health_check, last_error = excluded.last_error, updated_at = excluded.updated_at`,
-		provider.ID, provider.Name, provider.BaseURL, provider.Protocol, provider.SupportedProtocols, secret, provider.DefaultProxyID, provider.Priority, provider.Weight, normalizeStatus(provider.Status, domain.StatusEnabled), provider.TimeoutSeconds, provider.RateLimitHint, provider.LastHealthCheck, provider.LastError, provider.CreatedAt, provider.UpdatedAt)
+INSERT INTO providers (id, name, base_url, protocol, supported_protocols, master_key_ciphertext, default_proxy_id, priority, weight, status, timeout_seconds, stream_idle_timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+ON CONFLICT (id) DO UPDATE SET name = excluded.name, base_url = excluded.base_url, protocol = excluded.protocol, supported_protocols = excluded.supported_protocols, master_key_ciphertext = CASE WHEN excluded.master_key_ciphertext = '' THEN providers.master_key_ciphertext ELSE excluded.master_key_ciphertext END, default_proxy_id = excluded.default_proxy_id, priority = excluded.priority, weight = excluded.weight, status = excluded.status, timeout_seconds = excluded.timeout_seconds, stream_idle_timeout_seconds = excluded.stream_idle_timeout_seconds, rate_limit_hint = excluded.rate_limit_hint, last_health_check = excluded.last_health_check, last_error = excluded.last_error, updated_at = excluded.updated_at`,
+		provider.ID, provider.Name, provider.BaseURL, provider.Protocol, provider.SupportedProtocols, secret, provider.DefaultProxyID, provider.Priority, provider.Weight, normalizeStatus(provider.Status, domain.StatusEnabled), provider.TimeoutSeconds, provider.StreamIdleTimeoutSeconds, provider.RateLimitHint, provider.LastHealthCheck, provider.LastError, provider.CreatedAt, provider.UpdatedAt)
 	return err
 }
 
 func (store *PostgresStore) ListProviders(ctx context.Context) ([]domain.Provider, error) {
-	rows, err := store.pool.Query(ctx, `SELECT id, name, base_url, protocol, supported_protocols, default_proxy_id, priority, weight, status, timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at FROM providers ORDER BY id`)
+	rows, err := store.pool.Query(ctx, `SELECT id, name, base_url, protocol, supported_protocols, default_proxy_id, priority, weight, status, timeout_seconds, stream_idle_timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at FROM providers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -364,7 +367,7 @@ func (store *PostgresStore) ListProviders(ctx context.Context) ([]domain.Provide
 	var providers []domain.Provider
 	for rows.Next() {
 		var provider domain.Provider
-		if err := rows.Scan(&provider.ID, &provider.Name, &provider.BaseURL, &provider.Protocol, &provider.SupportedProtocols, &provider.DefaultProxyID, &provider.Priority, &provider.Weight, &provider.Status, &provider.TimeoutSeconds, &provider.RateLimitHint, &provider.LastHealthCheck, &provider.LastError, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
+		if err := rows.Scan(&provider.ID, &provider.Name, &provider.BaseURL, &provider.Protocol, &provider.SupportedProtocols, &provider.DefaultProxyID, &provider.Priority, &provider.Weight, &provider.Status, &provider.TimeoutSeconds, &provider.StreamIdleTimeoutSeconds, &provider.RateLimitHint, &provider.LastHealthCheck, &provider.LastError, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
 			return nil, err
 		}
 		providers = append(providers, provider)
@@ -375,7 +378,7 @@ func (store *PostgresStore) ListProviders(ctx context.Context) ([]domain.Provide
 func (store *PostgresStore) GetProvider(ctx context.Context, id string) (domain.Provider, error) {
 	var provider domain.Provider
 	var secret string
-	err := store.pool.QueryRow(ctx, `SELECT id, name, base_url, protocol, supported_protocols, master_key_ciphertext, default_proxy_id, priority, weight, status, timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at FROM providers WHERE id = $1`, id).Scan(&provider.ID, &provider.Name, &provider.BaseURL, &provider.Protocol, &provider.SupportedProtocols, &secret, &provider.DefaultProxyID, &provider.Priority, &provider.Weight, &provider.Status, &provider.TimeoutSeconds, &provider.RateLimitHint, &provider.LastHealthCheck, &provider.LastError, &provider.CreatedAt, &provider.UpdatedAt)
+	err := store.pool.QueryRow(ctx, `SELECT id, name, base_url, protocol, supported_protocols, master_key_ciphertext, default_proxy_id, priority, weight, status, timeout_seconds, stream_idle_timeout_seconds, rate_limit_hint, last_health_check, last_error, created_at, updated_at FROM providers WHERE id = $1`, id).Scan(&provider.ID, &provider.Name, &provider.BaseURL, &provider.Protocol, &provider.SupportedProtocols, &secret, &provider.DefaultProxyID, &provider.Priority, &provider.Weight, &provider.Status, &provider.TimeoutSeconds, &provider.StreamIdleTimeoutSeconds, &provider.RateLimitHint, &provider.LastHealthCheck, &provider.LastError, &provider.CreatedAt, &provider.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Provider{}, ErrNotFound
 	}
@@ -503,15 +506,15 @@ func (store *PostgresStore) UpsertProxyProfile(ctx context.Context, profile doma
 	}
 	profile.UpdatedAt = now
 	_, err = store.pool.Exec(ctx, `
-INSERT INTO proxy_profiles (id, name, type, endpoint, auth_ciphertext, region, timeout_seconds, health_check_url, status, last_error, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-ON CONFLICT (id) DO UPDATE SET name = excluded.name, type = excluded.type, endpoint = excluded.endpoint, auth_ciphertext = CASE WHEN excluded.auth_ciphertext = '' THEN proxy_profiles.auth_ciphertext ELSE excluded.auth_ciphertext END, region = excluded.region, timeout_seconds = excluded.timeout_seconds, health_check_url = excluded.health_check_url, status = excluded.status, last_error = CASE WHEN excluded.last_error = '' THEN proxy_profiles.last_error ELSE excluded.last_error END, updated_at = excluded.updated_at`,
-		profile.ID, profile.Name, profile.Type, profile.Endpoint, secret, profile.Region, profile.TimeoutSeconds, profile.HealthCheckURL, normalizeStatus(profile.Status, domain.StatusEnabled), profile.LastError, profile.CreatedAt, profile.UpdatedAt)
+INSERT INTO proxy_profiles (id, name, type, endpoint, auth_ciphertext, region, timeout_seconds, stream_idle_timeout_seconds, health_check_url, status, last_error, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+ON CONFLICT (id) DO UPDATE SET name = excluded.name, type = excluded.type, endpoint = excluded.endpoint, auth_ciphertext = CASE WHEN excluded.auth_ciphertext = '' THEN proxy_profiles.auth_ciphertext ELSE excluded.auth_ciphertext END, region = excluded.region, timeout_seconds = excluded.timeout_seconds, stream_idle_timeout_seconds = excluded.stream_idle_timeout_seconds, health_check_url = excluded.health_check_url, status = excluded.status, last_error = CASE WHEN excluded.last_error = '' THEN proxy_profiles.last_error ELSE excluded.last_error END, updated_at = excluded.updated_at`,
+		profile.ID, profile.Name, profile.Type, profile.Endpoint, secret, profile.Region, profile.TimeoutSeconds, profile.StreamIdleTimeoutSeconds, profile.HealthCheckURL, normalizeStatus(profile.Status, domain.StatusEnabled), profile.LastError, profile.CreatedAt, profile.UpdatedAt)
 	return err
 }
 
 func (store *PostgresStore) ListProxyProfiles(ctx context.Context) ([]domain.ProxyProfile, error) {
-	rows, err := store.pool.Query(ctx, `SELECT id, name, type, endpoint, region, timeout_seconds, health_check_url, status, last_error, created_at, updated_at FROM proxy_profiles ORDER BY id`)
+	rows, err := store.pool.Query(ctx, `SELECT id, name, type, endpoint, region, timeout_seconds, stream_idle_timeout_seconds, health_check_url, status, last_error, created_at, updated_at FROM proxy_profiles ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +522,7 @@ func (store *PostgresStore) ListProxyProfiles(ctx context.Context) ([]domain.Pro
 	var profiles []domain.ProxyProfile
 	for rows.Next() {
 		var profile domain.ProxyProfile
-		if err := rows.Scan(&profile.ID, &profile.Name, &profile.Type, &profile.Endpoint, &profile.Region, &profile.TimeoutSeconds, &profile.HealthCheckURL, &profile.Status, &profile.LastError, &profile.CreatedAt, &profile.UpdatedAt); err != nil {
+		if err := rows.Scan(&profile.ID, &profile.Name, &profile.Type, &profile.Endpoint, &profile.Region, &profile.TimeoutSeconds, &profile.StreamIdleTimeoutSeconds, &profile.HealthCheckURL, &profile.Status, &profile.LastError, &profile.CreatedAt, &profile.UpdatedAt); err != nil {
 			return nil, err
 		}
 		profiles = append(profiles, profile)
@@ -530,7 +533,7 @@ func (store *PostgresStore) ListProxyProfiles(ctx context.Context) ([]domain.Pro
 func (store *PostgresStore) GetProxyProfile(ctx context.Context, id string) (domain.ProxyProfile, error) {
 	var profile domain.ProxyProfile
 	var secret string
-	err := store.pool.QueryRow(ctx, `SELECT id, name, type, endpoint, auth_ciphertext, region, timeout_seconds, health_check_url, status, last_error, created_at, updated_at FROM proxy_profiles WHERE id = $1`, id).Scan(&profile.ID, &profile.Name, &profile.Type, &profile.Endpoint, &secret, &profile.Region, &profile.TimeoutSeconds, &profile.HealthCheckURL, &profile.Status, &profile.LastError, &profile.CreatedAt, &profile.UpdatedAt)
+	err := store.pool.QueryRow(ctx, `SELECT id, name, type, endpoint, auth_ciphertext, region, timeout_seconds, stream_idle_timeout_seconds, health_check_url, status, last_error, created_at, updated_at FROM proxy_profiles WHERE id = $1`, id).Scan(&profile.ID, &profile.Name, &profile.Type, &profile.Endpoint, &secret, &profile.Region, &profile.TimeoutSeconds, &profile.StreamIdleTimeoutSeconds, &profile.HealthCheckURL, &profile.Status, &profile.LastError, &profile.CreatedAt, &profile.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ProxyProfile{}, ErrNotFound
 	}
@@ -611,41 +614,9 @@ func (store *PostgresStore) SummarizeAPIKeyUsage(ctx context.Context, apiKeyID s
 	return summary, err
 }
 
-func (store *PostgresStore) InsertAudit(ctx context.Context, event domain.AuditEvent) error {
-	if event.CreatedAt.IsZero() {
-		event.CreatedAt = time.Now().UTC()
-	}
-	_, err := store.pool.Exec(ctx, `INSERT INTO audit_logs (id, request_id, trace_id, user_id, api_key_id, client_ip, user_agent, protocol, endpoint, model_alias, provider_id, upstream_model, proxy_profile_id, status_code, error_code, latency_ms, input_tokens, output_tokens, cost_micro_cents, stream, event_type, message, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`, event.ID, event.RequestID, event.TraceID, event.UserID, event.APIKeyID, event.ClientIP, event.UserAgent, event.Protocol, event.Endpoint, event.ModelAlias, event.ProviderID, event.UpstreamModel, event.ProxyProfileID, event.StatusCode, event.ErrorCode, event.LatencyMS, event.InputTokens, event.OutputTokens, event.CostMicroCents, event.Stream, event.EventType, event.Message, event.CreatedAt)
-	return err
-}
-
-func (store *PostgresStore) ListAudit(ctx context.Context, limit int) ([]domain.AuditEvent, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	rows, err := store.pool.Query(ctx, `SELECT id, request_id, trace_id, user_id, api_key_id, client_ip, user_agent, protocol, endpoint, model_alias, provider_id, upstream_model, proxy_profile_id, status_code, error_code, latency_ms, input_tokens, output_tokens, cost_micro_cents, stream, event_type, message, created_at FROM audit_logs ORDER BY created_at DESC LIMIT $1`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var events []domain.AuditEvent
-	for rows.Next() {
-		var event domain.AuditEvent
-		if err := rows.Scan(&event.ID, &event.RequestID, &event.TraceID, &event.UserID, &event.APIKeyID, &event.ClientIP, &event.UserAgent, &event.Protocol, &event.Endpoint, &event.ModelAlias, &event.ProviderID, &event.UpstreamModel, &event.ProxyProfileID, &event.StatusCode, &event.ErrorCode, &event.LatencyMS, &event.InputTokens, &event.OutputTokens, &event.CostMicroCents, &event.Stream, &event.EventType, &event.Message, &event.CreatedAt); err != nil {
-			return nil, err
-		}
-		events = append(events, event)
-	}
-	return events, rows.Err()
-}
-
 func (store *PostgresStore) Dashboard(ctx context.Context) (domain.DashboardData, error) {
 	var data domain.DashboardData
 	err := store.pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE status_code >= 400), count(*) FILTER (WHERE estimated), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0), coalesce(sum(cost_micro_cents),0) FROM usage_ledger WHERE created_at >= now() - interval '24 hours'`).Scan(&data.RequestCount, &data.ErrorCount, &data.EstimatedCount, &data.InputTokens, &data.OutputTokens, &data.CostMicroCents)
-	if err != nil {
-		return data, err
-	}
-	data.RecentAudits, err = store.ListAudit(ctx, 10)
 	if err != nil {
 		return data, err
 	}
@@ -751,36 +722,11 @@ func (store *PostgresStore) UserDirectory(ctx context.Context) (domain.UserDirec
 	if err := usageRows.Err(); err != nil {
 		return data, err
 	}
-	auditRows, err := store.pool.Query(ctx, `SELECT coalesce(nullif(user_id, ''), 'anonymous') AS user_id, max(created_at) FROM audit_logs GROUP BY 1`)
-	if err != nil {
-		return data, err
-	}
-	defer auditRows.Close()
-	for auditRows.Next() {
-		var userID string
-		var lastSeen time.Time
-		if err := auditRows.Scan(&userID, &lastSeen); err != nil {
-			return data, err
-		}
-		summary := summaries[userID]
-		if summary == nil {
-			summary = &domain.ConsoleUserSummary{UserID: userID}
-			summaries[userID] = summary
-		}
-		summary.LastSeen = maxTime(summary.LastSeen, lastSeen)
-	}
-	if err := auditRows.Err(); err != nil {
-		return data, err
-	}
 	for _, summary := range summaries {
 		data.Summaries = append(data.Summaries, *summary)
 	}
 	sortConsoleUsers(data.Summaries)
 	data.ObservedUsers = int64(len(data.Summaries))
-	data.RecentAudit, err = store.ListAudit(ctx, 8)
-	if err != nil {
-		return data, err
-	}
 	return data, nil
 }
 
@@ -824,6 +770,85 @@ INSERT INTO console_settings (key, value_ciphertext, updated_at)
 VALUES ($1, $2, $3)
 ON CONFLICT (key) DO UPDATE SET value_ciphertext = excluded.value_ciphertext, updated_at = excluded.updated_at`, consoleAuthSettingsKey, secret, settings.UpdatedAt)
 	return err
+}
+
+func (store *PostgresStore) UpsertConsoleChatSession(ctx context.Context, session domain.ConsoleChatSession) error {
+	session = sanitizeConsoleChatSessionStrings(session)
+	if session.CreatedAt.IsZero() {
+		session.CreatedAt = time.Now().UTC()
+	}
+	if session.UpdatedAt.IsZero() {
+		session.UpdatedAt = session.CreatedAt
+	}
+	_, err := store.pool.Exec(ctx, `
+INSERT INTO console_chat_sessions (user_id, id, title, custom_title, public_name, system_prompt, draft, draft_attachments_json, status, messages_json, message_count, last_request_id, last_response_id, last_error, created_at, updated_at, last_message_at, completed_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+ON CONFLICT (user_id, id) DO UPDATE SET title = excluded.title, custom_title = excluded.custom_title, public_name = excluded.public_name, system_prompt = excluded.system_prompt, draft = excluded.draft, draft_attachments_json = excluded.draft_attachments_json, status = excluded.status, messages_json = excluded.messages_json, message_count = excluded.message_count, last_request_id = excluded.last_request_id, last_response_id = excluded.last_response_id, last_error = excluded.last_error, updated_at = excluded.updated_at, last_message_at = excluded.last_message_at, completed_at = excluded.completed_at`,
+		session.UserID, session.ID, session.Title, session.CustomTitle, session.PublicName, session.SystemPrompt, session.Draft, session.DraftAttachmentsJSON, session.Status, session.MessagesJSON, session.MessageCount, session.LastRequestID, session.LastResponseID, session.LastError, session.CreatedAt, session.UpdatedAt, session.LastMessageAt, session.CompletedAt)
+	return err
+}
+
+func sanitizeConsoleChatSessionStrings(session domain.ConsoleChatSession) domain.ConsoleChatSession {
+	replacement := string(utf8.RuneError)
+	session.ID = strings.ToValidUTF8(session.ID, replacement)
+	session.UserID = strings.ToValidUTF8(session.UserID, replacement)
+	session.Title = strings.ToValidUTF8(session.Title, replacement)
+	session.PublicName = strings.ToValidUTF8(session.PublicName, replacement)
+	session.SystemPrompt = strings.ToValidUTF8(session.SystemPrompt, replacement)
+	session.Draft = strings.ToValidUTF8(session.Draft, replacement)
+	session.DraftAttachmentsJSON = strings.ToValidUTF8(session.DraftAttachmentsJSON, replacement)
+	session.Status = strings.ToValidUTF8(session.Status, replacement)
+	session.MessagesJSON = strings.ToValidUTF8(session.MessagesJSON, replacement)
+	session.LastRequestID = strings.ToValidUTF8(session.LastRequestID, replacement)
+	session.LastResponseID = strings.ToValidUTF8(session.LastResponseID, replacement)
+	session.LastError = strings.ToValidUTF8(session.LastError, replacement)
+	return session
+}
+
+func (store *PostgresStore) ListConsoleChatSessions(ctx context.Context, userID string, limit int) ([]domain.ConsoleChatSession, error) {
+	if limit <= 0 {
+		limit = 24
+	}
+	rows, err := store.pool.Query(ctx, `SELECT user_id, id, title, custom_title, public_name, system_prompt, draft, draft_attachments_json, status, messages_json, message_count, last_request_id, last_response_id, last_error, created_at, updated_at, last_message_at, completed_at FROM console_chat_sessions WHERE user_id = $1 ORDER BY updated_at DESC, created_at DESC LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]domain.ConsoleChatSession, 0, limit)
+	for rows.Next() {
+		item, err := scanConsoleChatSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (store *PostgresStore) GetConsoleChatSession(ctx context.Context, userID string, id string) (domain.ConsoleChatSession, error) {
+	row := store.pool.QueryRow(ctx, `SELECT user_id, id, title, custom_title, public_name, system_prompt, draft, draft_attachments_json, status, messages_json, message_count, last_request_id, last_response_id, last_error, created_at, updated_at, last_message_at, completed_at FROM console_chat_sessions WHERE user_id = $1 AND id = $2`, userID, id)
+	item, err := scanConsoleChatSession(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ConsoleChatSession{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (store *PostgresStore) DeleteConsoleChatSession(ctx context.Context, userID string, id string) error {
+	result, err := store.pool.Exec(ctx, `DELETE FROM console_chat_sessions WHERE user_id = $1 AND id = $2`, userID, id)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func scanConsoleChatSession(scanner interface{ Scan(dest ...any) error }) (domain.ConsoleChatSession, error) {
+	var item domain.ConsoleChatSession
+	err := scanner.Scan(&item.UserID, &item.ID, &item.Title, &item.CustomTitle, &item.PublicName, &item.SystemPrompt, &item.Draft, &item.DraftAttachmentsJSON, &item.Status, &item.MessagesJSON, &item.MessageCount, &item.LastRequestID, &item.LastResponseID, &item.LastError, &item.CreatedAt, &item.UpdatedAt, &item.LastMessageAt, &item.CompletedAt)
+	return item, err
 }
 
 func normalizeStatus(value, fallback string) string {

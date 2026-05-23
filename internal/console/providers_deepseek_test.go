@@ -96,7 +96,7 @@ func TestProvidersPageCanResyncDeepSeekProvider(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	html := string(body)
-	if !strings.Contains(html, "Re-imported 2 models from DeepSeek") || !strings.Contains(html, "kept 1 conflicting routes") {
+	if !strings.Contains(html, "已从 DeepSeek 重新导入 2 个模型，并保留了 1 条同名路由。") {
 		t.Fatalf("resync notice missing expected summary: %s", html)
 	}
 
@@ -132,7 +132,7 @@ func TestProvidersPageCanResyncDeepSeekProvider(t *testing.T) {
 	}
 	modelsBody, _ := io.ReadAll(modelsResponse.Body)
 	modelsHTML := string(modelsBody)
-	if !strings.Contains(modelsHTML, "¥3.0000 / 1M in") || !strings.Contains(modelsHTML, "¥6.0000 / 1M out") || !strings.Contains(modelsHTML, "¥0.0250 / 1M cache read") {
+	if !strings.Contains(modelsHTML, "¥3.0000 / 百万输入") || !strings.Contains(modelsHTML, "¥6.0000 / 百万输出") || !strings.Contains(modelsHTML, "¥0.0250 / 百万缓存读取") {
 		t.Fatalf("deepseek pricing details missing from models page: %s", modelsHTML)
 	}
 
@@ -214,6 +214,9 @@ func TestProvidersPageCanEditExistingProvider(t *testing.T) {
 	if !strings.Contains(html, `name="timeout_seconds" type="number" min="0" value="120"`) {
 		t.Fatalf("provider edit form did not load timeout: %s", html)
 	}
+	if !strings.Contains(html, `name="stream_idle_timeout_seconds" type="number" min="1" value="300"`) {
+		t.Fatalf("provider edit form did not load stream idle timeout: %s", html)
+	}
 	if !strings.Contains(html, `name="priority" type="number" value="7"`) || !strings.Contains(html, `name="weight" type="number" min="0" value="35"`) {
 		t.Fatalf("provider edit form did not load scheduling fields: %s", html)
 	}
@@ -225,16 +228,17 @@ func TestProvidersPageCanEditExistingProvider(t *testing.T) {
 	}
 
 	form := url.Values{
-		"id":                  {"deepseek"},
-		"name":                {"DeepSeek CN"},
-		"base_url":            {"https://api.deepseek.com/v1"},
-		"protocol":            {domain.ProtocolOpenAI},
-		"supported_protocols": {domain.ProtocolOpenAI, domain.ProtocolAnthropic},
-		"default_proxy_id":    {""},
-		"timeout_seconds":     {"150"},
-		"priority":            {"9"},
-		"weight":              {"55"},
-		"status":              {domain.StatusEnabled},
+		"id":                          {"deepseek"},
+		"name":                        {"DeepSeek CN"},
+		"base_url":                    {"https://api.deepseek.com/v1"},
+		"protocol":                    {domain.ProtocolOpenAI},
+		"supported_protocols":         {domain.ProtocolOpenAI, domain.ProtocolAnthropic},
+		"default_proxy_id":            {""},
+		"timeout_seconds":             {"150"},
+		"stream_idle_timeout_seconds": {"360"},
+		"priority":                    {"9"},
+		"weight":                      {"55"},
+		"status":                      {domain.StatusEnabled},
 	}
 	updateRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/providers", strings.NewReader(form.Encode()))
 	if err != nil {
@@ -255,7 +259,7 @@ func TestProvidersPageCanEditExistingProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.Name != "DeepSeek CN" || provider.BaseURL != "https://api.deepseek.com/v1" || provider.DefaultProxyID != "" || provider.TimeoutSeconds != 150 || provider.Priority != 9 || provider.Weight != 55 || provider.Status != domain.StatusEnabled {
+	if provider.Name != "DeepSeek CN" || provider.BaseURL != "https://api.deepseek.com/v1" || provider.DefaultProxyID != "" || provider.TimeoutSeconds != 150 || provider.StreamIdleTimeoutSeconds != 360 || provider.Priority != 9 || provider.Weight != 55 || provider.Status != domain.StatusEnabled {
 		t.Fatalf("provider was not updated: %+v", provider)
 	}
 	if len(provider.SupportedProtocols) != 2 || provider.SupportedProtocols[0] != domain.ProtocolOpenAI || provider.SupportedProtocols[1] != domain.ProtocolAnthropic {

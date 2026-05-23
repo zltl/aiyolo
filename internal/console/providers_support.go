@@ -10,28 +10,30 @@ import (
 )
 
 type providerFormView struct {
-	ID                 string
-	Name               string
-	BaseURL            string
-	Protocol           string
-	SupportedProtocols []string
-	DefaultProxyID     string
-	TimeoutSeconds     int
-	Priority           int
-	Weight             int
-	Status             string
-	Editing            bool
-	HasSavedMasterKey  bool
+	ID                       string
+	Name                     string
+	BaseURL                  string
+	Protocol                 string
+	SupportedProtocols       []string
+	DefaultProxyID           string
+	TimeoutSeconds           int
+	StreamIdleTimeoutSeconds int
+	Priority                 int
+	Weight                   int
+	Status                   string
+	Editing                  bool
+	HasSavedMasterKey        bool
 }
 
 func buildProvidersViewData(ctx context.Context, store storage.Store, data map[string]any, r *http.Request) error {
 	form := providerFormView{
-		Protocol:           domain.ProtocolOpenAI,
-		SupportedProtocols: []string{domain.ProtocolOpenAI},
-		TimeoutSeconds:     90,
-		Priority:           1,
-		Weight:             100,
-		Status:             domain.StatusEnabled,
+		Protocol:                 domain.ProtocolOpenAI,
+		SupportedProtocols:       []string{domain.ProtocolOpenAI},
+		TimeoutSeconds:           domain.DefaultProviderTimeoutSeconds,
+		StreamIdleTimeoutSeconds: domain.DefaultProviderStreamIdleTimeoutSeconds,
+		Priority:                 1,
+		Weight:                   100,
+		Status:                   domain.StatusEnabled,
 	}
 	if r == nil {
 		data["ProviderForm"] = form
@@ -51,18 +53,19 @@ func buildProvidersViewData(ctx context.Context, store storage.Store, data map[s
 		return err
 	}
 	data["ProviderForm"] = providerFormView{
-		ID:                 provider.ID,
-		Name:               provider.Name,
-		BaseURL:            provider.BaseURL,
-		Protocol:           firstNonEmpty(provider.Protocol, domain.ProtocolOpenAI),
-		SupportedProtocols: domain.ProviderSupportedProtocols(provider),
-		DefaultProxyID:     provider.DefaultProxyID,
-		TimeoutSeconds:     defaultProviderInt(provider.TimeoutSeconds, 90),
-		Priority:           defaultProviderInt(provider.Priority, 1),
-		Weight:             defaultProviderInt(provider.Weight, 100),
-		Status:             firstNonEmpty(provider.Status, domain.StatusEnabled),
-		Editing:            true,
-		HasSavedMasterKey:  strings.TrimSpace(provider.MasterKey) != "",
+		ID:                       provider.ID,
+		Name:                     provider.Name,
+		BaseURL:                  provider.BaseURL,
+		Protocol:                 firstNonEmpty(provider.Protocol, domain.ProtocolOpenAI),
+		SupportedProtocols:       domain.ProviderSupportedProtocols(provider),
+		DefaultProxyID:           provider.DefaultProxyID,
+		TimeoutSeconds:           domain.EffectiveProviderTimeoutSeconds(provider),
+		StreamIdleTimeoutSeconds: domain.EffectiveProviderStreamIdleTimeoutSeconds(provider),
+		Priority:                 defaultProviderInt(provider.Priority, 1),
+		Weight:                   defaultProviderInt(provider.Weight, 100),
+		Status:                   firstNonEmpty(provider.Status, domain.StatusEnabled),
+		Editing:                  true,
+		HasSavedMasterKey:        strings.TrimSpace(provider.MasterKey) != "",
 	}
 	return nil
 }

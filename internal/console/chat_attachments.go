@@ -62,6 +62,38 @@ func (handler *Handler) uploadChatAttachments(w http.ResponseWriter, r *http.Req
 	handler.writeChatAttachmentResponse(w, http.StatusOK, consoleChatAttachmentUploadResponse{Attachments: attachments})
 }
 
+func (handler *Handler) chatAttachmentFile(w http.ResponseWriter, r *http.Request) {
+	if !handler.cfg.ChatAttachments.CanUpload() {
+		http.Error(w, handler.requestText(r, "当前没有配置可读取 chat 附件的对象存储。", "Chat attachment storage is not configured."), http.StatusServiceUnavailable)
+		return
+	}
+	reader, err := handler.newChatAttachmentReader(handler.cfg.ChatAttachments)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	objectKey := strings.TrimPrefix(r.URL.Path, handler.cfg.ChatAttachments.NormalizedProxyBasePath())
+	if objectKey == r.URL.Path {
+		objectKey = strings.TrimPrefix(r.URL.Path, strings.TrimPrefix(handler.cfg.ChatAttachments.NormalizedProxyBasePath(), "/console"))
+	}
+	objectKey = strings.TrimLeft(objectKey, "/")
+	if objectKey == "" {
+		http.Error(w, "attachment path is required", http.StatusNotFound)
+		return
+	}
+	payload, mediaType, err := reader.ReadObject(r.Context(), objectKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if mediaType == "" {
+		mediaType = http.DetectContentType(payload)
+	}
+	w.Header().Set("Content-Type", mediaType)
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	_, _ = w.Write(payload)
+}
+
 func collectConsoleChatUploadFiles(form *multipart.Form) []*multipart.FileHeader {
 	if form == nil {
 		return nil

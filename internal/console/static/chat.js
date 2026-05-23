@@ -4,29 +4,25 @@
   }
   window.__aiyoloConsoleChatBound = true;
 
-  const storageKey = "aiyolo.console.chat.v1";
   const sessionLimit = 24;
-  const syncChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel(storageKey) : null;
   let persistTimer = 0;
 
   const supportsStreaming = () => Boolean(window.fetch && window.FormData && window.TextDecoder && window.ReadableStream);
-  const supportsStorage = (() => {
-    try {
-      window.localStorage.setItem("__aiyolo_console_chat_probe", "1");
-      window.localStorage.removeItem("__aiyolo_console_chat_probe");
-      return true;
-    } catch (_error) {
-      return false;
-    }
-  })();
 
   const currentRoot = () => document.getElementById("chat-content");
   const currentForm = () => currentRoot()?.querySelector(".chat-shell[data-chat-stream-url]") || null;
-  const localeIsZH = () => String(currentForm()?.dataset.chatLocale || "").toLowerCase().startsWith("zh");
-  const t = (zh, en) => (localeIsZH() ? zh : en);
-  const assistantAvatarText = "AI";
-  const userAvatarText = "U";
-  const systemAvatarText = "S";
+  const t = (zh, _en) => zh;
+  const syncLucideIcons = () => {
+    if (!window.lucide || typeof window.lucide.createIcons !== "function") {
+      return;
+    }
+    window.lucide.createIcons();
+  };
+  const sidebarPreferenceKey = "aiyolo.console.chat.sidebarCollapsed";
+  const ownProperty = Object.prototype.hasOwnProperty;
+  let activeStreamController = null;
+  let activeStreamStopRequested = false;
+  const queuedTurns = [];
 
   const cloneValue = (value) => {
     if (value === undefined) {
@@ -47,6 +43,35 @@
       return parsed == null ? cloneValue(fallback) : parsed;
     } catch (_error) {
       return cloneValue(fallback);
+    }
+  };
+
+  const readSidebarPreference = () => {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return null;
+    }
+    try {
+      const raw = window.localStorage.getItem(sidebarPreferenceKey);
+      if (raw === "true") {
+        return true;
+      }
+      if (raw === "false") {
+        return false;
+      }
+    } catch (_error) {
+      return null;
+    }
+    return null;
+  };
+
+  const writeSidebarPreference = (collapsed) => {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(sidebarPreferenceKey, collapsed ? "true" : "false");
+    } catch (_error) {
+      // Ignore storage failures and keep the in-memory layout state.
     }
   };
 
@@ -344,6 +369,21 @@
     thread.scrollTop = thread.scrollHeight;
   };
 
+  const setSidebarCollapsed = (form, collapsed, persist = false) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    form.classList.toggle("is-sidebar-collapsed", collapsed);
+    const toggle = form.querySelector(".chat-sidebar-toggle");
+    if (toggle instanceof HTMLButtonElement) {
+      toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    }
+    if (persist) {
+      writeSidebarPreference(collapsed);
+    }
+  };
+
+  const sessionStoreField = (form = currentForm()) => form?.querySelector("#chat-session-store-json") || null;
   const hiddenField = (form, name) => form?.querySelector(`input[name="${name}"]`) || null;
   const readHiddenJSON = (form, name, fallback) => {
     const field = hiddenField(form, name);
@@ -387,6 +427,90 @@
       return "";
     }
     return String(field.defaultValue || field.value || "").trim();
+  };
+
+  const composerPrimaryButton = (form = currentForm()) => form?.querySelector("[data-chat-action=\"composer-primary\"]") || null;
+  const composerPrimaryStartGlyph = (form = currentForm()) => composerPrimaryButton(form)?.querySelector("[data-chat-primary-start]") || null;
+  const composerPrimaryStopGlyph = (form = currentForm()) => composerPrimaryButton(form)?.querySelector("[data-chat-primary-stop]") || null;
+  const composerQueueIndicator = (form = currentForm()) => form?.querySelector("[data-chat-queue-indicator]") || null;
+
+  const syncDraftFieldHeight = (field) => {
+    if (!(field instanceof HTMLTextAreaElement)) {
+      return;
+    }
+    field.style.height = "0px";
+    const viewportMaxHeight = window.innerHeight > 0 ? Math.floor(window.innerHeight * 0.5) : 0;
+    const nextHeight = viewportMaxHeight > 0 ? Math.min(field.scrollHeight, viewportMaxHeight) : field.scrollHeight;
+    field.style.height = `${nextHeight}px`;
+    field.style.overflowY = viewportMaxHeight > 0 && field.scrollHeight > viewportMaxHeight ? "auto" : "hidden";
+  };
+
+  const syncCurrentDraftHeight = (form = currentForm()) => {
+    const draftField = form?.querySelector("#chat-draft");
+    if (draftField instanceof HTMLTextAreaElement) {
+      syncDraftFieldHeight(draftField);
+    }
+  };
+
+  const readDraftPayload = (form, options = {}) => {
+    const draftField = form?.querySelector("#chat-draft");
+    const rawVisibleText = ownProperty.call(options, "userVisibleText")
+      ? options.userVisibleText
+      : draftField instanceof HTMLTextAreaElement
+        ? draftField.value
+        : "";
+    const rawPrompt = ownProperty.call(options, "prompt") ? options.prompt : rawVisibleText;
+    const rawAttachments = ownProperty.call(options, "attachments")
+      ? options.attachments
+      : readHiddenJSON(form, "chat_draft_attachments_json", []);
+    return {
+      userVisibleText: String(rawVisibleText || "").trim(),
+      prompt: String(rawPrompt || "").trim(),
+      attachments: Array.isArray(rawAttachments) ? rawAttachments.map(normalizeAttachment).filter(Boolean) : [],
+    };
+  };
+
+  const hasDraftPayload = (payload) => Boolean(
+    String(payload?.prompt || "").trim()
+    || (Array.isArray(payload?.attachments) && payload.attachments.length > 0),
+  );
+
+  const updateComposerControls = (form = currentForm()) => {
+    if (!form) {
+      return;
+    }
+    const button = composerPrimaryButton(form);
+    const startGlyph = composerPrimaryStartGlyph(form);
+    const stopGlyph = composerPrimaryStopGlyph(form);
+    const indicator = composerQueueIndicator(form);
+    const streaming = form.dataset.streaming === "true";
+    const payload = readDraftPayload(form);
+
+    if (button instanceof HTMLButtonElement) {
+      if (streaming) {
+        button.hidden = false;
+        button.disabled = false;
+        button.classList.add("is-stop");
+        button.setAttribute("aria-label", t("终止当前回复", "Stop current reply"));
+      } else {
+        const shouldShow = hasDraftPayload(payload);
+        button.hidden = !shouldShow;
+        button.disabled = !shouldShow || currentSelectedModel(form) === "";
+        button.classList.remove("is-stop");
+        button.setAttribute("aria-label", t("开始发送", "Start sending"));
+      }
+    }
+    if (startGlyph instanceof HTMLElement) {
+      startGlyph.hidden = streaming;
+    }
+    if (stopGlyph instanceof HTMLElement) {
+      stopGlyph.hidden = !streaming;
+    }
+    if (indicator instanceof HTMLElement) {
+      const queuedCount = queuedTurns.length;
+      indicator.hidden = queuedCount === 0;
+      indicator.textContent = queuedCount > 0 ? t(`已排队 ${queuedCount} 条`, `Queued ${queuedCount}`) : "";
+    }
   };
 
   const routeMap = (form) => {
@@ -456,6 +580,7 @@
       name: String(attachment.name || objectKey.split("/").pop() || t("附件", "Attachment")).trim(),
       objectKey,
       url,
+      browserUrl: String(attachment.browserUrl || attachment.url || "").trim() || url,
       mediaType: String(attachment.mediaType || "application/octet-stream").trim(),
       sizeBytes: Number(attachment.sizeBytes) > 0 ? Number(attachment.sizeBytes) : 0,
     };
@@ -510,6 +635,7 @@
     const messages = Array.isArray(session.messages)
       ? session.messages.map(normalizeMessage).filter(Boolean)
       : [];
+    const createdAt = String(session.createdAt || existingSession?.createdAt || nowISO());
     const normalized = {
       id: String(session.id || existingSession?.id || readClientSessionID(form) || makeID("chat")).trim(),
       title: String(session.title || existingSession?.title || "").trim(),
@@ -519,8 +645,8 @@
       draft: String(session.draft || "").trim(),
       draftAttachments,
       messages,
-      createdAt: String(session.createdAt || existingSession?.createdAt || nowISO()),
-      updatedAt: String(session.updatedAt || nowISO()),
+      createdAt,
+      updatedAt: String(session.updatedAt || existingSession?.updatedAt || createdAt || nowISO()),
     };
     if (!normalized.customTitle || !normalized.title) {
       normalized.title = deriveSessionTitle(normalized);
@@ -540,15 +666,6 @@
     if (firstAttachment && firstAttachment.attachments[0]?.name) {
       return truncateText(firstAttachment.attachments[0].name);
     }
-    if (String(session.draft || "").trim() !== "") {
-      return truncateText(markdownToPlainText(session.draft) || session.draft);
-    }
-    if (Array.isArray(session.draftAttachments) && session.draftAttachments[0]?.name) {
-      return truncateText(session.draftAttachments[0].name);
-    }
-    if (String(session.publicName || "").trim() !== "") {
-      return String(session.publicName).trim();
-    }
     return t("新会话", "New chat");
   };
 
@@ -562,26 +679,146 @@
   const isPersistedSession = (session) => Boolean(session)
     && (sessionHasMessages(session) || sessionHasDraft(session));
 
+  const sessionSortTime = (value) => {
+    const timestamp = Date.parse(String(value || "").trim());
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  };
+
+  const sessionMessageSignature = (messages) => JSON.stringify(
+    Array.isArray(messages) ? messages.map(normalizeMessage).filter(Boolean) : [],
+  );
+
+  const sessionHasMessageActivity = (existingSession, messages) => {
+    const nextSignature = sessionMessageSignature(messages);
+    const previousSignature = sessionMessageSignature(existingSession?.messages);
+    return nextSignature !== previousSignature;
+  };
+
+  const compareSessionsByRecency = (left, right) => {
+    const updatedDelta = sessionSortTime(right?.updatedAt) - sessionSortTime(left?.updatedAt);
+    if (updatedDelta !== 0) {
+      return updatedDelta;
+    }
+    const createdDelta = sessionSortTime(right?.createdAt) - sessionSortTime(left?.createdAt);
+    if (createdDelta !== 0) {
+      return createdDelta;
+    }
+    return String(left?.id || "").localeCompare(String(right?.id || ""));
+  };
+
+  const sortSessionsByRecency = (sessions) => [...sessions].sort(compareSessionsByRecency);
+
+  const displaySessions = (store) => sortSessionsByRecency(Array.isArray(store?.sessions) ? store.sessions : []);
+
   const emptyStore = () => ({ version: 1, activeSessionId: "", sessions: [] });
 
   const loadStore = () => {
-    if (!supportsStorage) {
+    const field = sessionStoreField();
+    if (!(field instanceof HTMLInputElement)) {
       return emptyStore();
     }
-    return safeParseJSON(window.localStorage.getItem(storageKey), emptyStore());
+    return safeParseJSON(field.value, emptyStore());
   };
 
-  const saveStore = (store, broadcast = true) => {
-    if (!supportsStorage) {
+  const saveStore = (store) => {
+    const field = sessionStoreField();
+    if (!(field instanceof HTMLInputElement)) {
+      return;
+    }
+    field.value = JSON.stringify(store);
+  };
+
+  const syncSessionURL = (session) => {
+    if (typeof window === "undefined" || !window.history || typeof window.history.replaceState !== "function") {
+      return;
+    }
+    const nextURL = new URL(window.location.href);
+    const sessionID = isPersistedSession(session) ? String(session?.id || "").trim() : "";
+    if (sessionID === "") {
+      nextURL.searchParams.delete("session");
+    } else {
+      nextURL.searchParams.set("session", sessionID);
+    }
+    const currentValue = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    const nextValue = `${nextURL.pathname}${nextURL.search}${nextURL.hash}`;
+    if (nextValue !== currentValue) {
+      window.history.replaceState(window.history.state, "", nextValue);
+    }
+  };
+
+  const mergeSavedSessionMetadata = (serverSession) => {
+    const root = currentRoot();
+    const form = currentForm();
+    if (!root || !form || !serverSession || typeof serverSession !== "object") {
+      return;
+    }
+    const sessionID = String(serverSession.id || "").trim();
+    if (sessionID === "") {
+      return;
+    }
+    const routes = routeMap(form);
+    let store = normalizeStore(loadStore(), form, routes);
+    const existing = store.sessions.find((session) => session.id === sessionID);
+    if (!existing) {
+      return;
+    }
+    const merged = {
+      ...existing,
+      title: String(serverSession.title || existing.title || "").trim(),
+      customTitle: Boolean(serverSession.customTitle || existing.customTitle),
+      updatedAt: String(serverSession.updatedAt || existing.updatedAt || "").trim() || existing.updatedAt,
+    };
+    store = upsertSession(store, merged);
+    saveStore(store);
+    renderSessionList(root, store);
+  };
+
+  const saveSessionToServer = async (session) => {
+    const form = currentForm();
+    if (!form || !session || typeof session !== "object") {
+      return;
+    }
+    const saveURL = String(form.dataset.chatSessionSaveUrl || "").trim();
+    if (saveURL === "") {
       return;
     }
     try {
-      window.localStorage.setItem(storageKey, JSON.stringify(store));
-      if (broadcast && syncChannel) {
-        syncChannel.postMessage(store);
+      const response = await fetch(saveURL, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(session),
+      });
+      const responseBody = await response.text();
+      const parsed = safeParseJSON(responseBody, null);
+      if (!response.ok || !parsed || typeof parsed !== "object") {
+        return;
       }
+      mergeSavedSessionMetadata(parsed);
     } catch (_error) {
-      // Ignore storage quota or privacy mode failures.
+      // Keep the current in-page state even if the background sync fails.
+    }
+  };
+
+  const deleteSessionOnServer = async (sessionID) => {
+    const form = currentForm();
+    if (!form || String(sessionID || "").trim() === "") {
+      return;
+    }
+    const saveURL = String(form.dataset.chatSessionSaveUrl || "").trim();
+    if (saveURL === "") {
+      return;
+    }
+    try {
+      await fetch(`${saveURL}/${encodeURIComponent(String(sessionID).trim())}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+    } catch (_error) {
+      // Keep the current in-page state even if the background sync fails.
     }
   };
 
@@ -595,7 +832,7 @@
     return {
       version: 1,
       activeSessionId: String(store.activeSessionId || "").trim(),
-      sessions,
+      sessions: sortSessionsByRecency(sessions),
     };
   };
 
@@ -606,7 +843,7 @@
       sessions: store.sessions.filter((item) => item.id !== session.id),
     };
     next.sessions.unshift(session);
-    next.sessions.sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
+    next.sessions = sortSessionsByRecency(next.sessions);
     if (next.sessions.length > sessionLimit) {
       next.sessions = next.sessions.slice(0, sessionLimit);
     }
@@ -629,6 +866,11 @@
   const captureSessionFromDOM = (form, store, routes) => {
     const existingSession = store.sessions.find((session) => session.id === readClientSessionID(form)) || null;
     const draftField = form.querySelector("#chat-draft");
+    const messages = readHiddenJSON(form, "chat_history_json", []).map(normalizeMessage).filter(Boolean);
+    const createdAt = existingSession?.createdAt || nowISO();
+    const updatedAt = sessionHasMessageActivity(existingSession, messages)
+      ? nowISO()
+      : String(existingSession?.updatedAt || createdAt).trim() || createdAt;
     const session = normalizeSession({
       id: readClientSessionID(form) || existingSession?.id || makeID("chat"),
       title: existingSession?.title || "",
@@ -637,9 +879,9 @@
       systemPrompt: String((form.querySelector("textarea[name=\"chat_system_prompt\"]")?.value || defaultSystemPrompt(form) || "")).trim(),
       draft: draftField instanceof HTMLTextAreaElement ? draftField.value : "",
       draftAttachments: readHiddenJSON(form, "chat_draft_attachments_json", []),
-      messages: readHiddenJSON(form, "chat_history_json", []),
-      createdAt: existingSession?.createdAt || nowISO(),
-      updatedAt: nowISO(),
+      messages,
+      createdAt,
+      updatedAt,
     }, form, routes, existingSession);
     writeClientSessionID(form, session.id);
     writeHiddenJSON(form, "chat_history_json", session.messages);
@@ -651,7 +893,7 @@
     const element = removable ? document.createElement("div") : document.createElement("a");
     element.className = "chat-attachment-chip";
     if (!removable) {
-      element.href = attachment.url;
+      element.href = attachment.browserUrl || attachment.url;
       element.target = "_blank";
       element.rel = "noreferrer";
     }
@@ -685,13 +927,58 @@
     return element;
   };
 
+  const buildMessageAttachmentNode = (attachment) => {
+    if (!String(attachment?.mediaType || "").trim().toLowerCase().startsWith("image/")) {
+      return buildAttachmentChip(attachment, false);
+    }
+    const card = document.createElement("a");
+    card.className = "chat-message-image";
+    card.href = attachment.browserUrl || attachment.url;
+    card.target = "_blank";
+    card.rel = "noreferrer";
+
+    const preview = document.createElement("img");
+    preview.className = "chat-message-image-preview";
+    preview.src = attachment.browserUrl || attachment.url;
+    preview.alt = attachment.name;
+    preview.loading = "lazy";
+
+    const meta = document.createElement("div");
+    meta.className = "chat-message-image-meta";
+
+    const name = document.createElement("strong");
+    name.className = "chat-message-image-name";
+    name.textContent = attachment.name;
+
+    const type = document.createElement("span");
+    type.className = "chat-message-image-type";
+    type.textContent = attachment.mediaType;
+
+    meta.appendChild(name);
+    meta.appendChild(type);
+    card.appendChild(preview);
+    card.appendChild(meta);
+    return card;
+  };
+
   const buildReasoningPanel = (reasoning, open = false) => {
     const details = document.createElement("details");
     details.className = "chat-reasoning";
 
     const summary = document.createElement("summary");
     summary.className = "chat-reasoning-summary";
-    summary.textContent = t("思考过程", "Reasoning");
+    const summaryLabel = document.createElement("span");
+    summaryLabel.className = "chat-reasoning-summary-label";
+    summaryLabel.textContent = t("思考过程", "Reasoning");
+    const summaryIcon = document.createElement("span");
+    summaryIcon.className = "chat-reasoning-summary-icon";
+    summaryIcon.setAttribute("aria-hidden", "true");
+    const summaryIconGlyph = document.createElement("i");
+    summaryIconGlyph.className = "chat-control-icon";
+    summaryIconGlyph.dataset.lucide = "chevron-down";
+    summaryIcon.appendChild(summaryIconGlyph);
+    summary.appendChild(summaryLabel);
+    summary.appendChild(summaryIcon);
 
     const copy = document.createElement("div");
     copy.className = "chat-reasoning-copy";
@@ -710,6 +997,7 @@
       details.hidden = false;
       renderMarkdownInto(copy, raw);
       details.open = keepOpen;
+      syncLucideIcons();
     };
 
     setReasoning(reasoning, open);
@@ -723,21 +1011,6 @@
     if (streamingLabel) {
       article.classList.add("is-pending");
     }
-
-    const meta = document.createElement("div");
-    meta.className = "chat-message-meta";
-
-    const avatar = document.createElement("div");
-    avatar.className = "chat-avatar";
-    avatar.setAttribute("aria-hidden", "true");
-    avatar.textContent = role === "user" ? userAvatarText : role === "system" ? systemAvatarText : assistantAvatarText;
-
-    const messageLabel = document.createElement("span");
-    messageLabel.className = "chat-message-label";
-    messageLabel.textContent = label;
-
-    meta.appendChild(avatar);
-    meta.appendChild(messageLabel);
 
     const bubble = document.createElement("div");
     bubble.className = "chat-bubble";
@@ -766,7 +1039,7 @@
       const attachmentList = document.createElement("div");
       attachmentList.className = "chat-message-attachments";
       attachments.forEach((attachment) => {
-        attachmentList.appendChild(buildAttachmentChip(attachment, false));
+        attachmentList.appendChild(buildMessageAttachmentNode(attachment));
       });
       bubble.appendChild(attachmentList);
     }
@@ -779,16 +1052,45 @@
       bubble.appendChild(status);
     }
 
-    const setStreamingStatus = (nextStatus) => {
+    const actionBar = document.createElement("div");
+    actionBar.className = "chat-message-actions";
+    actionBar.hidden = true;
+    bubble.appendChild(actionBar);
+
+    const setStreamingStatus = (nextStatus, tone = "streaming") => {
       if (!(status instanceof HTMLElement)) {
         return;
       }
       const raw = String(nextStatus || "").trim();
+      status.classList.remove("is-streaming", "is-reasoning", "is-heartbeat", "is-warning", "is-error", "is-done");
       status.hidden = raw === "";
       status.textContent = raw;
+      article.classList.toggle("is-pending", raw !== "" && ["streaming", "reasoning", "heartbeat"].includes(tone));
+      if (raw !== "") {
+        status.classList.add(`is-${tone}`);
+      }
     };
 
-    article.appendChild(meta);
+    const setActions = (nextActions = []) => {
+      actionBar.replaceChildren();
+      if (!Array.isArray(nextActions) || nextActions.length === 0) {
+        actionBar.hidden = true;
+        return;
+      }
+      nextActions.forEach((action) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = action.kind === "primary" ? "primary-button chat-message-action" : "ghost-button chat-message-action";
+        button.textContent = String(action.label || "").trim();
+        button.disabled = Boolean(action.disabled);
+        if (typeof action.onClick === "function") {
+          button.addEventListener("click", action.onClick);
+        }
+        actionBar.appendChild(button);
+      });
+      actionBar.hidden = false;
+    };
+
     article.appendChild(bubble);
     return {
       article,
@@ -797,6 +1099,7 @@
       setContent,
       setReasoning: reasoningPanel.setReasoning,
       setStreamingStatus,
+      setActions,
     };
   };
 
@@ -812,15 +1115,15 @@
 
     const routeText = document.createElement("p");
     routeText.className = "chat-empty-route";
-    routeText.textContent = route ? `${route.publicName} · ${route.providerName}` : t("先从左侧选一个模型", "Choose a model from the sidebar first");
+    routeText.textContent = route ? `${route.publicName} · ${route.providerName}` : t("先选一个模型开始对话", "Choose a model to start chatting");
 
     const title = document.createElement("h2");
-    title.textContent = t("Hello! How can I help you today?", "Hello! How can I help you today?");
+    title.textContent = t("今天想聊点什么？", "Hello! How can I help you today?");
 
     const copy = document.createElement("p");
     copy.textContent = t(
-      "本地会话、附件上传和多标签页同步都会围绕当前模型与路由工作。",
-      "Local sessions, attachment upload, and multi-tab sync all run against the currently selected route."
+      "附件上传和中断恢复会沿用当前模型与路由。",
+      "Attachment uploads and resume behavior follow the current model and route."
     );
 
     empty.appendChild(mark);
@@ -838,12 +1141,14 @@
     thread.replaceChildren();
     if (!messages.length) {
       thread.appendChild(buildEmptyState(route));
+      syncLucideIcons();
       return;
     }
     messages.forEach((message) => {
       const node = buildMessageNode(message.role, message.label || roleLabel(message.role), message.content, "", message.attachments || [], message.reasoning || "");
       thread.appendChild(node.article);
     });
+    syncLucideIcons();
     scrollThread(thread);
   };
 
@@ -896,7 +1201,7 @@
       if (attachment.mediaType.startsWith("image/")) {
         const preview = document.createElement("img");
         preview.className = "chat-draft-attachment-preview";
-        preview.src = attachment.url;
+        preview.src = attachment.browserUrl || attachment.url;
         preview.alt = attachment.name;
         item.appendChild(preview);
       } else {
@@ -979,6 +1284,7 @@
     const draftField = form.querySelector("#chat-draft");
     if (draftField instanceof HTMLTextAreaElement) {
       draftField.value = session.draft;
+      syncDraftFieldHeight(draftField);
     }
     writeHiddenJSON(form, "chat_history_json", session.messages);
     writeHiddenJSON(form, "chat_draft_attachments_json", session.draftAttachments);
@@ -996,29 +1302,27 @@
     if (drawer instanceof HTMLElement) {
       drawer.hidden = true;
     }
+    syncSessionURL(session);
     scrollThread(root.querySelector("[data-chat-scroll]"));
+    updateComposerControls(form);
   };
 
   const renderSessionList = (root, store) => {
     const container = root.querySelector("[data-chat-session-store]");
     const counter = root.querySelector("[data-chat-session-counter]");
+    const sessions = displaySessions(store);
     if (!container) {
       return;
     }
     if (counter) {
-      counter.textContent = String(store.sessions.length);
+      counter.textContent = String(sessions.length);
     }
     container.replaceChildren();
-    if (!store.sessions.length) {
-      const empty = document.createElement("div");
-      empty.className = "chat-sidebar-empty";
-      const copy = document.createElement("p");
-      copy.textContent = t("本地会话会在这里保留，并自动同步到其他已打开的 chat 标签页。", "Local conversations will appear here and sync to other open chat tabs.");
-      empty.appendChild(copy);
-      container.appendChild(empty);
+    if (!sessions.length) {
+      syncLucideIcons();
       return;
     }
-    store.sessions.forEach((session) => {
+    sessions.forEach((session) => {
       const entry = document.createElement("div");
       entry.className = "chat-session-entry";
       if (session.id === store.activeSessionId) {
@@ -1033,19 +1337,24 @@
 
       const title = document.createElement("strong");
       title.className = "chat-session-title";
-      title.textContent = session.title;
-
-      const meta = document.createElement("span");
-      meta.className = "chat-session-meta";
-      meta.textContent = session.publicName
-        ? `${session.publicName} · ${session.messages.length} ${t("条消息", "messages")}`
-        : `${session.messages.length} ${t("条消息", "messages")}`;
+      title.textContent = session.title || t("新会话", "New chat");
 
       select.appendChild(title);
-      select.appendChild(meta);
 
-      const actions = document.createElement("div");
-      actions.className = "chat-session-actions";
+      const actions = document.createElement("details");
+      actions.className = "chat-session-menu";
+
+      const toggle = document.createElement("summary");
+      toggle.className = "chat-session-menu-toggle";
+      toggle.setAttribute("aria-label", t("会话操作", "Session actions"));
+      const toggleIcon = document.createElement("i");
+      toggleIcon.className = "chat-control-icon";
+      toggleIcon.dataset.lucide = "ellipsis";
+      toggleIcon.setAttribute("aria-hidden", "true");
+      toggle.appendChild(toggleIcon);
+
+      const panel = document.createElement("div");
+      panel.className = "chat-session-menu-panel";
 
       const rename = document.createElement("button");
       rename.type = "button";
@@ -1061,12 +1370,28 @@
       remove.dataset.chatSessionId = session.id;
       remove.textContent = t("删除", "Delete");
 
-      actions.appendChild(rename);
-      actions.appendChild(remove);
+      panel.appendChild(rename);
+      panel.appendChild(remove);
+      actions.appendChild(toggle);
+      actions.appendChild(panel);
 
       entry.appendChild(select);
       entry.appendChild(actions);
       container.appendChild(entry);
+    });
+    syncLucideIcons();
+  };
+
+  const closeSessionMenus = (exceptMenu = null) => {
+    const root = currentRoot();
+    if (!root) {
+      return;
+    }
+    root.querySelectorAll(".chat-session-menu[open]").forEach((menu) => {
+      if (menu === exceptMenu) {
+        return;
+      }
+      menu.removeAttribute("open");
     });
   };
 
@@ -1108,12 +1433,13 @@
     if (trimmed === "") {
       return;
     }
-    const renamed = { ...session, title: trimmed, customTitle: true, updatedAt: nowISO() };
+    const renamed = { ...session, title: trimmed, customTitle: true };
     store = upsertSession(store, renamed);
     store.activeSessionId = renamed.id;
     saveStore(store, true);
     renderSessionList(root, store);
     applySession(root, renamed, routes);
+    void saveSessionToServer(renamed);
   };
 
   const deleteSession = (sessionID) => {
@@ -1128,11 +1454,12 @@
     if (!session) {
       return;
     }
-    const confirmed = window.confirm(t("删除这个本地会话？", "Delete this local session?"));
+    const confirmed = window.confirm(t("删除这个会话？", "Delete this chat?"));
     if (!confirmed) {
       return;
     }
     store.sessions = store.sessions.filter((item) => item.id !== sessionID);
+    void deleteSessionOnServer(sessionID);
     if (!store.sessions.length) {
       const blank = createBlankSession(form, routes);
       store = emptyStore();
@@ -1160,6 +1487,7 @@
     const routes = routeMap(form);
     let store = normalizeStore(loadStore(), form, routes);
     const session = createBlankSession(form, routes);
+    store = upsertSession(store, session);
     store.activeSessionId = session.id;
     saveStore(store, true);
     renderSessionList(root, store);
@@ -1181,12 +1509,16 @@
       }
       saveStore(store, broadcast);
       renderSessionList(root, store);
+      void deleteSessionOnServer(session.id);
+      syncSessionURL(null);
       return { store, session, routes };
     }
     store = upsertSession(store, session);
     store.activeSessionId = session.id;
     saveStore(store, broadcast);
     renderSessionList(root, store);
+    void saveSessionToServer(session);
+    syncSessionURL(session);
     return { store, session, routes };
   };
 
@@ -1203,6 +1535,7 @@
     if (!root || !form) {
       return;
     }
+    setSidebarCollapsed(form, false);
     const routes = routeMap(form);
     let store = normalizeStore(loadStore(), form, routes);
     const serverSession = captureSessionFromDOM(form, store, routes);
@@ -1274,11 +1607,156 @@
     const draftField = form.querySelector("#chat-draft");
     if (draftField instanceof HTMLTextAreaElement) {
       draftField.value = draftValue;
+      syncDraftFieldHeight(draftField);
     }
     writeHiddenJSON(form, "chat_draft_attachments_json", attachments);
     renderDraftAttachments(currentRoot(), attachments);
     form.submit();
   };
+
+  const canInteractWhileStreaming = (element, draftField) => {
+    if (element === draftField) {
+      return true;
+    }
+    if (element instanceof HTMLInputElement && element.id === "chat-attachment-input") {
+      return true;
+    }
+    if (!(element instanceof HTMLButtonElement)) {
+      return false;
+    }
+    const action = String(element.dataset.chatAction || "").trim();
+    return action === "composer-primary" || action === "pick-attachments" || action === "remove-attachment";
+  };
+
+  const clearComposerDraft = (form) => {
+    const root = currentRoot();
+    const draftField = form?.querySelector("#chat-draft");
+    if (draftField instanceof HTMLTextAreaElement) {
+      draftField.value = "";
+      syncDraftFieldHeight(draftField);
+    }
+    writeHiddenJSON(form, "chat_draft_attachments_json", []);
+    if (root) {
+      renderDraftAttachments(root, []);
+      setAttachmentStatus(root, "", false);
+    }
+    updateComposerControls(form);
+  };
+
+  const queuePendingTurn = (form, options = {}) => {
+    const root = currentRoot();
+    if (!root || !form) {
+      return false;
+    }
+    const payload = readDraftPayload(form, options);
+    if (!hasDraftPayload(payload)) {
+      updateComposerControls(form);
+      return false;
+    }
+    queuedTurns.push({
+      prompt: payload.prompt,
+      userVisibleText: payload.userVisibleText,
+      attachments: payload.attachments,
+    });
+    clearComposerDraft(form);
+    const queuedCount = queuedTurns.length;
+    setAttachmentStatus(
+      root,
+      queuedCount === 1
+        ? t("已加入队列，当前回复结束后自动发送。", "Queued and will send after the current reply finishes.")
+        : t(`已加入队列，当前共 ${queuedCount} 条待发送。`, `Queued ${queuedCount} turns.`),
+      false,
+    );
+    queuePersist();
+    updateComposerControls(form);
+    return true;
+  };
+
+  const stopActiveStream = () => {
+    if (!(activeStreamController instanceof AbortController)) {
+      return false;
+    }
+    activeStreamStopRequested = true;
+    activeStreamController.abort();
+    return true;
+  };
+
+  const startQueuedTurn = () => {
+    const form = currentForm();
+    if (!form || form.dataset.streaming === "true" || queuedTurns.length === 0) {
+      updateComposerControls(form);
+      return false;
+    }
+    const nextTurn = queuedTurns.shift();
+    updateComposerControls(form);
+    window.setTimeout(() => {
+      const nextForm = currentForm();
+      if (!nextForm || nextForm.dataset.streaming === "true") {
+        queuedTurns.unshift(nextTurn);
+        updateComposerControls(currentForm());
+        return;
+      }
+      void streamConsoleChat(nextForm, nextTurn);
+    }, 0);
+    return true;
+  };
+
+  const setInlineFlash = (root, message, isError = false) => {
+    const stage = root?.querySelector(".chat-stage");
+    if (!(stage instanceof HTMLElement)) {
+      return;
+    }
+    const textValue = String(message || "").trim();
+    let flash = stage.querySelector(".chat-inline-flash");
+    if (textValue === "") {
+      flash?.remove();
+      return;
+    }
+    if (!(flash instanceof HTMLElement)) {
+      flash = document.createElement("div");
+      const topbar = stage.querySelector(".chat-stage-topbar");
+      const stageMain = stage.querySelector(".chat-stage-main");
+      if (topbar instanceof HTMLElement) {
+        topbar.insertAdjacentElement("afterend", flash);
+      } else if (stageMain instanceof HTMLElement) {
+        stageMain.prepend(flash);
+      } else {
+        stage.prepend(flash);
+      }
+    }
+    flash.className = `flash ${isError ? "flash-error" : "flash-success"} chat-inline-flash`;
+    flash.setAttribute("role", isError ? "alert" : "status");
+    flash.textContent = textValue;
+  };
+
+  const buildHistoryMessage = (role, content, attachments = [], reasoning = "") => normalizeMessage({
+    id: makeID("msg"),
+    role,
+    label: roleLabel(role),
+    content,
+    attachments,
+    reasoning,
+  });
+
+  const syncStreamHistory = (form, baseMessages, userMessage, assistantMessage) => {
+    const history = Array.isArray(baseMessages) ? [...baseMessages] : [];
+    const normalizedUser = normalizeMessage(userMessage);
+    const normalizedAssistant = normalizeMessage(assistantMessage);
+    if (normalizedUser) {
+      history.push(normalizedUser);
+    }
+    if (normalizedAssistant) {
+      history.push(normalizedAssistant);
+    }
+    writeHiddenJSON(form, "chat_history_json", history);
+    writeHiddenJSON(form, "chat_draft_attachments_json", []);
+    return history;
+  };
+
+  const continuationPrompt = () => t(
+    "请从刚才中断的位置继续回答，不要重复已经输出的内容。",
+    "Continue exactly from where you stopped without repeating the text already shown.",
+  );
 
   const enableForm = (form) => {
     form.dataset.streaming = "false";
@@ -1287,11 +1765,13 @@
       if (!(element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
         return;
       }
-      if (element.name === "chat_message_role" || element.name === "chat_message_content") {
+      if (element.dataset.chatStreamDisabled !== "true") {
         return;
       }
       element.disabled = false;
+      delete element.dataset.chatStreamDisabled;
     });
+    updateComposerControls(form);
   };
 
   const replaceChatContent = (html) => {
@@ -1343,12 +1823,13 @@
       renderDraftAttachments(root, attachments);
       setAttachmentStatus(root, t("附件已加入当前草稿。", "Attachments added to the current draft."), false);
       queuePersist();
+      updateComposerControls(form);
     } catch (_error) {
       setAttachmentStatus(root, t("附件上传失败。", "Attachment upload failed."), true);
     }
   };
 
-  const streamConsoleChat = async (form) => {
+  const streamConsoleChat = async (form, options = {}) => {
     if (form.dataset.streaming === "true") {
       return;
     }
@@ -1356,26 +1837,45 @@
     if (!(draftField instanceof HTMLTextAreaElement)) {
       return;
     }
-    const draftValue = draftField.value.trim();
-    const attachments = readHiddenJSON(form, "chat_draft_attachments_json", []).map(normalizeAttachment).filter(Boolean);
-    if (!draftValue && attachments.length === 0) {
+    const payload = readDraftPayload(form, options);
+    const draftValue = payload.userVisibleText;
+    const promptValue = payload.prompt;
+    const attachments = payload.attachments;
+    if (!hasDraftPayload(payload)) {
       return;
     }
 
+    const baseMessages = readHiddenJSON(form, "chat_history_json", []).map(normalizeMessage).filter(Boolean);
+    const userHistoryMessage = buildHistoryMessage("user", draftValue || promptValue, attachments);
+    let preserveLocalTranscript = promptValue !== draftValue;
+    const assistantHistoryMessage = {
+      id: makeID("msg"),
+      role: "assistant",
+      label: roleLabel("assistant"),
+      content: "",
+      reasoning: "",
+      attachments: [],
+    };
+
     persistCurrentSession(false);
 
+    const root = currentRoot();
     const thread = form.querySelector("[data-chat-scroll]");
     const streamURL = form.dataset.chatStreamUrl;
     if (!thread || !streamURL) {
-      restoreDraftAndSubmit(form, draftValue, attachments);
+      restoreDraftAndSubmit(form, promptValue, attachments);
       return;
     }
 
     const formData = new FormData(form);
-    formData.set("chat_draft", draftValue);
+    formData.set("chat_draft", promptValue);
+    formData.set("chat_draft_attachments_json", JSON.stringify(attachments));
 
     form.dataset.streaming = "true";
     form.classList.add("is-streaming");
+    const abortController = new AbortController();
+    activeStreamController = abortController;
+    activeStreamStopRequested = false;
     form.querySelectorAll("button, input, textarea, select").forEach((element) => {
       if (!(element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
         return;
@@ -1383,8 +1883,16 @@
       if (element.name === "chat_message_role" || element.name === "chat_message_content") {
         return;
       }
-      element.disabled = true;
+      if (canInteractWhileStreaming(element, draftField)) {
+        delete element.dataset.chatStreamDisabled;
+        return;
+      }
+      if (!element.disabled) {
+        element.dataset.chatStreamDisabled = "true";
+        element.disabled = true;
+      }
     });
+    setInlineFlash(root, "", false);
 
     if (thread.querySelector(".chat-empty-state")) {
       thread.replaceChildren();
@@ -1394,16 +1902,66 @@
     thread.appendChild(userMessage.article);
     thread.appendChild(assistantMessage.article);
     scrollThread(thread);
-    draftField.value = "";
-    writeHiddenJSON(form, "chat_draft_attachments_json", []);
-    renderDraftAttachments(currentRoot(), []);
-    setAttachmentStatus(currentRoot(), "", false);
+    clearComposerDraft(form);
+    updateComposerControls(form);
+
+    const syncCurrentHistory = () => syncStreamHistory(form, baseMessages, userHistoryMessage, assistantHistoryMessage);
+    const restartStream = (nextPrompt, nextVisibleText, nextAttachments = []) => {
+      const nextDraftField = form.querySelector("#chat-draft");
+      if (!(nextDraftField instanceof HTMLTextAreaElement)) {
+        return;
+      }
+      nextDraftField.value = nextVisibleText;
+      syncDraftFieldHeight(nextDraftField);
+      writeHiddenJSON(form, "chat_draft_attachments_json", nextAttachments);
+      renderDraftAttachments(currentRoot(), nextAttachments);
+      setInlineFlash(currentRoot(), "", false);
+      void streamConsoleChat(form, { prompt: nextPrompt, userVisibleText: nextVisibleText });
+    };
+    const continueStream = () => restartStream(continuationPrompt(), t("继续生成", "Continue"));
+    const retryStream = () => restartStream(promptValue, draftValue || promptValue, attachments);
+    const finalizeInterruptedStream = (messageText, options = {}) => {
+      if (streamInterrupted) {
+        return;
+      }
+      streamInterrupted = true;
+      const hasPartial = Boolean(String(assistantHistoryMessage.content || "").trim() || String(assistantHistoryMessage.reasoning || "").trim());
+      syncCurrentHistory();
+      queuePersist();
+      assistantMessage.setStreamingStatus(String(options.statusText || t("输出已中断", "Interrupted")), String(options.statusTone || "error"));
+      assistantMessage.setActions(Array.isArray(options.actions)
+        ? options.actions
+        : hasPartial
+          ? [{ label: t("继续生成", "Continue"), onClick: continueStream }]
+          : [{ label: t("重试", "Retry"), onClick: retryStream }]);
+      setInlineFlash(currentRoot(), messageText, options.isError !== false);
+      scrollThread(thread);
+    };
+    const applyStreamMessage = (message) => {
+      if (!message || typeof message !== "object") {
+        return;
+      }
+      if (typeof message.content === "string" && message.content.trim() !== "") {
+        assistantHistoryMessage.content = message.content;
+        assistantMessage.setContent(assistantHistoryMessage.content);
+      }
+      if (typeof message.reasoning === "string" && message.reasoning.trim() !== "") {
+        assistantHistoryMessage.reasoning = message.reasoning;
+        assistantMessage.setReasoning(assistantHistoryMessage.reasoning, true);
+      }
+    };
 
     let replaced = false;
+    let sawStreamEvent = false;
+    let streamCompleted = false;
+    let streamErrored = false;
+    let streamInterrupted = false;
+    let streamOpened = false;
     try {
       const response = await fetch(streamURL, {
         method: "POST",
         body: formData,
+        signal: abortController.signal,
         credentials: "same-origin",
         headers: { Accept: "application/x-ndjson" },
       });
@@ -1413,41 +1971,101 @@
         return;
       }
       if (!response.ok || !response.body) {
-        restoreDraftAndSubmit(form, draftValue, attachments);
+        restoreDraftAndSubmit(form, promptValue, attachments);
         return;
       }
 
       const contentType = response.headers.get("content-type") || "";
       if (!contentType.includes("application/x-ndjson")) {
-        restoreDraftAndSubmit(form, draftValue, attachments);
+        restoreDraftAndSubmit(form, promptValue, attachments);
         return;
       }
 
+      streamOpened = true;
+
       await decodeStreamEvents(response, (event) => {
+        sawStreamEvent = true;
         if (event.type === "delta") {
-          assistantMessage.setContent(`${assistantMessage.copy.dataset.chatMarkdownSource || ""}${event.delta || ""}`);
-          assistantMessage.setStreamingStatus(form.dataset.chatStreamingLabel || "Streaming");
+          assistantHistoryMessage.content += String(event.delta || "");
+          assistantMessage.setContent(assistantHistoryMessage.content);
+          assistantMessage.setStreamingStatus(form.dataset.chatStreamingLabel || "Streaming", "streaming");
+          assistantMessage.setActions([]);
           scrollThread(thread);
           return;
         }
         if (event.type === "reasoning") {
-          assistantMessage.setReasoning(`${assistantMessage.reasoningCopy.dataset.chatMarkdownSource || ""}${event.reasoning || ""}`, true);
-          assistantMessage.setStreamingStatus(t("正在思考", "Reasoning"));
+          assistantHistoryMessage.reasoning += String(event.reasoning || "");
+          assistantMessage.setReasoning(assistantHistoryMessage.reasoning, true);
+          assistantMessage.setStreamingStatus(t("正在思考", "Reasoning"), "reasoning");
+          assistantMessage.setActions([]);
           scrollThread(thread);
           return;
         }
+        if (event.type === "heartbeat") {
+          assistantMessage.setStreamingStatus(t("连接保持中，等待更多输出…", "Connection alive, waiting for more output..."), "heartbeat");
+          scrollThread(thread);
+          return;
+        }
+        if (event.type === "done") {
+          streamCompleted = true;
+          applyStreamMessage(event.message);
+          syncCurrentHistory();
+          queuePersist();
+          if (String(event?.result?.finishReason || "").trim().toLowerCase() === "length") {
+            preserveLocalTranscript = true;
+            assistantMessage.setStreamingStatus(t("已达到输出上限", "Reached output limit"), "warning");
+            assistantMessage.setActions([{ label: t("继续生成", "Continue"), onClick: continueStream, kind: "primary" }]);
+          } else {
+            assistantMessage.setStreamingStatus(t("已完成", "Completed"), "done");
+            assistantMessage.setActions([]);
+            setInlineFlash(currentRoot(), "", false);
+          }
+          scrollThread(thread);
+          return;
+        }
+        if (event.type === "error") {
+          streamErrored = true;
+          applyStreamMessage(event.message);
+          finalizeInterruptedStream(String(event.error || t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished.")).trim());
+          return;
+        }
         if (event.type === "replace") {
+          if (streamErrored || preserveLocalTranscript) {
+            return;
+          }
           replaced = true;
           replaceChatContent(event.html || "");
         }
       });
-    } catch (_error) {
-      restoreDraftAndSubmit(form, draftValue, attachments);
+    } catch (error) {
+      if (activeStreamStopRequested || error?.name === "AbortError") {
+        finalizeInterruptedStream(t("已终止当前回复。", "Stopped current reply."), {
+          statusText: t("已终止", "Stopped"),
+          statusTone: "warning",
+          actions: [],
+          isError: false,
+        });
+        return;
+      }
+      if (!streamCompleted && !streamErrored && (streamOpened || sawStreamEvent || String(assistantHistoryMessage.content || "").trim() !== "" || String(assistantHistoryMessage.reasoning || "").trim() !== "")) {
+        finalizeInterruptedStream(t("连接异常，回复在完成前中断了。", "The connection dropped before the answer finished."));
+        return;
+      }
+      restoreDraftAndSubmit(form, promptValue, attachments);
       return;
     } finally {
+      const stoppedByUser = activeStreamStopRequested;
+      activeStreamController = null;
+      activeStreamStopRequested = false;
+      if (streamOpened && !replaced && !streamCompleted && !streamErrored && !stoppedByUser) {
+        finalizeInterruptedStream(t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished."));
+      }
       if (!replaced) {
         enableForm(form);
+      } else {
+        updateComposerControls(currentForm());
       }
+      startQueuedTurn();
     }
   };
 
@@ -1471,12 +2089,42 @@
       return;
     }
 
+    const sessionMenu = event.target.closest(".chat-session-menu");
+    if (sessionMenu instanceof HTMLElement) {
+      closeSessionMenus(sessionMenu);
+    } else {
+      closeSessionMenus();
+    }
+
     const actionTarget = event.target.closest("[data-chat-action]");
     if (!actionTarget || !form.contains(actionTarget) && !root.contains(actionTarget)) {
       return;
     }
     const sessionID = String(actionTarget.dataset.chatSessionId || "").trim();
     switch (actionTarget.dataset.chatAction) {
+      case "toggle-sidebar": {
+        event.preventDefault();
+        setSidebarCollapsed(form, !form.classList.contains("is-sidebar-collapsed"), true);
+        return;
+      }
+      case "composer-primary": {
+        event.preventDefault();
+        if (form.dataset.streaming === "true") {
+          stopActiveStream();
+          return;
+        }
+        const payload = readDraftPayload(form);
+        if (!hasDraftPayload(payload)) {
+          updateComposerControls(form);
+          return;
+        }
+        if (typeof form.requestSubmit === "function") {
+          form.requestSubmit();
+        } else {
+          form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        }
+        return;
+      }
       case "pick-attachments": {
         event.preventDefault();
         const input = root.querySelector("#chat-attachment-input");
@@ -1513,6 +2161,7 @@
         renderDraftAttachments(root, nextAttachments);
         setAttachmentStatus(root, "", false);
         queuePersist();
+        updateComposerControls(form);
         return;
       }
       default:
@@ -1546,6 +2195,7 @@
         picker.open = false;
       }
       queuePersist();
+      updateComposerControls(form);
     }
   });
 
@@ -1554,9 +2204,54 @@
     if (!(target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement)) {
       return;
     }
-    if (target.id === "chat-draft" || target.name === "chat_system_prompt") {
+    if (target.id === "chat-draft") {
+      syncDraftFieldHeight(target);
+      queuePersist();
+      updateComposerControls(target.form instanceof HTMLFormElement ? target.form : currentForm());
+      return;
+    }
+    if (target.name === "chat_system_prompt") {
       queuePersist();
     }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLTextAreaElement) || target.id !== "chat-draft") {
+      return;
+    }
+    if (event.defaultPrevented || event.isComposing || event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) {
+      return;
+    }
+    const form = target.form;
+    if (!(form instanceof HTMLFormElement) || !form.matches(".chat-shell[data-chat-stream-url]") || target.disabled) {
+      return;
+    }
+    event.preventDefault();
+    if (form.dataset.streaming === "true") {
+      queuePendingTurn(form);
+      return;
+    }
+    if (typeof form.requestSubmit === "function") {
+      form.requestSubmit();
+      return;
+    }
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+
+  document.addEventListener("click", (event) => {
+    const form = currentForm();
+    if (!form) {
+      return;
+    }
+    const openPicker = form.querySelector(".chat-model-picker[open]");
+    if (!(openPicker instanceof HTMLDetailsElement)) {
+      return;
+    }
+    if (event.target instanceof Node && openPicker.contains(event.target)) {
+      return;
+    }
+    openPicker.open = false;
   });
 
   document.addEventListener("submit", (event) => {
@@ -1575,18 +2270,10 @@
     void streamConsoleChat(target);
   });
 
-  window.addEventListener("storage", (event) => {
-    if (event.key !== storageKey) {
-      return;
-    }
-    applyStoredSessions();
+  window.addEventListener("resize", () => {
+    syncCurrentDraftHeight();
   });
 
-  if (syncChannel) {
-    syncChannel.addEventListener("message", () => {
-      applyStoredSessions();
-    });
-  }
-
   hydrateWorkspace(false);
+  syncLucideIcons();
 })();

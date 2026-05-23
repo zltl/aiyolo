@@ -146,9 +146,9 @@ func effectiveModelProxy(route domain.ModelRoute, providers []domain.Provider) s
 
 func modelProxySelectLabel(locale string, provider domain.Provider) string {
 	if proxyID := strings.TrimSpace(provider.DefaultProxyID); proxyID != "" {
-		return consoleText(locale, "继承 Provider 默认代理 · ", "Use provider default · ") + proxyID
+		return consoleText(locale, "继承提供方默认代理 · ", "Use provider default · ") + proxyID
 	}
-	return domain.ProxyTypeDirect
+	return consoleText(locale, "直连", "direct")
 }
 
 func defaultModelTestPrompt(locale string) string {
@@ -320,43 +320,11 @@ func modelTestErrorCode(err error) string {
 	return "model_test_failed"
 }
 
-func persistModelTestOutcome(ctx context.Context, store storage.Store, requestID, userID, clientAddress, userAgent, protocol string, route domain.ModelRoute, provider domain.Provider, profile domain.ProxyProfile, pricingRule domain.PricingRule, started time.Time, execution modelTestExecution, cause error) {
+func persistModelTestOutcome(ctx context.Context, store storage.Store, requestID, userID, protocol string, route domain.ModelRoute, provider domain.Provider, pricingRule domain.PricingRule, started time.Time, execution modelTestExecution) {
 	usage := buildModelTestUsageRecord(requestID, userID, protocol, route, provider, pricingRule, started, execution)
 	if err := store.InsertUsage(ctx, usage); err != nil {
 		log.Printf("insert console model test usage request_id=%s err=%v", requestID, err)
 	}
-	event := domain.AuditEvent{
-		ID:             newID("audit"),
-		RequestID:      requestID,
-		UserID:         userID,
-		ClientIP:       clientAddress,
-		UserAgent:      userAgent,
-		Protocol:       protocol,
-		Endpoint:       consoleModelTestEndpoint,
-		ModelAlias:     route.PublicName,
-		ProviderID:     provider.ID,
-		UpstreamModel:  firstNonEmpty(route.UpstreamModel, route.PublicName),
-		ProxyProfileID: profile.ID,
-		StatusCode:     usage.StatusCode,
-		ErrorCode:      modelTestErrorCode(cause),
-		LatencyMS:      usage.LatencyMS,
-		InputTokens:    usage.InputTokens,
-		OutputTokens:   usage.OutputTokens,
-		CostMicroCents: usage.CostMicroCents,
-		EventType:      "console_model_test",
-		Message:        strings.TrimSpace(firstNonEmpty(errorString(cause), "Console model route test completed.")),
-		CreatedAt:      usage.CreatedAt,
-	}
-	if err := store.InsertAudit(ctx, event); err != nil {
-		log.Printf("insert console model test audit request_id=%s err=%v", requestID, err)
-	}
-}
-
-func errorString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }
 
 func runModelRouteTest(ctx context.Context, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, prompt string) (modelTestExecution, error) {
@@ -373,7 +341,7 @@ func runModelRouteTest(ctx context.Context, provider domain.Provider, route doma
 	testCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
-	httpClient, err := proxytransport.NewTransportFactory().HTTPClient(testCtx, provider, profile)
+	httpClient, err := proxytransport.NewTransportFactory().HTTPClient(testCtx, provider, profile, false)
 	if err != nil {
 		return modelTestExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: "USD"}}, err
 	}

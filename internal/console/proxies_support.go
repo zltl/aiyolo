@@ -10,16 +10,17 @@ import (
 )
 
 type proxyProfileFormView struct {
-	ID             string
-	Name           string
-	Type           string
-	Endpoint       string
-	Region         string
-	TimeoutSeconds int
-	HealthCheckURL string
-	Status         string
-	Editing        bool
-	HasSavedAuth   bool
+	ID                       string
+	Name                     string
+	Type                     string
+	Endpoint                 string
+	Region                   string
+	TimeoutSeconds           int
+	StreamIdleTimeoutSeconds int
+	HealthCheckURL           string
+	Status                   string
+	Editing                  bool
+	HasSavedAuth             bool
 }
 
 func isLockedProxyProfileID(profileID string) bool {
@@ -34,9 +35,10 @@ func buildProxiesViewData(ctx context.Context, store storage.Store, data map[str
 	data["Profiles"] = profiles
 
 	form := proxyProfileFormView{
-		Type:           domain.ProxyTypeDirect,
-		TimeoutSeconds: 60,
-		Status:         domain.StatusEnabled,
+		Type:                     domain.ProxyTypeDirect,
+		TimeoutSeconds:           domain.DefaultProxyTimeoutSeconds,
+		StreamIdleTimeoutSeconds: domain.DefaultProxyStreamIdleTimeoutSeconds,
+		Status:                   domain.StatusEnabled,
 	}
 	if r == nil {
 		data["ProxyForm"] = form
@@ -56,31 +58,33 @@ func buildProxiesViewData(ctx context.Context, store storage.Store, data map[str
 		return err
 	}
 	data["ProxyForm"] = proxyProfileFormView{
-		ID:             profile.ID,
-		Name:           profile.Name,
-		Type:           firstNonEmpty(profile.Type, domain.ProxyTypeDirect),
-		Endpoint:       proxyEndpointForDisplay(profile),
-		Region:         profile.Region,
-		TimeoutSeconds: profile.TimeoutSeconds,
-		HealthCheckURL: profile.HealthCheckURL,
-		Status:         firstNonEmpty(profile.Status, domain.StatusEnabled),
-		Editing:        true,
-		HasSavedAuth:   strings.TrimSpace(profile.Auth) != "",
+		ID:                       profile.ID,
+		Name:                     profile.Name,
+		Type:                     firstNonEmpty(profile.Type, domain.ProxyTypeDirect),
+		Endpoint:                 proxyEndpointForDisplay(profile),
+		Region:                   profile.Region,
+		TimeoutSeconds:           domain.EffectiveProxyProfileTimeoutSeconds(profile),
+		StreamIdleTimeoutSeconds: domain.EffectiveProxyProfileStreamIdleTimeoutSeconds(profile),
+		HealthCheckURL:           profile.HealthCheckURL,
+		Status:                   firstNonEmpty(profile.Status, domain.StatusEnabled),
+		Editing:                  true,
+		HasSavedAuth:             strings.TrimSpace(profile.Auth) != "",
 	}
 	return nil
 }
 
 func proxyEndpointForDisplay(profile domain.ProxyProfile) string {
 	normalized, err := domain.NormalizeProxyProfile(domain.ProxyProfile{
-		ID:             firstNonEmpty(profile.ID, "proxy"),
-		Name:           profile.Name,
-		Type:           profile.Type,
-		Endpoint:       profile.Endpoint,
-		Auth:           profile.Auth,
-		Region:         profile.Region,
-		TimeoutSeconds: profile.TimeoutSeconds,
-		HealthCheckURL: profile.HealthCheckURL,
-		Status:         profile.Status,
+		ID:                       firstNonEmpty(profile.ID, "proxy"),
+		Name:                     profile.Name,
+		Type:                     profile.Type,
+		Endpoint:                 profile.Endpoint,
+		Auth:                     profile.Auth,
+		Region:                   profile.Region,
+		TimeoutSeconds:           profile.TimeoutSeconds,
+		StreamIdleTimeoutSeconds: profile.StreamIdleTimeoutSeconds,
+		HealthCheckURL:           profile.HealthCheckURL,
+		Status:                   profile.Status,
 	})
 	if err != nil {
 		return profile.Endpoint

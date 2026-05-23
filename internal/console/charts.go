@@ -8,12 +8,27 @@ import (
 	"github.com/zltl/aiyolo/internal/domain"
 )
 
+type sparklinePoint struct {
+	x float64
+	y float64
+}
+
 func usageSparkline(records []domain.UsageRecord, metric string, buckets int) string {
+	values := usageMetricBuckets(records, metric, buckets)
+	return sparklinePath(values)
+}
+
+func usageArea(records []domain.UsageRecord, metric string, buckets int) string {
+	values := usageMetricBuckets(records, metric, buckets)
+	return sparklineAreaPath(values)
+}
+
+func usageMetricBuckets(records []domain.UsageRecord, metric string, buckets int) []int64 {
 	if buckets < 2 {
 		buckets = 2
 	}
 	if len(records) == 0 {
-		return flatSparklinePath(buckets)
+		return make([]int64, buckets)
 	}
 
 	oldest := records[0].CreatedAt
@@ -82,7 +97,7 @@ func usageSparkline(records []domain.UsageRecord, metric string, buckets int) st
 		}
 	}
 
-	return sparklinePath(values)
+	return values
 }
 
 func countShare(count int, total int64) string {
@@ -101,11 +116,53 @@ func flatSparklinePath(points int) string {
 	return sparklinePath(values)
 }
 
+func sparklineAreaPath(values []int64) string {
+	if len(values) == 0 {
+		return "M4 34 L116 34 L116 34 L4 34 Z"
+	}
+
+	line := sparklinePath(values)
+	return line + " L116 34.0 L4 34.0 Z"
+}
+
 func sparklinePath(values []int64) string {
 	if len(values) == 0 {
 		return "M4 34 L116 34"
 	}
 
+	points := sparklinePoints(values)
+	if len(points) == 0 {
+		return "M4 34 L116 34"
+	}
+
+	var builder strings.Builder
+	builder.WriteString("M")
+	builder.WriteString(pathFloat(points[0].x))
+	builder.WriteByte(' ')
+	builder.WriteString(pathFloat(points[0].y))
+
+	for index := 1; index < len(points); index++ {
+		previous := points[index-1]
+		current := points[index]
+		controlX := previous.x + (current.x-previous.x)/2
+
+		builder.WriteString(" C")
+		builder.WriteString(pathFloat(controlX))
+		builder.WriteByte(' ')
+		builder.WriteString(pathFloat(previous.y))
+		builder.WriteByte(' ')
+		builder.WriteString(pathFloat(controlX))
+		builder.WriteByte(' ')
+		builder.WriteString(pathFloat(current.y))
+		builder.WriteByte(' ')
+		builder.WriteString(pathFloat(current.x))
+		builder.WriteByte(' ')
+		builder.WriteString(pathFloat(current.y))
+	}
+	return builder.String()
+}
+
+func sparklinePoints(values []int64) []sparklinePoint {
 	var maxValue int64
 	for _, value := range values {
 		if value > maxValue {
@@ -124,21 +181,19 @@ func sparklinePath(values []int64) string {
 		step = (xEnd - xStart) / float64(len(values)-1)
 	}
 
-	var builder strings.Builder
+	points := make([]sparklinePoint, 0, len(values))
 	for index, value := range values {
 		x := xStart + float64(index)*step
 		y := yBase
 		if maxValue > 0 {
 			y = yBase - (float64(value)/float64(maxValue))*(yBase-yTop)
 		}
-		if index == 0 {
-			builder.WriteString("M")
-		} else {
-			builder.WriteString(" L")
-		}
-		builder.WriteString(strconv.FormatFloat(x, 'f', 1, 64))
-		builder.WriteByte(' ')
-		builder.WriteString(strconv.FormatFloat(y, 'f', 1, 64))
+		points = append(points, sparklinePoint{x: x, y: y})
 	}
-	return builder.String()
+
+	return points
+}
+
+func pathFloat(value float64) string {
+	return strconv.FormatFloat(value, 'f', 1, 64)
 }

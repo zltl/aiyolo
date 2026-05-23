@@ -46,13 +46,15 @@ type Store interface {
 	ListUsage(ctx context.Context, limit int) ([]domain.UsageRecord, error)
 	GetUsageByRequestID(ctx context.Context, requestID string) (domain.UsageRecord, error)
 	SummarizeAPIKeyUsage(ctx context.Context, apiKeyID string) (domain.APIKeyUsageSummary, error)
-	InsertAudit(ctx context.Context, event domain.AuditEvent) error
-	ListAudit(ctx context.Context, limit int) ([]domain.AuditEvent, error)
 	Dashboard(ctx context.Context) (domain.DashboardData, error)
 	BillingOverview(ctx context.Context) (domain.BillingOverview, error)
 	UserDirectory(ctx context.Context) (domain.UserDirectory, error)
 	GetConsoleAuthSettings(ctx context.Context) (domain.ConsoleAuthSettings, error)
 	SaveConsoleAuthSettings(ctx context.Context, settings domain.ConsoleAuthSettings) error
+	UpsertConsoleChatSession(ctx context.Context, session domain.ConsoleChatSession) error
+	ListConsoleChatSessions(ctx context.Context, userID string, limit int) ([]domain.ConsoleChatSession, error)
+	GetConsoleChatSession(ctx context.Context, userID string, id string) (domain.ConsoleChatSession, error)
+	DeleteConsoleChatSession(ctx context.Context, userID string, id string) error
 }
 
 type SeedData struct{}

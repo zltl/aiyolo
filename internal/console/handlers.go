@@ -37,11 +37,16 @@ type consoleChatAttachmentPublisher interface {
 	UploadBytes(ctx context.Context, payload []byte, objectKey string, mediaType string) (artifacts.PublishedObject, error)
 }
 
+type consoleChatAttachmentObjectReader interface {
+	ReadObject(ctx context.Context, objectKey string) ([]byte, string, error)
+}
+
 type Handler struct {
 	cfg                        Config
 	store                      storage.Store
 	tmpl                       *template.Template
 	newChatAttachmentPublisher func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error)
+	newChatAttachmentReader    func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error)
 }
 
 func NewHandler(cfg Config, store storage.Store) *Handler {
@@ -51,8 +56,13 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 	if strings.TrimSpace(cfg.CodexWindowsWrapperURL) == "" {
 		cfg.CodexWindowsWrapperURL = "/console/codex/artifacts/aiyolo.exe"
 	}
+	if strings.TrimSpace(cfg.ChatAttachments.ProxyBasePath) == "" {
+		cfg.ChatAttachments.ProxyBasePath = "/console/chat/attachments/files"
+	}
 	return &Handler{cfg: cfg, store: store, tmpl: template.Must(template.New("console").Funcs(templateFuncs()).ParseFS(consoleAssets, "templates/*.html")), newChatAttachmentPublisher: func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error) {
 		return artifacts.NewPublisher(cfg)
+	}, newChatAttachmentReader: func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error) {
+		return artifacts.NewObjectReader(cfg)
 	}}
 }
 
@@ -74,11 +84,13 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Post("/codex/install-tokens", handler.createCodexInstallToken)
 		protected.Get("/chat", handler.chat)
 		protected.Post("/chat", handler.sendChat)
+		protected.Post("/chat/session", handler.saveChatSession)
+		protected.Delete("/chat/session/{sessionID}", handler.deleteChatSession)
 		protected.Post("/chat/stream", handler.streamChat)
 		protected.Post("/chat/attachments", handler.uploadChatAttachments)
+		protected.Get(strings.TrimPrefix(handler.cfg.ChatAttachments.NormalizedProxyBasePath(), "/console")+"/*", handler.chatAttachmentFile)
 		protected.Post("/logout", handler.logout)
 		protected.Get("/usage", handler.usage)
-		protected.Get("/audit", handler.audit)
 		protected.Get("/api-keys", handler.apiKeys)
 		protected.Post("/api-keys", handler.createAPIKey)
 		protected.Post("/api-keys/{keyID}/rotate", handler.rotateAPIKey)
@@ -136,11 +148,7 @@ func (handler *Handler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) setLocale(w http.ResponseWriter, r *http.Request) {
-	locale := normalizeConsoleLocale(r.URL.Query().Get("lang"))
-	if locale == "" {
-		locale = consoleLocaleEN
-	}
-	http.SetCookie(w, &http.Cookie{Name: consoleLocaleCookieName, Value: locale, Path: "/console", MaxAge: 365 * 24 * 60 * 60, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: consoleLocaleCookieName, Value: "", Path: "/console", MaxAge: -1, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, sanitizeConsoleNext(r.URL.Query().Get("next")), http.StatusSeeOther)
 }
 
@@ -185,15 +193,6 @@ func (handler *Handler) usage(w http.ResponseWriter, r *http.Request) {
 		items = items[:100]
 	}
 	handler.render(w, r, "usage", map[string]any{"Title": "Usage", "Usage": items, "Billing": billing, "ChartUsage": history})
-}
-
-func (handler *Handler) audit(w http.ResponseWriter, r *http.Request) {
-	items, err := handler.store.ListAudit(r.Context(), 100)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	handler.render(w, r, "audit", map[string]any{"Title": "Audit", "Audits": items})
 }
 
 func (handler *Handler) apiKeys(w http.ResponseWriter, r *http.Request) {
@@ -256,7 +255,7 @@ func (handler *Handler) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	handler.renderAPIKeysPage(w, r, clear, handler.requestText(r, "API Key 已轮换", "API key rotated"))
+	handler.renderAPIKeysPage(w, r, clear, handler.requestText(r, "API 密钥已轮换", "API key rotated"))
 	return
 }
 
@@ -275,7 +274,7 @@ func (handler *Handler) disableAPIKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	handler.renderAPIKeysPage(w, r, "", handler.requestText(r, "API Key 已停用", "API key disabled"))
+	handler.renderAPIKeysPage(w, r, "", handler.requestText(r, "API 密钥已停用", "API key disabled"))
 }
 
 func (handler *Handler) providers(w http.ResponseWriter, r *http.Request) {
@@ -316,7 +315,8 @@ func (handler *Handler) createProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	provider.DefaultProxyID = strings.TrimSpace(r.FormValue("default_proxy_id"))
 	provider.Status = formDefault(r, "status", firstNonEmpty(existing.Status, domain.StatusEnabled))
-	provider.TimeoutSeconds = formInt(r, "timeout_seconds", defaultProviderInt(existing.TimeoutSeconds, 90))
+	provider.TimeoutSeconds = formInt(r, "timeout_seconds", domain.EffectiveProviderTimeoutSeconds(existing))
+	provider.StreamIdleTimeoutSeconds = formInt(r, "stream_idle_timeout_seconds", domain.EffectiveProviderStreamIdleTimeoutSeconds(existing))
 	provider.Priority = formInt(r, "priority", defaultProviderInt(existing.Priority, 1))
 	provider.Weight = formInt(r, "weight", defaultProviderInt(existing.Weight, 100))
 	if err := handler.store.UpsertProvider(r.Context(), provider); err != nil {
@@ -347,15 +347,16 @@ func (handler *Handler) createOpenRouter(w http.ResponseWriter, r *http.Request)
 	}
 
 	handler.upsertCompatibleProviderAndSync(w, r, domain.Provider{
-		ID:             "openrouter",
-		Name:           "OpenRouter",
-		BaseURL:        "https://openrouter.ai/api/v1",
-		Protocol:       domain.ProtocolOpenAI,
-		MasterKey:      apiKey,
-		Status:         domain.StatusEnabled,
-		TimeoutSeconds: 180,
-		Priority:       1,
-		Weight:         100,
+		ID:                       "openrouter",
+		Name:                     "OpenRouter",
+		BaseURL:                  "https://openrouter.ai/api/v1",
+		Protocol:                 domain.ProtocolOpenAI,
+		MasterKey:                apiKey,
+		Status:                   domain.StatusEnabled,
+		TimeoutSeconds:           180,
+		StreamIdleTimeoutSeconds: domain.DefaultProviderStreamIdleTimeoutSeconds,
+		Priority:                 1,
+		Weight:                   100,
 	})
 }
 
@@ -370,16 +371,17 @@ func (handler *Handler) createDeepSeek(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	handler.upsertCompatibleProviderAndSync(w, r, domain.Provider{
-		ID:                 "deepseek",
-		Name:               "DeepSeek",
-		BaseURL:            "https://api.deepseek.com",
-		Protocol:           domain.ProtocolOpenAI,
-		SupportedProtocols: []string{domain.ProtocolOpenAI, domain.ProtocolAnthropic},
-		MasterKey:          apiKey,
-		Status:             domain.StatusEnabled,
-		TimeoutSeconds:     180,
-		Priority:           1,
-		Weight:             100,
+		ID:                       "deepseek",
+		Name:                     "DeepSeek",
+		BaseURL:                  "https://api.deepseek.com",
+		Protocol:                 domain.ProtocolOpenAI,
+		SupportedProtocols:       []string{domain.ProtocolOpenAI, domain.ProtocolAnthropic},
+		MasterKey:                apiKey,
+		Status:                   domain.StatusEnabled,
+		TimeoutSeconds:           180,
+		StreamIdleTimeoutSeconds: domain.DefaultProviderStreamIdleTimeoutSeconds,
+		Priority:                 1,
+		Weight:                   100,
 	})
 }
 
@@ -549,7 +551,7 @@ func (handler *Handler) testModel(w http.ResponseWriter, r *http.Request) {
 						errorMessage = fmt.Sprintf(handler.requestText(r, "测试失败：%s", "Test failed: %s"), err.Error())
 					} else {
 						view, err := runModelRouteTest(r.Context(), provider, route, profile, testForm.Prompt)
-						persistModelTestOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, clientIP(r), r.UserAgent(), protocol, route, provider, profile, pricingRule, started, view, err)
+						persistModelTestOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, protocol, route, provider, pricingRule, started, view)
 						if err != nil {
 							errorMessage = fmt.Sprintf(handler.requestText(r, "测试失败：%s", "Test failed: %s"), err.Error())
 						} else {
@@ -605,7 +607,7 @@ func (handler *Handler) createProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, handler.requestText(r, "内置 direct Profile 不可编辑", "The built-in direct profile cannot be edited"), http.StatusBadRequest)
 		return
 	}
-	profile, err := domain.NormalizeProxyProfile(domain.ProxyProfile{ID: formDefault(r, "id", newConsoleID("proxy")), Name: formDefault(r, "name", "Proxy"), Type: formDefault(r, "type", domain.ProxyTypeDirect), Endpoint: strings.TrimSpace(r.FormValue("endpoint")), Auth: strings.TrimSpace(r.FormValue("auth")), Region: strings.TrimSpace(r.FormValue("region")), TimeoutSeconds: formInt(r, "timeout_seconds", 60), HealthCheckURL: strings.TrimSpace(r.FormValue("health_check_url")), Status: formDefault(r, "status", domain.StatusEnabled)})
+	profile, err := domain.NormalizeProxyProfile(domain.ProxyProfile{ID: formDefault(r, "id", newConsoleID("proxy")), Name: formDefault(r, "name", "Proxy"), Type: formDefault(r, "type", domain.ProxyTypeDirect), Endpoint: strings.TrimSpace(r.FormValue("endpoint")), Auth: strings.TrimSpace(r.FormValue("auth")), Region: strings.TrimSpace(r.FormValue("region")), TimeoutSeconds: formInt(r, "timeout_seconds", domain.DefaultProxyTimeoutSeconds), StreamIdleTimeoutSeconds: formInt(r, "stream_idle_timeout_seconds", domain.DefaultProxyStreamIdleTimeoutSeconds), HealthCheckURL: strings.TrimSpace(r.FormValue("health_check_url")), Status: formDefault(r, "status", domain.StatusEnabled)})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1043,6 +1045,7 @@ func templateFuncs() template.FuncMap {
 		"statusClass":                           statusClass,
 		"statusText":                            statusText,
 		"timefmt":                               timefmt,
+		"usageArea":                             usageArea,
 		"usageSparkline":                        usageSparkline,
 	}
 }
@@ -1069,8 +1072,6 @@ func pageEyebrow(title string) string {
 		return "Control Center"
 	case "Usage":
 		return "Usage Ledger"
-	case "Audit":
-		return "Audit Trail"
 	case "API Keys":
 		return "Credential Surface"
 	case "Providers":
@@ -1097,30 +1098,30 @@ func (handler *Handler) providerSyncNotice(r *http.Request, provider domain.Prov
 	if summary.SkippedConflicts > 0 {
 		if created {
 			return fmt.Sprintf(
-				handler.requestText(r, "成功接入 %s，导入了 %d 个模型，并保留了 %d 条同名路由。", "%s connected, %d models were imported, and %d conflicting routes were kept."),
+				handler.requestText(r, "成功接入 %[1]s，导入了 %[2]d 个模型，并保留了 %[3]d 条同名路由。", "%[1]s connected, %[2]d models were imported, and %[3]d conflicting routes were kept."),
 				providerName,
 				summary.Synced,
 				summary.SkippedConflicts,
 			)
 		}
 		return fmt.Sprintf(
-			handler.requestText(r, "已从 %s 重新导入 %d 个模型，并保留了 %d 条同名路由。", "Re-imported %d models from %s and kept %d conflicting routes."),
-			summary.Synced,
+			handler.requestText(r, "已从 %[1]s 重新导入 %[2]d 个模型，并保留了 %[3]d 条同名路由。", "Re-imported %[2]d models from %[1]s and kept %[3]d conflicting routes."),
 			providerName,
+			summary.Synced,
 			summary.SkippedConflicts,
 		)
 	}
 	if created {
 		return fmt.Sprintf(
-			handler.requestText(r, "成功接入 %s，并导入了 %d 个模型", "%s connected and %d models were imported"),
+			handler.requestText(r, "成功接入 %[1]s，并导入了 %[2]d 个模型", "%[1]s connected and %[2]d models were imported"),
 			providerName,
 			summary.Synced,
 		)
 	}
 	return fmt.Sprintf(
-		handler.requestText(r, "已从 %s 重新导入 %d 个模型", "Re-imported %d models from %s"),
-		summary.Synced,
+		handler.requestText(r, "已从 %[1]s 重新导入 %[2]d 个模型", "Re-imported %[2]d models from %[1]s"),
 		providerName,
+		summary.Synced,
 	)
 }
 

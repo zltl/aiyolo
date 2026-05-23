@@ -48,9 +48,9 @@
       <div class="section-head sub-section-head">
         <div>
           <p class="section-kicker">{{msg .Locale "已观察到身份" "Observed identities"}}</p>
-          <h2>{{msg .Locale "从仓储中看到的 user_id" "User IDs observed in storage"}}</h2>
+          <h2>{{msg .Locale "从仓储中看到的用户标识" "User IDs observed in storage"}}</h2>
         </div>
-        <span class="badge tone-neutral">{{msg .Locale "Usage + Keys + Audit" "Usage + Keys + Audit"}}</span>
+        <span class="badge tone-neutral">{{msg .Locale "用量与密钥" "Usage + Keys"}}</span>
       </div>
       {{if .UserDirectory.Summaries}}
       <div class="table-shell">
@@ -58,7 +58,7 @@
           <thead>
             <tr>
               <th>{{msg .Locale "User ID" "User ID"}}</th>
-              <th>{{msg .Locale "API Keys" "API keys"}}</th>
+              <th>{{msg .Locale "API 密钥" "API keys"}}</th>
               <th>{{msg .Locale "请求" "Requests"}}</th>
               <th>{{msg .Locale "成本" "Spend"}}</th>
               <th>{{msg .Locale "最近活动" "Last seen"}}</th>
@@ -83,37 +83,7 @@
       <div class="empty-state empty-state-rich">
         <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
         <h3>{{msg .Locale "还没有观察到身份" "No observed identities yet"}}</h3>
-        <p>{{msg .Locale "创建 API Key 或开始产生 usage 之后，这里会展示 user_id 维度的目录视图。" "Once API keys are created or usage starts flowing, a directory view of user identities will appear here."}}</p>
-      </div>
-      {{end}}
-    </section>
-
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <p class="section-kicker">{{msg .Locale "最近审计" "Recent audit"}}</p>
-          <h2>{{msg .Locale "身份相关轨迹" "Identity-related activity"}}</h2>
-        </div>
-        <span class="badge tone-neutral">{{len .UserDirectory.RecentAudit}} {{msg .Locale "条" "rows"}}</span>
-      </div>
-      {{if .UserDirectory.RecentAudit}}
-      <div class="activity-stack">
-        {{range .UserDirectory.RecentAudit}}
-        <article class="activity-item">
-          <div class="activity-top">
-            <strong>{{.EventType}}</strong>
-            <span class="badge tone-neutral">{{.StatusCode}}</span>
-          </div>
-          <p class="panel-copy">{{if .UserID}}{{.UserID}}{{else}}{{orDash .RequestID}}{{end}}</p>
-          <span class="meta">{{orDash .ProviderID}} · {{orDash .ErrorCode}} · {{timefmt .CreatedAt}}</span>
-        </article>
-        {{end}}
-      </div>
-      {{else}}
-      <div class="empty-state empty-state-rich">
-        <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
-        <h3>{{msg .Locale "还没有审计轨迹" "No audit trail yet"}}</h3>
-        <p>{{msg .Locale "开始产生调用和配置变更后，这里会显示最近的审计片段。" "Once calls and configuration changes start happening, recent audit snippets will appear here."}}</p>
+        <p>{{msg .Locale "创建 API 密钥或开始产生用量之后，这里会展示按用户标识聚合的目录视图。" "Once API keys are created or usage starts flowing, a directory view of user identities will appear here."}}</p>
       </div>
       {{end}}
     </section>
@@ -158,11 +128,11 @@
           </div>
         </div>
         <ul class="note-list">
-          <li>{{msg .Locale "至少保留一种可用登录方式：本地密码登录，或一个已经填好 client id / secret 的第三方入口。" "Keep at least one working sign-in method: local password or a configured third-party provider."}}</li>
+          <li>{{msg .Locale "至少保留一种可用登录方式：本地密码登录，或一个已经填好客户端 ID / 客户端密钥的第三方入口。" "Keep at least one working sign-in method: local password or a configured third-party provider."}}</li>
           <li>{{msg .Locale "至少配置一个允许登录邮箱或允许登录域名，避免第三方账号无约束进入后台。" "Configure at least one allowed email or domain before opening the console."}}</li>
           <li>{{msg .Locale "回调地址要与第三方平台登记的 redirect URI 完全一致，避免授权成功后回不来。" "Ensure the callback URL matches the registered redirect URI exactly."}}</li>
         </ul>
-        <div class="callout muted">{{msg .Locale "控制台语言默认跟随浏览器，也可以在侧边栏手动切换为中文或 English。" "Console language follows the browser by default, and can also be switched manually from the sidebar."}}</div>
+        <div class="callout muted">{{msg .Locale "控制台当前统一使用中文界面，不再提供语言切换。" "Console language follows the browser by default, and can also be switched manually from the sidebar."}}</div>
         <button class="primary-button" type="submit">{{msg .Locale "保存认证设置" "Save authentication settings"}}</button>
       </section>
     </div>
@@ -170,8 +140,8 @@
     <section class="panel">
       <div class="section-head">
         <div>
-          <p class="section-kicker">{{msg .Locale "OAuth 入口" "OAuth providers"}}</p>
-          <h2>{{msg .Locale "第三方登录入口" "Third-party sign-in providers"}}</h2>
+          <p class="section-kicker">{{msg .Locale "第三方登录入口" "OAuth providers"}}</p>
+          <h2>{{msg .Locale "第三方登录配置" "Third-party sign-in providers"}}</h2>
         </div>
         <span class="badge tone-neutral">{{msg .Locale "内置模板" "Built-in templates"}}</span>
       </div>
@@ -182,9 +152,9 @@
             <strong>{{.Name}}</strong>
             {{if .Ready}}<span class="badge tone-good">{{msg $.Locale "就绪" "Ready"}}</span>{{else}}<span class="badge tone-warn">{{msg $.Locale "待配置" "Needs setup"}}</span>{{end}}
           </div>
-          <p class="panel-copy">{{if .Ready}}{{msg $.Locale "已具备授权所需字段。" "All required fields for authorization are present."}}{{else}}{{msg $.Locale "还缺 client id、client secret 或授权端点。" "Client id, client secret, or auth endpoints are still missing."}}{{end}}</p>
+          <p class="panel-copy">{{if .Ready}}{{msg $.Locale "已具备授权所需字段。" "All required fields for authorization are present."}}{{else}}{{msg $.Locale "还缺客户端 ID、客户端密钥或授权端点。" "Client id, client secret, or auth endpoints are still missing."}}{{end}}</p>
           <div class="callout">
-            <p class="section-kicker">Callback URL</p>
+            <p class="section-kicker">回调地址</p>
             <div class="mono">{{.CallbackURL}}</div>
           </div>
           <input type="hidden" name="{{.FormPrefix}}id" value="{{.ID}}">
@@ -197,15 +167,15 @@
           </label>
           <div class="form-grid">
             <label class="field">
-              <span class="field-label">Client ID</span>
+              <span class="field-label">客户端 ID</span>
               <input name="{{.FormPrefix}}client_id" value="{{.ClientID}}">
             </label>
             <label class="field">
-              <span class="field-label">Client Secret</span>
+              <span class="field-label">客户端密钥</span>
               <input name="{{.FormPrefix}}client_secret" type="password" value="{{.ClientSecret}}">
             </label>
             <label class="field span-2">
-              <span class="field-label">Scopes</span>
+              <span class="field-label">权限范围</span>
               <input name="{{.FormPrefix}}scopes" value="{{.ScopesText}}">
             </label>
             <label class="field span-2">
@@ -213,15 +183,15 @@
               <input name="{{.FormPrefix}}auth_url" value="{{.AuthURL}}">
             </label>
             <label class="field span-2">
-              <span class="field-label">Token URL</span>
+              <span class="field-label">令牌地址</span>
               <input name="{{.FormPrefix}}token_url" value="{{.TokenURL}}">
             </label>
             <label class="field span-2">
-              <span class="field-label">UserInfo URL</span>
+              <span class="field-label">用户信息地址</span>
               <input name="{{.FormPrefix}}userinfo_url" value="{{.UserInfoURL}}">
             </label>
             <label class="field span-2">
-              <span class="field-label">Issuer URL</span>
+              <span class="field-label">签发者地址</span>
               <input name="{{.FormPrefix}}issuer_url" value="{{.IssuerURL}}">
             </label>
             <label class="field">
@@ -232,32 +202,32 @@
               </select>
             </label>
             <label class="field">
-              <span class="field-label">{{msg $.Locale "Token 请求格式" "Token request style"}}</span>
+              <span class="field-label">{{msg $.Locale "令牌请求格式" "Token request style"}}</span>
               <select name="{{.FormPrefix}}token_style">
                 <option value="form" {{if eq .TokenStyle "form"}}selected{{end}}>form</option>
                 <option value="json" {{if eq .TokenStyle "json"}}selected{{end}}>json</option>
               </select>
             </label>
             <label class="field span-2">
-              <span class="field-label">{{msg $.Locale "Token 返回路径" "Token response path"}}</span>
+              <span class="field-label">{{msg $.Locale "令牌返回路径" "Token response path"}}</span>
               <input name="{{.FormPrefix}}token_response_path" value="{{.TokenResponsePath}}">
             </label>
             <label class="field">
-              <span class="field-label">{{msg $.Locale "Client 认证方式" "Client auth style"}}</span>
+              <span class="field-label">{{msg $.Locale "客户端认证方式" "Client auth style"}}</span>
               <select name="{{.FormPrefix}}auth_style">
-                <option value="params" {{if eq .AuthStyle "params"}}selected{{end}}>body params</option>
-                <option value="basic" {{if eq .AuthStyle "basic"}}selected{{end}}>basic auth</option>
+                <option value="params" {{if eq .AuthStyle "params"}}selected{{end}}>请求体参数</option>
+                <option value="basic" {{if eq .AuthStyle "basic"}}selected{{end}}>基本认证</option>
               </select>
             </label>
             <label class="field">
-              <span class="field-label">{{msg $.Locale "UserInfo 方法" "UserInfo method"}}</span>
+              <span class="field-label">{{msg $.Locale "用户信息方法" "UserInfo method"}}</span>
               <select name="{{.FormPrefix}}userinfo_method">
                 <option value="GET" {{if eq .UserInfoMethod "GET"}}selected{{end}}>GET</option>
                 <option value="POST" {{if eq .UserInfoMethod "POST"}}selected{{end}}>POST</option>
               </select>
             </label>
             <label class="field span-2">
-              <span class="field-label">{{msg $.Locale "UserInfo token 传递" "UserInfo token style"}}</span>
+              <span class="field-label">{{msg $.Locale "用户信息令牌传递" "UserInfo token style"}}</span>
               <input name="{{.FormPrefix}}userinfo_token_style" value="{{.UserInfoTokenStyle}}" list="userinfo-token-style-options">
               <span class="field-help">{{msg $.Locale "支持 bearer、query 或 header:Header-Name 形式。" "Supports bearer, query, or header:Header-Name formats."}}</span>
             </label>
@@ -278,7 +248,7 @@
               <input name="{{.FormPrefix}}userinfo_login_path" value="{{.UserInfoLoginPath}}">
             </label>
             <label class="field span-2">
-              <span class="field-label">{{msg $.Locale "补充邮箱 URL" "Extra email URL"}}</span>
+              <span class="field-label">{{msg $.Locale "补充邮箱地址" "Extra email URL"}}</span>
               <input name="{{.FormPrefix}}extra_email_url" value="{{.ExtraEmailURL}}">
             </label>
             <label class="field span-2">
@@ -287,14 +257,14 @@
               <span class="field-help">{{msg $.Locale "一行一个 key=value，会原样附加到授权请求。" "Use one key=value per line; entries are appended to the authorization request as-is."}}</span>
             </label>
             <label class="field span-2">
-              <span class="field-label">{{msg $.Locale "Token 附加参数" "Extra token params"}}</span>
+              <span class="field-label">{{msg $.Locale "令牌附加参数" "Extra token params"}}</span>
               <textarea name="{{.FormPrefix}}token_params">{{.TokenParamsText}}</textarea>
-              <span class="field-help">{{msg $.Locale "一行一个 key=value，会原样附加到 token 请求。" "Use one key=value per line; entries are appended to the token request as-is."}}</span>
+              <span class="field-help">{{msg $.Locale "一行一个 key=value，会原样附加到令牌请求。" "Use one key=value per line; entries are appended to the token request as-is."}}</span>
             </label>
             <label class="field span-2">
-              <span class="field-label">{{msg $.Locale "UserInfo 附加参数" "Extra UserInfo params"}}</span>
+              <span class="field-label">{{msg $.Locale "用户信息附加参数" "Extra UserInfo params"}}</span>
               <textarea name="{{.FormPrefix}}userinfo_params">{{.UserInfoParamsText}}</textarea>
-              <span class="field-help">{{msg $.Locale "一行一个 key=value，会附加到 UserInfo 请求。" "Use one key=value per line; entries are appended to the UserInfo request."}}</span>
+              <span class="field-help">{{msg $.Locale "一行一个 key=value，会附加到用户信息请求。" "Use one key=value per line; entries are appended to the UserInfo request."}}</span>
             </label>
           </div>
         </section>

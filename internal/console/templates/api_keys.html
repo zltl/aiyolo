@@ -10,14 +10,14 @@
   <div class="flash flash-success" role="status">{{.Notice}}</div>
   {{end}}
   {{if .CreatedKey}}
-  <div class="flash flash-success" role="status">{{msg .Locale "新 API Key 只显示一次：" "New API key shown once:"}} <strong>{{.CreatedKey}}</strong></div>
+  <div class="flash flash-success" role="status">{{msg .Locale "新 API 密钥只显示一次：" "New API key shown once:"}} <strong>{{.CreatedKey}}</strong></div>
   {{end}}
 
   <section class="split-panel">
     <section class="panel">
       <div class="section-head">
         <div>
-          <p class="section-kicker">{{msg .Locale "创建 Key" "Create key"}}</p>
+          <p class="section-kicker">{{msg .Locale "创建密钥" "Create key"}}</p>
           <h2>{{msg .Locale "发放新的调用凭证" "Issue a new client credential"}}</h2>
         </div>
       </div>
@@ -43,7 +43,7 @@
         <label class="field span-2">
           <span class="field-label">{{msg .Locale "允许模型" "Allowed models"}}</span>
           <input name="allowed_models" list="api-key-model-options">
-          <span class="field-help">{{msg .Locale "留空表示不限制；如需限制，可填写逗号分隔的 public model 名称。" "Leave blank for no restriction, or enter a comma-separated list of public model aliases."}}</span>
+          <span class="field-help">{{msg .Locale "留空表示不限制；如需限制，可填写逗号分隔的公共模型名称。" "Leave blank for no restriction, or enter a comma-separated list of public model aliases."}}</span>
         </label>
         <label class="field">
           <span class="field-label">RPM</span>
@@ -61,17 +61,17 @@
           <span class="field-help">{{msg .Locale "0 表示不限。" "0 means unlimited."}}</span>
         </label>
         <label class="field">
-          <span class="field-label">{{msg .Locale "日预算 cents" "Daily budget cents"}}</span>
+          <span class="field-label">{{msg .Locale "日预算（分）" "Daily budget cents"}}</span>
           <input name="daily_budget_cents" type="number" min="0" value="0">
           <span class="field-help">{{msg .Locale "0 表示不设日预算上限。" "0 means no daily budget cap."}}</span>
         </label>
         <label class="field span-2">
-          <span class="field-label">{{msg .Locale "月预算 cents" "Monthly budget cents"}}</span>
+          <span class="field-label">{{msg .Locale "月预算（分）" "Monthly budget cents"}}</span>
           <input name="monthly_budget_cents" type="number" min="0" value="0">
           <span class="field-help">{{msg .Locale "0 表示不设月预算上限。" "0 means no monthly budget cap."}}</span>
         </label>
         <div class="field span-2">
-          <button class="primary-button" type="submit">{{msg .Locale "创建 Key" "Create key"}}</button>
+          <button class="primary-button" type="submit">{{msg .Locale "创建密钥" "Create key"}}</button>
         </div>
       </form>
       <datalist id="api-key-protocol-options">
@@ -90,7 +90,7 @@
         </div>
       </div>
       <ul class="note-list">
-        <li>{{msg .Locale "建议把不同 IDE、Bot 和内部服务拆成独立 API Key，便于按项目与模型核算。" "Split IDEs, bots, and internal services into separate API keys for clearer project and model accounting."}}</li>
+        <li>{{msg .Locale "建议把不同 IDE、机器人和内部服务拆成独立 API 密钥，便于按项目与模型核算。" "Split IDEs, bots, and internal services into separate API keys for clearer project and model accounting."}}</li>
         <li>{{msg .Locale "预算、RPM、TPM 与并发限制都优先在 AIYolo 内部身份层生效。" "Budgets, RPM, TPM, and concurrency limits should be enforced at the AIYolo identity layer first."}}</li>
         <li>{{msg .Locale "新生成的明文只展示一次，之后数据库仅保留哈希与前缀。" "New cleartext keys are shown once; afterwards only the hash and prefix remain in storage."}}</li>
       </ul>
@@ -101,7 +101,7 @@
     <div class="section-head">
       <div>
         <p class="section-kicker">{{msg .Locale "已签发凭证" "Issued credentials"}}</p>
-        <h2>{{msg .Locale "已发放 API Keys" "Issued API keys"}}</h2>
+        <h2>{{msg .Locale "已发放 API 密钥" "Issued API keys"}}</h2>
       </div>
       <span class="badge tone-neutral">{{len .Keys}} {{msg .Locale "个" "keys"}}</span>
     </div>
@@ -149,8 +149,8 @@
     </div>
     {{else}}
     <div class="empty-state">
-      <h3>{{msg .Locale "还没有 API Key" "No API keys yet"}}</h3>
-      <p>{{msg .Locale "创建一把新 key 后，这里会开始展示前缀、协议边界和预算策略。" "After creating a key, this table will show its prefix, protocol boundaries, and budget policy."}}</p>
+      <h3>{{msg .Locale "还没有 API 密钥" "No API keys yet"}}</h3>
+      <p>{{msg .Locale "创建一把新密钥后，这里会开始展示前缀、协议边界和预算策略。" "After creating a key, this table will show its prefix, protocol boundaries, and budget policy."}}</p>
     </div>
     {{end}}
   </section>
