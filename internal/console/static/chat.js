@@ -421,6 +421,134 @@
     return first instanceof HTMLInputElement ? first.value.trim() : "";
   };
 
+  const parseReasoningEfforts = (raw) => String(raw || "")
+    .split(",")
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter((value, index, values) => value !== "" && values.indexOf(value) === index);
+
+  const normalizeReasoningEffort = (value, allowedEfforts = []) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    return allowedEfforts.includes(normalized) ? normalized : "";
+  };
+
+  const reasoningEffortDefaultLabel = () => "reasoning_effort · default";
+
+  const reasoningEffortLabel = (value) => {
+    switch (String(value || "").trim().toLowerCase()) {
+      case "high":
+        return "high";
+      case "max":
+        return "max";
+      default:
+        return String(value || "").trim();
+    }
+  };
+
+  const reasoningEffortControl = (form = currentForm()) => form?.querySelector("[data-chat-reasoning-control]") || null;
+  const reasoningEffortInput = (form = currentForm()) => form?.querySelector("[data-chat-reasoning-effort-input]") || null;
+  const reasoningEffortPicker = (form = currentForm()) => form?.querySelector("[data-chat-reasoning-picker]") || null;
+  const reasoningEffortPickerMenu = (form = currentForm()) => reasoningEffortPicker(form)?.querySelector(".chat-reasoning-picker-menu") || null;
+  const reasoningEffortPickerCopy = (form = currentForm()) => form?.querySelector("[data-chat-reasoning-picker-copy]") || null;
+
+  const refreshReasoningOptionStates = (form = currentForm()) => {
+    form?.querySelectorAll("[data-chat-reasoning-option]").forEach((input) => {
+      if (!(input instanceof HTMLInputElement)) {
+        return;
+      }
+      const option = input.closest(".chat-reasoning-picker-option");
+      option?.classList.toggle("is-active", input.checked);
+    });
+  };
+
+  const setSelectedReasoningEffort = (form, value) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    let matched = false;
+    form?.querySelectorAll("[data-chat-reasoning-option]").forEach((input) => {
+      if (!(input instanceof HTMLInputElement)) {
+        return;
+      }
+      const checked = String(input.value || "").trim().toLowerCase() === normalized;
+      input.checked = checked;
+      matched = matched || checked;
+    });
+    if (!matched) {
+      const fallback = form?.querySelector("[data-chat-reasoning-option][value='']");
+      if (fallback instanceof HTMLInputElement) {
+        fallback.checked = true;
+      }
+    }
+    refreshReasoningOptionStates(form);
+  };
+
+  const currentSelectedReasoningEffort = (form) => {
+    const input = reasoningEffortInput(form);
+    if (!(input instanceof HTMLInputElement) || input.disabled) {
+      return "";
+    }
+    return String(input.value || "").trim().toLowerCase();
+  };
+
+  const syncReasoningEffortControl = (form, route, preferredValue) => {
+    const control = reasoningEffortControl(form);
+    const input = reasoningEffortInput(form);
+    const picker = reasoningEffortPicker(form);
+    const menu = reasoningEffortPickerMenu(form);
+    const copy = reasoningEffortPickerCopy(form);
+    if (!(input instanceof HTMLInputElement) || !(menu instanceof HTMLElement)) {
+      return;
+    }
+
+    const allowedEfforts = Array.isArray(route?.reasoningEfforts) ? route.reasoningEfforts : [];
+    const nextValue = normalizeReasoningEffort(typeof preferredValue === "string" ? preferredValue : currentSelectedReasoningEffort(form), allowedEfforts);
+
+    menu.replaceChildren();
+
+    const appendOption = (value, label, detail) => {
+      const option = document.createElement("label");
+      option.className = "chat-model-picker-option chat-reasoning-picker-option";
+
+      const radio = document.createElement("input");
+      radio.className = "chat-route-control chat-reasoning-option-control";
+      radio.type = "radio";
+      radio.name = "chat_reasoning_effort_choice";
+      radio.value = value;
+      radio.setAttribute("data-chat-reasoning-option", "");
+
+      const name = document.createElement("span");
+      name.className = "chat-model-name";
+      name.textContent = label;
+
+      const description = document.createElement("span");
+      description.className = "chat-model-detail";
+      description.textContent = detail;
+
+      option.appendChild(radio);
+      option.appendChild(name);
+      option.appendChild(description);
+      menu.appendChild(option);
+    };
+
+    appendOption("", reasoningEffortDefaultLabel(), t("不显式传值，沿用 DeepSeek 默认思考强度。", "Leave reasoning_effort unset and let DeepSeek choose the default effort."));
+
+    allowedEfforts.forEach((effort) => {
+      appendOption(effort, reasoningEffortLabel(effort), `reasoning_effort=${reasoningEffortLabel(effort)}`);
+    });
+
+    const enabled = allowedEfforts.length > 0;
+    if (control instanceof HTMLElement) {
+      control.hidden = !enabled;
+    }
+    if (picker instanceof HTMLDetailsElement) {
+      picker.open = false;
+    }
+    input.disabled = !enabled;
+    input.value = enabled ? nextValue : "";
+    setSelectedReasoningEffort(form, enabled ? nextValue : "");
+    if (copy instanceof HTMLElement) {
+      copy.textContent = input.value ? reasoningEffortLabel(input.value) : reasoningEffortDefaultLabel();
+    }
+  };
+
   const defaultSystemPrompt = (form) => {
     const field = form?.querySelector("textarea[name=\"chat_system_prompt\"]");
     if (!(field instanceof HTMLTextAreaElement)) {
@@ -530,6 +658,7 @@
         publicName,
         providerName: option?.dataset.chatProviderName?.trim() || detailParts[0]?.trim() || "",
         upstreamModel: option?.dataset.chatUpstreamModel?.trim() || detailParts.slice(1).join("·").trim() || publicName,
+        reasoningEfforts: parseReasoningEfforts(option?.dataset.chatReasoningEfforts),
       });
     });
     return routes;
@@ -627,6 +756,10 @@
     const fallbackRoute = currentSelectedModel(form);
     const publicName = String(session.publicName || existingSession?.publicName || fallbackRoute || "").trim();
     const resolvedRoute = routes.has(publicName) ? publicName : fallbackRoute;
+    const route = routes.get(resolvedRoute) || null;
+    const fallbackReasoningEffort = String(session.id || existingSession?.id || "").trim() === readClientSessionID(form)
+      ? currentSelectedReasoningEffort(form)
+      : "";
     const draftAttachments = Array.isArray(session.draftAttachments)
       ? session.draftAttachments.map(normalizeAttachment).filter(Boolean)
       : Array.isArray(session.attachments)
@@ -641,6 +774,7 @@
       title: String(session.title || existingSession?.title || "").trim(),
       customTitle: Boolean(session.customTitle || existingSession?.customTitle),
       publicName: resolvedRoute,
+      reasoningEffort: normalizeReasoningEffort(session.reasoningEffort || existingSession?.reasoningEffort || fallbackReasoningEffort, route?.reasoningEfforts || []),
       systemPrompt: String(session.systemPrompt || existingSession?.systemPrompt || defaultSystemPrompt(form) || "").trim(),
       draft: String(session.draft || "").trim(),
       draftAttachments,
@@ -855,6 +989,7 @@
     title: t("新会话", "New chat"),
     customTitle: false,
     publicName: currentSelectedModel(form),
+    reasoningEffort: currentSelectedReasoningEffort(form),
     systemPrompt: defaultSystemPrompt(form),
     draft: "",
     draftAttachments: [],
@@ -876,6 +1011,7 @@
       title: existingSession?.title || "",
       customTitle: existingSession?.customTitle || false,
       publicName: currentSelectedModel(form),
+      reasoningEffort: currentSelectedReasoningEffort(form),
       systemPrompt: String((form.querySelector("textarea[name=\"chat_system_prompt\"]")?.value || defaultSystemPrompt(form) || "")).trim(),
       draft: draftField instanceof HTMLTextAreaElement ? draftField.value : "",
       draftAttachments: readHiddenJSON(form, "chat_draft_attachments_json", []),
@@ -1275,6 +1411,7 @@
     form.classList.remove("is-streaming");
     writeClientSessionID(form, session.id);
     setSelectedModel(form, session.publicName);
+    syncReasoningEffortControl(form, routes.get(session.publicName) || null, session.reasoningEffort);
     updateStageHeader(root, session, routes);
 
     const systemPromptField = form.querySelector("textarea[name=\"chat_system_prompt\"]");
@@ -2187,6 +2324,7 @@
     if (target instanceof HTMLInputElement && target.name === "chat_public_name") {
       refreshModelCardStates(form);
       const routes = routeMap(form);
+      syncReasoningEffortControl(form, routes.get(target.value.trim()) || null);
       const session = captureSessionFromDOM(form, normalizeStore(loadStore(), form, routes), routes);
       updateStageHeader(root, session, routes);
       renderThread(root, session.messages, routes.get(session.publicName) || null);
@@ -2196,6 +2334,23 @@
       }
       queuePersist();
       updateComposerControls(form);
+      return;
+    }
+    if (target instanceof HTMLInputElement && target.matches("[data-chat-reasoning-option]")) {
+      const input = reasoningEffortInput(form);
+      const copy = reasoningEffortPickerCopy(form);
+      if (input instanceof HTMLInputElement) {
+        input.value = String(target.value || "").trim().toLowerCase();
+      }
+      refreshReasoningOptionStates(form);
+      if (copy instanceof HTMLElement) {
+        copy.textContent = input?.value ? reasoningEffortLabel(input.value) : reasoningEffortDefaultLabel();
+      }
+      const picker = target.closest(".chat-reasoning-picker");
+      if (picker instanceof HTMLDetailsElement) {
+        picker.open = false;
+      }
+      queuePersist();
     }
   });
 
@@ -2244,14 +2399,15 @@
     if (!form) {
       return;
     }
-    const openPicker = form.querySelector(".chat-model-picker[open]");
-    if (!(openPicker instanceof HTMLDetailsElement)) {
-      return;
-    }
-    if (event.target instanceof Node && openPicker.contains(event.target)) {
-      return;
-    }
-    openPicker.open = false;
+    form.querySelectorAll(".chat-model-picker[open], .chat-reasoning-picker[open]").forEach((picker) => {
+      if (!(picker instanceof HTMLDetailsElement)) {
+        return;
+      }
+      if (event.target instanceof Node && picker.contains(event.target)) {
+        return;
+      }
+      picker.open = false;
+    });
   });
 
   document.addEventListener("submit", (event) => {

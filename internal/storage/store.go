@@ -55,6 +55,30 @@ type Store interface {
 	ListConsoleChatSessions(ctx context.Context, userID string, limit int) ([]domain.ConsoleChatSession, error)
 	GetConsoleChatSession(ctx context.Context, userID string, id string) (domain.ConsoleChatSession, error)
 	DeleteConsoleChatSession(ctx context.Context, userID string, id string) error
+
+	UpsertWorkerSSHKey(ctx context.Context, key domain.WorkerSSHKey) error
+	ListWorkerSSHKeys(ctx context.Context) ([]domain.WorkerSSHKey, error)
+	GetWorkerSSHKey(ctx context.Context, id string) (domain.WorkerSSHKey, error)
+
+	UpsertWorkerServer(ctx context.Context, worker domain.WorkerServer) error
+	ListWorkerServers(ctx context.Context) ([]domain.WorkerServer, error)
+	GetWorkerServer(ctx context.Context, id string) (domain.WorkerServer, error)
+	ReplaceWorkerDataDisks(ctx context.Context, workerID string, disks []domain.WorkerDataDisk) error
+	ListWorkerDataDisks(ctx context.Context, workerID string) ([]domain.WorkerDataDisk, error)
+
+	UpsertWorkerInitJob(ctx context.Context, job domain.WorkerInitJob) error
+	ListWorkerInitJobs(ctx context.Context, workerID string, limit int) ([]domain.WorkerInitJob, error)
+	GetWorkerInitJob(ctx context.Context, workerID string, jobID string) (domain.WorkerInitJob, error)
+	AppendWorkerInitJobEvent(ctx context.Context, event domain.WorkerInitJobEvent) error
+	ListWorkerInitJobEvents(ctx context.Context, workerID string, jobID string, afterSequence int64) ([]domain.WorkerInitJobEvent, error)
+
+	UpsertCloudAgentAccount(ctx context.Context, account domain.CloudAgentAccount) error
+	ListCloudAgentAccounts(ctx context.Context, userID string, workerID string) ([]domain.CloudAgentAccount, error)
+	GetCloudAgentAccount(ctx context.Context, userID string, accountID string) (domain.CloudAgentAccount, error)
+
+	UpsertCloudAgentSession(ctx context.Context, session domain.CloudAgentSession) error
+	ListCloudAgentSessions(ctx context.Context, userID string, workerID string, limit int) ([]domain.CloudAgentSession, error)
+	GetCloudAgentSession(ctx context.Context, userID string, sessionID string) (domain.CloudAgentSession, error)
 }
 
 type SeedData struct{}

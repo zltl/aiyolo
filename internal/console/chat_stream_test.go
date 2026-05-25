@@ -20,7 +20,7 @@ import (
 )
 
 func TestBuildConsoleChatRequestBodyIncludesOpenAIMultimodalParts(t *testing.T) {
-	body, err := buildConsoleChatRequestBody(domain.ProtocolOpenAI, domain.ModelRoute{PublicName: "ops-chat", UpstreamModel: "openai/gpt-5.5"}, "system", nil, "review this screenshot", []consoleChatAttachmentView{{ObjectKey: "chat/user/upload.png", URL: "https://files.example.com/chat/user/upload.png", MediaType: "image/png", Name: "upload.png"}, {ObjectKey: "chat/user/spec.pdf", URL: "https://files.example.com/chat/user/spec.pdf", MediaType: "application/pdf", Name: "spec.pdf"}}, false)
+	body, err := buildConsoleChatRequestBody(domain.ProtocolOpenAI, domain.Provider{}, domain.ModelRoute{PublicName: "ops-chat", UpstreamModel: "openai/gpt-5.5"}, "system", nil, "review this screenshot", []consoleChatAttachmentView{{ObjectKey: "chat/user/upload.png", URL: "https://files.example.com/chat/user/upload.png", MediaType: "image/png", Name: "upload.png"}, {ObjectKey: "chat/user/spec.pdf", URL: "https://files.example.com/chat/user/spec.pdf", MediaType: "application/pdf", Name: "spec.pdf"}}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestBuildConsoleChatRequestBodyIncludesOpenAIMultimodalParts(t *testing.T) 
 }
 
 func TestBuildConsoleChatRequestBodyUsesLargerBudgetForDeepSeekV4Pro(t *testing.T) {
-	body, err := buildConsoleChatRequestBody(domain.ProtocolOpenAI, domain.ModelRoute{PublicName: "ops-chat", UpstreamModel: "deepseek-v4-pro"}, "", nil, "summarize this", nil, true)
+	body, err := buildConsoleChatRequestBody(domain.ProtocolOpenAI, domain.Provider{}, domain.ModelRoute{PublicName: "ops-chat", UpstreamModel: "deepseek-v4-pro"}, "", nil, "summarize this", nil, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestBuildConsoleChatRequestBodyUsesLargerBudgetForDeepSeekV4Pro(t *testing.
 }
 
 func TestBuildConsoleChatRequestBodyIncludesAnthropicDocumentParts(t *testing.T) {
-	body, err := buildConsoleChatRequestBody(domain.ProtocolAnthropic, domain.ModelRoute{PublicName: "claude-sonnet", UpstreamModel: "claude-sonnet-4-5"}, "", nil, "summarize these inputs", []consoleChatAttachmentView{{ObjectKey: "chat/user/diagram.png", URL: "https://files.example.com/chat/user/diagram.png", MediaType: "image/png", Name: "diagram.png"}, {ObjectKey: "chat/user/notes.pdf", URL: "https://files.example.com/chat/user/notes.pdf", MediaType: "application/pdf", Name: "notes.pdf"}}, false)
+	body, err := buildConsoleChatRequestBody(domain.ProtocolAnthropic, domain.Provider{}, domain.ModelRoute{PublicName: "claude-sonnet", UpstreamModel: "claude-sonnet-4-5"}, "", nil, "summarize these inputs", []consoleChatAttachmentView{{ObjectKey: "chat/user/diagram.png", URL: "https://files.example.com/chat/user/diagram.png", MediaType: "image/png", Name: "diagram.png"}, {ObjectKey: "chat/user/notes.pdf", URL: "https://files.example.com/chat/user/notes.pdf", MediaType: "application/pdf", Name: "notes.pdf"}}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestBuildConsoleChatRequestBodyIncludesAnthropicDocumentParts(t *testing.T)
 }
 
 func TestBuildConsoleChatRequestBodyUsesAnthropicBase64ImageSource(t *testing.T) {
-	body, err := buildConsoleChatRequestBody(domain.ProtocolAnthropic, domain.ModelRoute{PublicName: "deepseek-v4-pro", UpstreamModel: "deepseek-v4-pro"}, "", nil, "look at this image", []consoleChatAttachmentView{{ObjectKey: "chat/user/diagram.png", URL: "data:image/png;base64,cG5n", MediaType: "image/png", Name: "diagram.png"}}, false)
+	body, err := buildConsoleChatRequestBody(domain.ProtocolAnthropic, domain.Provider{}, domain.ModelRoute{PublicName: "deepseek-v4-pro", UpstreamModel: "deepseek-v4-pro"}, "", nil, "look at this image", []consoleChatAttachmentView{{ObjectKey: "chat/user/diagram.png", URL: "data:image/png;base64,cG5n", MediaType: "image/png", Name: "diagram.png"}}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +129,43 @@ func TestBuildConsoleChatRequestBodyUsesAnthropicBase64ImageSource(t *testing.T)
 	source, _ := imagePart["source"].(map[string]any)
 	if source["type"] != "base64" || source["media_type"] != "image/png" || source["data"] != "cG5n" {
 		t.Fatalf("unexpected image source: %#v", source)
+	}
+}
+
+func TestBuildConsoleChatRequestBodyIncludesDeepSeekReasoningEffortForOpenAI(t *testing.T) {
+	body, err := buildConsoleChatRequestBody(domain.ProtocolOpenAI, domain.Provider{ID: "deepseek"}, domain.ModelRoute{PublicName: "deepseek-v4-pro", UpstreamModel: "deepseek-v4-pro"}, "", nil, "summarize this", nil, true, "high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["reasoning_effort"] != "high" {
+		t.Fatalf("reasoning_effort=%#v", payload["reasoning_effort"])
+	}
+	thinking, ok := payload["thinking"].(map[string]any)
+	if !ok || thinking["type"] != "enabled" {
+		t.Fatalf("thinking=%#v", payload["thinking"])
+	}
+}
+
+func TestBuildConsoleChatRequestBodyIncludesDeepSeekReasoningEffortForAnthropic(t *testing.T) {
+	body, err := buildConsoleChatRequestBody(domain.ProtocolAnthropic, domain.Provider{ID: "deepseek"}, domain.ModelRoute{PublicName: "deepseek-v4-pro", UpstreamModel: "deepseek-v4-pro"}, "", nil, "summarize this", nil, false, "max")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	thinking, ok := payload["thinking"].(map[string]any)
+	if !ok || thinking["type"] != "enabled" {
+		t.Fatalf("thinking=%#v", payload["thinking"])
+	}
+	outputConfig, ok := payload["output_config"].(map[string]any)
+	if !ok || outputConfig["effort"] != "max" {
+		t.Fatalf("output_config=%#v", payload["output_config"])
 	}
 }
 
@@ -430,7 +467,7 @@ func TestRunConsoleChatTurnWithContinuationAutoRetriesLength(t *testing.T) {
 	route := domain.ModelRoute{PublicName: "deepseek-v4-pro", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, Enabled: true}
 	var streamed strings.Builder
 
-	execution, err := runConsoleChatTurnWithContinuation(context.Background(), domain.ProtocolOpenAI, provider, route, domain.ProxyProfile{}, "", nil, "How would you route failover?", nil, true, func(delta string) error {
+	execution, err := runConsoleChatTurnWithContinuation(context.Background(), domain.ProtocolOpenAI, provider, route, domain.ProxyProfile{}, "", "", nil, "How would you route failover?", nil, true, func(delta string) error {
 		streamed.WriteString(delta)
 		return nil
 	}, nil)
@@ -495,7 +532,7 @@ func TestRunConsoleChatTurnAutoRetriesLengthForJSONResponses(t *testing.T) {
 	provider := domain.Provider{ID: "deepseek", Name: "DeepSeek", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat", Status: domain.StatusEnabled, TimeoutSeconds: 30}
 	route := domain.ModelRoute{PublicName: "deepseek-v4-pro", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, Enabled: true}
 
-	execution, err := runConsoleChatTurn(context.Background(), provider, route, domain.ProxyProfile{}, "", nil, "How would you route failover?", nil)
+	execution, err := runConsoleChatTurn(context.Background(), provider, route, domain.ProxyProfile{}, "", "", nil, "How would you route failover?", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

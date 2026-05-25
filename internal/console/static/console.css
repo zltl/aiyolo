@@ -4235,16 +4235,23 @@ textarea:focus-visible,
   color: #9ea6ba;
 }
 
-.chat-model-picker {
+.chat-model-picker,
+.chat-reasoning-picker {
   position: relative;
 }
 
-.chat-model-picker summary {
+.chat-reasoning-effort {
+  position: relative;
+}
+
+.chat-model-picker summary,
+.chat-reasoning-picker summary {
   list-style: none;
   cursor: pointer;
 }
 
-.chat-model-picker summary::-webkit-details-marker {
+.chat-model-picker summary::-webkit-details-marker,
+.chat-reasoning-picker summary::-webkit-details-marker {
   display: none;
 }
 
@@ -4271,11 +4278,13 @@ textarea:focus-visible,
   height: 0.9rem;
 }
 
-.chat-model-picker[open] .chat-model-picker-icon .chat-control-icon {
+.chat-model-picker[open] .chat-model-picker-icon .chat-control-icon,
+.chat-reasoning-picker[open] .chat-reasoning-picker-icon .chat-control-icon {
   transform: rotate(180deg);
 }
 
-.chat-model-picker[open] .chat-model-picker-trigger {
+.chat-model-picker[open] .chat-model-picker-trigger,
+.chat-reasoning-picker[open] .chat-reasoning-picker-trigger {
   border-color: rgba(120, 137, 255, 0.32);
   background: rgba(255, 255, 255, 0.08);
 }
@@ -4313,6 +4322,10 @@ textarea:focus-visible,
   border-radius: 18px;
   background: rgba(16, 18, 22, 0.98);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.36);
+}
+
+.chat-reasoning-picker-menu {
+  width: min(22rem, calc(100vw - 2rem));
 }
 
 .chat-model-picker-option {
@@ -4476,7 +4489,9 @@ textarea:focus-visible,
   }
 
   .chat-model-picker,
+  .chat-reasoning-effort,
   .chat-model-picker-trigger,
+  .chat-reasoning-effort-select,
   .chat-reset-button,
   .chat-send-button {
     width: 100%;

@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260523k">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260525b">
 </head>
 <body class="chat-workspace-body">
   {{template "chat-content" .}}
@@ -147,7 +147,7 @@
                 </summary>
                 <div class="chat-model-picker-menu" role="radiogroup" aria-label="{{msg .Locale "对话模型" "Conversation model"}}">
                   {{range .ChatRoutes}}
-                  <label class="chat-model-picker-option {{if eq $.ChatForm.PublicName .PublicName}}is-active{{end}}" data-chat-provider-name="{{.ProviderName}}" data-chat-upstream-model="{{.UpstreamModel}}">
+                  <label class="chat-model-picker-option {{if eq $.ChatForm.PublicName .PublicName}}is-active{{end}}" data-chat-provider-name="{{.ProviderName}}" data-chat-upstream-model="{{.UpstreamModel}}" data-chat-reasoning-efforts="{{join .ReasoningEfforts ","}}">
                     <input class="chat-route-control" type="radio" name="chat_public_name" value="{{.PublicName}}" {{if eq $.ChatForm.PublicName .PublicName}}checked{{end}}>
                     <span class="chat-model-name">{{.PublicName}}</span>
                     <span class="chat-model-detail">{{.ProviderName}} · {{.UpstreamModel}}</span>
@@ -155,6 +155,31 @@
                   {{end}}
                 </div>
               </details>
+              <div class="chat-reasoning-effort" data-chat-reasoning-control {{if not .SelectedChatRoute.ReasoningEfforts}}hidden{{end}}>
+                <input id="chat-reasoning-effort" type="hidden" name="chat_reasoning_effort" value="{{.ChatForm.ReasoningEffort}}" data-chat-reasoning-effort-input {{if not .SelectedChatRoute.ReasoningEfforts}}disabled{{end}}>
+                <details class="chat-model-picker chat-reasoning-picker" data-chat-reasoning-picker>
+                  <summary class="chat-model-picker-trigger chat-reasoning-picker-trigger" aria-label="{{msg .Locale "思考模式" "Thinking mode"}}">
+                    <span class="chat-model-picker-value chat-reasoning-picker-value" data-chat-reasoning-picker-copy>{{if .ChatForm.ReasoningEffort}}{{reasoningEffortLabel .Locale .ChatForm.ReasoningEffort}}{{else}}reasoning_effort · default{{end}}</span>
+                    <span class="chat-model-picker-icon chat-reasoning-picker-icon" aria-hidden="true">
+                      <i class="chat-control-icon" data-lucide="chevron-down"></i>
+                    </span>
+                  </summary>
+                  <div class="chat-model-picker-menu chat-reasoning-picker-menu" role="radiogroup" aria-label="{{msg .Locale "思考模式" "Thinking mode"}}">
+                    <label class="chat-model-picker-option chat-reasoning-picker-option {{if eq .ChatForm.ReasoningEffort ""}}is-active{{end}}">
+                      <input class="chat-route-control chat-reasoning-option-control" type="radio" name="chat_reasoning_effort_choice" value="" data-chat-reasoning-option {{if eq .ChatForm.ReasoningEffort ""}}checked{{end}}>
+                      <span class="chat-model-name">reasoning_effort · default</span>
+                      <span class="chat-model-detail">{{msg .Locale "不显式传值，沿用 DeepSeek 默认思考强度。" "Leave reasoning_effort unset and let DeepSeek choose the default effort."}}</span>
+                    </label>
+                    {{range .SelectedChatRoute.ReasoningEfforts}}
+                    <label class="chat-model-picker-option chat-reasoning-picker-option {{if eq $.ChatForm.ReasoningEffort .}}is-active{{end}}">
+                      <input class="chat-route-control chat-reasoning-option-control" type="radio" name="chat_reasoning_effort_choice" value="{{.}}" data-chat-reasoning-option {{if eq $.ChatForm.ReasoningEffort .}}checked{{end}}>
+                      <span class="chat-model-name">{{reasoningEffortLabel $.Locale .}}</span>
+                      <span class="chat-model-detail">reasoning_effort={{reasoningEffortLabel $.Locale .}}</span>
+                    </label>
+                    {{end}}
+                  </div>
+                </details>
+              </div>
               {{end}}
               <span class="chat-queue-indicator" data-chat-queue-indicator hidden></span>
               <button class="primary-button chat-send-button" type="button" data-chat-action="composer-primary" aria-label="{{msg .Locale "开始发送" "Start sending"}}" hidden>
@@ -170,6 +195,6 @@
     </section>
   </form>
   <script src="https://unpkg.com/lucide@1.16.0/dist/umd/lucide.min.js"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260523md26"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260525b"></script>
 </div>
 {{end}}

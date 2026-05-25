@@ -4,7 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
@@ -1616,6 +1620,72 @@ func TestConsoleChatPageRunsConversationTurn(t *testing.T) {
 	}
 }
 
+func TestConsoleChatPageForwardsDeepSeekReasoningEffort(t *testing.T) {
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		payload := string(body)
+		if !strings.Contains(payload, `"reasoning_effort":"high"`) {
+			t.Fatalf("reasoning effort missing from DeepSeek payload: %s", payload)
+		}
+		if !strings.Contains(payload, `"thinking":{"type":"enabled"}`) {
+			t.Fatalf("thinking enable flag missing from DeepSeek payload: %s", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_deepseek_reasoning","object":"chat.completion","created":1710000000,"model":"deepseek-v4-pro","choices":[{"index":0,"message":{"role":"assistant","content":"先做高强度思考，再返回结论。"},"finish_reason":"stop"}],"usage":{"prompt_tokens":18,"completion_tokens":10,"total_tokens":28}}`))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "deepseek", Name: "DeepSeek", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-deepseek-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "deepseek-v4-pro", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"chat_public_name":      {"deepseek-v4-pro"},
+		"chat_reasoning_effort": {"high"},
+		"chat_draft":            {"请先思考再回答。"},
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("HX-Request", "true")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	if !strings.Contains(string(body), "先做高强度思考，再返回结论。") {
+		t.Fatalf("assistant output missing from chat html: %s", body)
+	}
+}
+
 func TestConsoleChatStreamPersistsCompletedSessionAfterClientDisconnect(t *testing.T) {
 	allowFinish := make(chan struct{})
 	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2495,6 +2565,15 @@ func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
 	if !strings.Contains(pageHTML, `value="deepseek-v4-pro" checked`) {
 		t.Fatalf("expected deepseek-v4-pro to be the default selected route: %s", pageHTML)
 	}
+	if !strings.Contains(pageHTML, `name="chat_reasoning_effort"`) {
+		t.Fatalf("expected reasoning effort selector for deepseek-v4-pro: %s", pageHTML)
+	}
+	if !strings.Contains(pageHTML, `data-chat-reasoning-efforts="high,max"`) {
+		t.Fatalf("expected deepseek reasoning effort metadata in chat page: %s", pageHTML)
+	}
+	if !strings.Contains(pageHTML, `reasoning_effort · default`) || !strings.Contains(pageHTML, `reasoning_effort=high`) || !strings.Contains(pageHTML, `reasoning_effort=max`) {
+		t.Fatalf("expected raw DeepSeek reasoning labels in chat page: %s", pageHTML)
+	}
 	if strings.Contains(pageHTML, `value="deepseek-v4-flash" checked`) {
 		t.Fatalf("deepseek-v4-flash should not win over deepseek-v4-pro: %s", pageHTML)
 	}
@@ -2719,6 +2798,119 @@ func TestConsoleDirectProxyResourceCannotBeEdited(t *testing.T) {
 	}
 }
 
+func TestConsoleWorkersPageCreatesSSHKeyAndWorker(t *testing.T) {
+	store := storage.NewMemoryStore()
+	ctx := context.Background()
+	if err := store.SeedDefaults(ctx, storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pageResponse, err := client.Get(server.URL + "/console/workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pageResponse.Body.Close()
+	if pageResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(pageResponse.Body)
+		t.Fatalf("workers page status=%d body=%s", pageResponse.StatusCode, body)
+	}
+	pageBody, _ := io.ReadAll(pageResponse.Body)
+	pageHTML := string(pageBody)
+	if !strings.Contains(pageHTML, `action="/console/workers/ssh-keys"`) || !strings.Contains(pageHTML, `action="/console/workers"`) {
+		t.Fatalf("workers page missing forms: %s", pageHTML)
+	}
+
+	keyForm := url.Values{
+		"id":          {"ssh-key-1"},
+		"name":        {"Tokyo bootstrap key"},
+		"private_key": {mustGenerateConsolePrivateKeyPEM(t)},
+		"comment":     {"bootstrap"},
+	}
+	keyRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/workers/ssh-keys", strings.NewReader(keyForm.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	keyResponse, err := client.Do(keyRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyResponse.Body.Close()
+	if keyResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(keyResponse.Body)
+		t.Fatalf("create ssh key status=%d body=%s", keyResponse.StatusCode, body)
+	}
+	sshKey, err := store.GetWorkerSSHKey(ctx, "ssh-key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sshKey.Username != "" || sshKey.Fingerprint == "" {
+		t.Fatalf("unexpected ssh key: %+v", sshKey)
+	}
+
+	workerForm := url.Values{
+		"id":                      {"worker-1"},
+		"name":                    {"Tokyo builder"},
+		"expected_ubuntu_version": {domain.DefaultWorkerExpectedUbuntuVersion},
+		"ssh_host":                {"10.0.0.5"},
+		"ssh_port":                {"22"},
+		"ssh_username":            {"ubuntu"},
+		"ssh_key_id":              {sshKey.ID},
+		"install_proxy_id":        {domain.ProxyTypeDirect},
+		"labels":                  {"gpu,asia"},
+		"data_root":               {domain.DefaultWorkerDataRoot},
+		"data_disks":              {"/dev/vdb /srv/aiyolo"},
+	}
+	workerRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/workers", strings.NewReader(workerForm.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	workerResponse, err := client.Do(workerRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workerResponse.Body.Close()
+	if workerResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(workerResponse.Body)
+		t.Fatalf("create worker status=%d body=%s", workerResponse.StatusCode, body)
+	}
+	worker, err := store.GetWorkerServer(ctx, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.SSHHost != "10.0.0.5" || worker.SSHKeyID != sshKey.ID || worker.InstallProxyID != domain.ProxyTypeDirect {
+		t.Fatalf("unexpected worker: %+v", worker)
+	}
+	disks, err := store.ListWorkerDataDisks(ctx, worker.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(disks) != 1 || disks[0].DevicePath != "/dev/vdb" || disks[0].MountPath != "/srv/aiyolo" {
+		t.Fatalf("unexpected worker disks: %+v", disks)
+	}
+
+	finalPageResponse, err := client.Get(server.URL + "/console/workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer finalPageResponse.Body.Close()
+	finalBody, _ := io.ReadAll(finalPageResponse.Body)
+	finalHTML := string(finalBody)
+	if !strings.Contains(finalHTML, "Tokyo builder") || !strings.Contains(finalHTML, sshKey.ID) || !strings.Contains(finalHTML, "/srv/aiyolo") {
+		t.Fatalf("workers page missing saved resources: %s", finalHTML)
+	}
+}
+
 func TestConsoleCodexPageRequiresLogin(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
@@ -2896,6 +3088,19 @@ func loggedInConsoleClient(serverURL string) (*http.Client, error) {
 		return nil, fmt.Errorf("login status=%d body=%s", response.StatusCode, body)
 	}
 	return client, nil
+}
+
+func mustGenerateConsolePrivateKeyPEM(t *testing.T) string {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}))
 }
 
 type consoleChatStreamTestEvent struct {

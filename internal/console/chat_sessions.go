@@ -373,7 +373,7 @@ func (handler *Handler) generateConsoleChatSessionTitle(ctx context.Context, r *
 	}
 	titleCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	execution, err := runConsoleChatTurn(titleCtx, target.Provider, target.Route, target.Profile, consoleChatSessionTitleSystemPrompt(locale), nil, consoleChatSessionTitlePrompt(locale, messages), nil)
+	execution, err := runConsoleChatTurn(titleCtx, target.Provider, target.Route, target.Profile, consoleChatSessionTitleSystemPrompt(locale), "", nil, consoleChatSessionTitlePrompt(locale, messages), nil)
 	if err != nil {
 		log.Printf("console chat title generation failed public_name=%s err=%v", strings.TrimSpace(publicName), err)
 		return ""

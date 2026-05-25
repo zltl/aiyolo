@@ -77,6 +77,7 @@ func consoleNavItems(locale string) []navItemView {
 		{Key: "Providers", Label: consoleText(locale, "供应商", "Providers"), Href: "/console/providers", Icon: "provider", Tone: "tone-forest"},
 		{Key: "Models", Label: consoleText(locale, "模型路由", "Models"), Href: "/console/models", Icon: "models", Tone: "tone-sea"},
 		{Key: "Proxies", Label: consoleText(locale, "代理", "Proxies"), Href: "/console/proxies", Icon: "proxies", Tone: "tone-ink"},
+		{Key: "Workers", Label: consoleText(locale, "Workers", "Workers"), Href: "/console/workers", Icon: "workers", Tone: "tone-forest"},
 		{Key: "Settings", Label: consoleText(locale, "设置", "Settings"), Href: "/console/settings", Icon: "settings", Tone: "tone-sand"},
 	}
 }
@@ -99,6 +100,8 @@ func pageTitleLocalized(locale, title string) string {
 		return consoleText(locale, "模型路由", "Models")
 	case "Proxies":
 		return consoleText(locale, "代理", "Proxies")
+	case "Workers":
+		return consoleText(locale, "Workers", "Workers")
 	case "Settings":
 		return consoleText(locale, "设置", "Settings")
 	case "Login":
@@ -126,6 +129,8 @@ func pageEyebrowLocalized(locale, title string) string {
 		return consoleText(locale, "模型映射", "Route Map")
 	case "Proxies":
 		return consoleText(locale, "网络路径", "Network Paths")
+	case "Workers":
+		return consoleText(locale, "云端执行面", "Cloud Execution")
 	case "Settings":
 		return consoleText(locale, "访问策略", "Access Policy")
 	case "Login":
@@ -153,6 +158,8 @@ func pageDescriptionLocalized(locale, title string) string {
 		return consoleText(locale, "把稳定的对外模型名映射到真实提供方与代理路径。", "Map stable public model names to real providers and proxy paths.")
 	case "Proxies":
 		return consoleText(locale, "把 direct、HTTP、SOCKS5 路径做成可观察资源，并统一在控制台维护。", "Keep direct, HTTP, and SOCKS5 paths observable and managed from the console.")
+	case "Workers":
+		return consoleText(locale, "登记 SSH 密钥和 Worker 主机，为后续云端 Agent、终端与文件工作区铺好基础。", "Register SSH keys and worker hosts as the control-plane foundation for future cloud agents, terminals, and workspaces.")
 	case "Settings":
 		return consoleText(locale, "把登录方式和观察到的后台身份收在一个页面。", "Keep login methods, language preference, and observed console identities on one page.")
 	case "Login":

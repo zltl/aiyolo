@@ -6,6 +6,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -24,6 +26,42 @@ const (
 	DefaultProviderStreamIdleTimeoutSeconds = 300
 	DefaultProxyTimeoutSeconds              = 60
 	DefaultProxyStreamIdleTimeoutSeconds    = 300
+	DefaultWorkerSSHPort                    = 22
+	DefaultWorkerExpectedUbuntuVersion      = "26.04"
+	DefaultWorkerDataRoot                   = "/var/lib/aiyolo-agent"
+	DefaultCloudAgentWorkspacePath          = "/workspace"
+
+	WorkerStatusPending      = "pending"
+	WorkerStatusReady        = "ready"
+	WorkerStatusInitializing = "initializing"
+	WorkerStatusFailed       = "failed"
+	WorkerStatusDisabled     = "disabled"
+
+	WorkerProbeStatusUnknown = "unknown"
+	WorkerProbeStatusReady   = "ready"
+	WorkerProbeStatusFailed  = "failed"
+
+	WorkerInitActionBootstrap = "bootstrap"
+
+	WorkerJobStatusQueued    = "queued"
+	WorkerJobStatusRunning   = "running"
+	WorkerJobStatusSucceeded = "succeeded"
+	WorkerJobStatusFailed    = "failed"
+
+	WorkerJobEventInfo  = "info"
+	WorkerJobEventWarn  = "warn"
+	WorkerJobEventError = "error"
+
+	CloudAgentTypeClaudeCode = "claude-code"
+
+	CloudAgentStatusStopped  = "stopped"
+	CloudAgentStatusStarting = "starting"
+	CloudAgentStatusRunning  = "running"
+	CloudAgentStatusError    = "error"
+
+	CloudAgentSessionStatusPending = "pending"
+	CloudAgentSessionStatusActive  = "active"
+	CloudAgentSessionStatusClosed  = "closed"
 )
 
 type APIKey struct {
@@ -423,6 +461,368 @@ type ConsoleChatSession struct {
 	UpdatedAt            time.Time
 	LastMessageAt        *time.Time
 	CompletedAt          *time.Time
+}
+
+type WorkerSSHKey struct {
+	ID                   string
+	Name                 string
+	Username             string
+	PublicKey            string
+	PrivateKey           string
+	PrivateKeyPassphrase string
+	Fingerprint          string
+	Comment              string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+}
+
+type WorkerDataDisk struct {
+	WorkerID   string
+	DevicePath string
+	MountPath  string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+type WorkerServer struct {
+	ID                    string
+	Name                  string
+	ExpectedUbuntuVersion string
+	SSHHost               string
+	SSHPort               int
+	SSHUsername           string
+	SSHKeyID              string
+	InstallProxyID        string
+	Labels                []string
+	DataRoot              string
+	Status                string
+	LastProbeStatus       string
+	LastProbeError        string
+	LastProbeSummaryJSON  string
+	LastProbedAt          *time.Time
+	LastInitJobID         string
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+}
+
+type WorkerInitJob struct {
+	ID          string
+	WorkerID    string
+	Action      string
+	Status      string
+	TriggeredBy string
+	LogSummary  string
+	LastError   string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+}
+
+type WorkerInitJobEvent struct {
+	WorkerID  string
+	JobID     string
+	Sequence  int64
+	Level     string
+	Message   string
+	CreatedAt time.Time
+}
+
+type CloudAgentAccount struct {
+	ID              string
+	UserID          string
+	WorkerID        string
+	AgentType       string
+	ModelPublicName string
+	ContainerID     string
+	ContainerName   string
+	WorkspacePath   string
+	Credential      string
+	Status          string
+	LastError       string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	LastStartedAt   *time.Time
+	LastSeenAt      *time.Time
+}
+
+type CloudAgentSession struct {
+	ID            string
+	UserID        string
+	WorkerID      string
+	AccountID     string
+	AgentType     string
+	ChatSessionID string
+	WorkspacePath string
+	Status        string
+	LastError     string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	ClosedAt      *time.Time
+}
+
+func NormalizeWorkerLabels(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	labels := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		labels = append(labels, normalized)
+	}
+	if len(labels) == 0 {
+		return nil
+	}
+	return labels
+}
+
+func NormalizeWorkerDataDisk(disk WorkerDataDisk) (WorkerDataDisk, error) {
+	disk.WorkerID = strings.TrimSpace(disk.WorkerID)
+	disk.DevicePath = path.Clean(strings.TrimSpace(disk.DevicePath))
+	disk.MountPath = path.Clean(strings.TrimSpace(disk.MountPath))
+	if disk.DevicePath == "." || disk.DevicePath == "" || !strings.HasPrefix(disk.DevicePath, "/dev/") {
+		return WorkerDataDisk{}, fmt.Errorf("worker data disk device path must start with /dev/")
+	}
+	if disk.MountPath == "." || disk.MountPath == "" || !strings.HasPrefix(disk.MountPath, "/") || disk.MountPath == "/" {
+		return WorkerDataDisk{}, fmt.Errorf("worker data disk mount path must be an absolute non-root path")
+	}
+	return disk, nil
+}
+
+func NormalizeWorkerDisks(disks []WorkerDataDisk) ([]WorkerDataDisk, error) {
+	if len(disks) == 0 {
+		return nil, nil
+	}
+	result := make([]WorkerDataDisk, 0, len(disks))
+	seen := make(map[string]struct{}, len(disks))
+	for _, disk := range disks {
+		normalized, err := NormalizeWorkerDataDisk(disk)
+		if err != nil {
+			return nil, err
+		}
+		key := normalized.DevicePath + "|" + normalized.MountPath
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, normalized)
+	}
+	return result, nil
+}
+
+func NormalizeWorkerServer(server WorkerServer) (WorkerServer, error) {
+	server.ID = strings.TrimSpace(server.ID)
+	server.Name = strings.TrimSpace(server.Name)
+	server.ExpectedUbuntuVersion = strings.TrimSpace(server.ExpectedUbuntuVersion)
+	server.SSHHost = strings.TrimSpace(server.SSHHost)
+	server.SSHUsername = strings.TrimSpace(server.SSHUsername)
+	server.SSHKeyID = strings.TrimSpace(server.SSHKeyID)
+	server.InstallProxyID = strings.TrimSpace(server.InstallProxyID)
+	server.Labels = NormalizeWorkerLabels(server.Labels)
+	server.DataRoot = path.Clean(strings.TrimSpace(server.DataRoot))
+	server.Status = strings.TrimSpace(server.Status)
+	server.LastProbeStatus = strings.TrimSpace(server.LastProbeStatus)
+	server.LastProbeError = strings.TrimSpace(server.LastProbeError)
+	server.LastProbeSummaryJSON = strings.TrimSpace(server.LastProbeSummaryJSON)
+	server.LastInitJobID = strings.TrimSpace(server.LastInitJobID)
+
+	if server.ID == "" {
+		return WorkerServer{}, fmt.Errorf("worker id is required")
+	}
+	if server.Name == "" {
+		server.Name = server.ID
+	}
+	if server.ExpectedUbuntuVersion == "" {
+		server.ExpectedUbuntuVersion = DefaultWorkerExpectedUbuntuVersion
+	}
+	if server.SSHHost == "" {
+		return WorkerServer{}, fmt.Errorf("worker ssh host is required")
+	}
+	if server.SSHPort <= 0 {
+		server.SSHPort = DefaultWorkerSSHPort
+	}
+	if server.SSHUsername == "" {
+		return WorkerServer{}, fmt.Errorf("worker ssh username is required")
+	}
+	if server.SSHKeyID == "" {
+		return WorkerServer{}, fmt.Errorf("worker ssh key id is required")
+	}
+	if server.InstallProxyID == "" {
+		server.InstallProxyID = ProxyTypeDirect
+	}
+	if server.DataRoot == "" || server.DataRoot == "." {
+		server.DataRoot = DefaultWorkerDataRoot
+	}
+	if !strings.HasPrefix(server.DataRoot, "/") {
+		return WorkerServer{}, fmt.Errorf("worker data root must be an absolute path")
+	}
+	if server.Status == "" {
+		server.Status = WorkerStatusPending
+	}
+	if server.LastProbeStatus == "" {
+		server.LastProbeStatus = WorkerProbeStatusUnknown
+	}
+	return server, nil
+}
+
+func NormalizeWorkerSSHKey(key WorkerSSHKey) (WorkerSSHKey, error) {
+	key.ID = strings.TrimSpace(key.ID)
+	key.Name = strings.TrimSpace(key.Name)
+	key.Username = strings.TrimSpace(key.Username)
+	key.PublicKey = strings.TrimSpace(key.PublicKey)
+	key.Fingerprint = strings.TrimSpace(key.Fingerprint)
+	key.Comment = strings.TrimSpace(key.Comment)
+
+	if key.ID == "" {
+		return WorkerSSHKey{}, fmt.Errorf("worker ssh key id is required")
+	}
+	if key.Name == "" {
+		key.Name = key.ID
+	}
+	if key.PublicKey == "" && key.PrivateKey == "" {
+		return WorkerSSHKey{}, fmt.Errorf("worker ssh key requires a public key or private key")
+	}
+	publicKey, fingerprint, err := normalizeWorkerSSHPublicKey(key.PublicKey, key.PrivateKey, key.PrivateKeyPassphrase)
+	if err != nil {
+		return WorkerSSHKey{}, err
+	}
+	key.PublicKey = publicKey
+	key.Fingerprint = fingerprint
+	return key, nil
+}
+
+func normalizeWorkerSSHPublicKey(publicKey, privateKey, passphrase string) (string, string, error) {
+	if trimmed := strings.TrimSpace(publicKey); trimmed != "" {
+		parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(trimmed))
+		if err == nil {
+			clean := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(parsed)))
+			return clean, ssh.FingerprintSHA256(parsed), nil
+		}
+	}
+	if strings.TrimSpace(privateKey) == "" {
+		return "", "", fmt.Errorf("worker ssh public key is invalid")
+	}
+	raw, err := parseWorkerSSHPrivateKey([]byte(privateKey), []byte(passphrase))
+	if err != nil {
+		return "", "", fmt.Errorf("worker ssh private key is invalid: %w", err)
+	}
+	signer, err := ssh.NewSignerFromKey(raw)
+	if err != nil {
+		return "", "", fmt.Errorf("worker ssh private key signer is invalid: %w", err)
+	}
+	parsed := signer.PublicKey()
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(parsed))), ssh.FingerprintSHA256(parsed), nil
+}
+
+func parseWorkerSSHPrivateKey(privateKey []byte, passphrase []byte) (any, error) {
+	if len(passphrase) > 0 {
+		return ssh.ParseRawPrivateKeyWithPassphrase(privateKey, passphrase)
+	}
+	return ssh.ParseRawPrivateKey(privateKey)
+}
+
+func NormalizeWorkerInitJob(job WorkerInitJob) (WorkerInitJob, error) {
+	job.ID = strings.TrimSpace(job.ID)
+	job.WorkerID = strings.TrimSpace(job.WorkerID)
+	job.Action = strings.TrimSpace(job.Action)
+	job.Status = strings.TrimSpace(job.Status)
+	job.TriggeredBy = strings.TrimSpace(job.TriggeredBy)
+	job.LogSummary = strings.TrimSpace(job.LogSummary)
+	job.LastError = strings.TrimSpace(job.LastError)
+	if job.ID == "" {
+		return WorkerInitJob{}, fmt.Errorf("worker init job id is required")
+	}
+	if job.WorkerID == "" {
+		return WorkerInitJob{}, fmt.Errorf("worker init job worker id is required")
+	}
+	if job.Action == "" {
+		job.Action = WorkerInitActionBootstrap
+	}
+	if job.Status == "" {
+		job.Status = WorkerJobStatusQueued
+	}
+	return job, nil
+}
+
+func NormalizeCloudAgentAccount(account CloudAgentAccount) (CloudAgentAccount, error) {
+	account.ID = strings.TrimSpace(account.ID)
+	account.UserID = strings.TrimSpace(account.UserID)
+	account.WorkerID = strings.TrimSpace(account.WorkerID)
+	account.AgentType = strings.TrimSpace(account.AgentType)
+	account.ModelPublicName = strings.TrimSpace(account.ModelPublicName)
+	account.ContainerID = strings.TrimSpace(account.ContainerID)
+	account.ContainerName = strings.TrimSpace(account.ContainerName)
+	account.WorkspacePath = path.Clean(strings.TrimSpace(account.WorkspacePath))
+	account.Credential = strings.TrimSpace(account.Credential)
+	account.Status = strings.TrimSpace(account.Status)
+	account.LastError = strings.TrimSpace(account.LastError)
+	if account.ID == "" {
+		return CloudAgentAccount{}, fmt.Errorf("cloud agent account id is required")
+	}
+	if account.UserID == "" {
+		return CloudAgentAccount{}, fmt.Errorf("cloud agent account user id is required")
+	}
+	if account.WorkerID == "" {
+		return CloudAgentAccount{}, fmt.Errorf("cloud agent account worker id is required")
+	}
+	if account.AgentType == "" {
+		account.AgentType = CloudAgentTypeClaudeCode
+	}
+	if account.WorkspacePath == "" || account.WorkspacePath == "." {
+		account.WorkspacePath = DefaultCloudAgentWorkspacePath
+	}
+	if !strings.HasPrefix(account.WorkspacePath, "/") {
+		return CloudAgentAccount{}, fmt.Errorf("cloud agent workspace path must be absolute")
+	}
+	if account.Status == "" {
+		account.Status = CloudAgentStatusStopped
+	}
+	return account, nil
+}
+
+func NormalizeCloudAgentSession(session CloudAgentSession) (CloudAgentSession, error) {
+	session.ID = strings.TrimSpace(session.ID)
+	session.UserID = strings.TrimSpace(session.UserID)
+	session.WorkerID = strings.TrimSpace(session.WorkerID)
+	session.AccountID = strings.TrimSpace(session.AccountID)
+	session.AgentType = strings.TrimSpace(session.AgentType)
+	session.ChatSessionID = strings.TrimSpace(session.ChatSessionID)
+	session.WorkspacePath = path.Clean(strings.TrimSpace(session.WorkspacePath))
+	session.Status = strings.TrimSpace(session.Status)
+	session.LastError = strings.TrimSpace(session.LastError)
+	if session.ID == "" {
+		return CloudAgentSession{}, fmt.Errorf("cloud agent session id is required")
+	}
+	if session.UserID == "" {
+		return CloudAgentSession{}, fmt.Errorf("cloud agent session user id is required")
+	}
+	if session.WorkerID == "" {
+		return CloudAgentSession{}, fmt.Errorf("cloud agent session worker id is required")
+	}
+	if session.AccountID == "" {
+		return CloudAgentSession{}, fmt.Errorf("cloud agent session account id is required")
+	}
+	if session.AgentType == "" {
+		session.AgentType = CloudAgentTypeClaudeCode
+	}
+	if session.WorkspacePath == "" || session.WorkspacePath == "." {
+		session.WorkspacePath = DefaultCloudAgentWorkspacePath
+	}
+	if !strings.HasPrefix(session.WorkspacePath, "/") {
+		return CloudAgentSession{}, fmt.Errorf("cloud agent session workspace path must be absolute")
+	}
+	if session.Status == "" {
+		session.Status = CloudAgentSessionStatusPending
+	}
+	return session, nil
 }
 
 type UsageRecord struct {

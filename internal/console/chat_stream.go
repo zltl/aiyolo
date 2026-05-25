@@ -355,7 +355,7 @@ func (handler *Handler) streamChat(w http.ResponseWriter, r *http.Request) {
 		streamCancel()
 	})
 	state.Messages = append(state.Messages, buildConsoleChatMessageWithAttachments(locale, "user", state.Form.Draft, state.Form.Attachments))
-	execution, err := handler.runConsoleChatTurnWithContinuation(executionCtx, executionProtocol, target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments, true, func(delta string) error {
+	execution, err := handler.runConsoleChatTurnWithContinuation(executionCtx, executionProtocol, target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Form.ReasoningEffort, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments, true, func(delta string) error {
 		if clientDisconnected.Load() {
 			return nil
 		}
@@ -463,7 +463,7 @@ func (handler *Handler) streamChatReplace(w http.ResponseWriter, r *http.Request
 	return handler.writeChatStreamEvent(w, consoleChatStreamEvent{Type: "replace", HTML: html})
 }
 
-func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
+func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
 	prompt := strings.TrimSpace(userInput)
 	if prompt == "" && len(attachments) == 0 {
 		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest, Stream: stream}}, errors.New("message is empty")
@@ -488,7 +488,7 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 	if err != nil {
 		return consoleChatExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadGateway, Stream: stream}}, err
 	}
-	body, err := buildConsoleChatRequestBody(protocol, route, systemPrompt, history, prompt, attachments, stream)
+	body, err := buildConsoleChatRequestBody(protocol, provider, route, systemPrompt, history, prompt, attachments, stream, reasoningEffort)
 	if err != nil {
 		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest, Stream: stream}}, err
 	}
@@ -524,7 +524,7 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 	return parseConsoleChatJSONResponse(responseBody, protocol, route, provider, response.StatusCode, stream, started)
 }
 
-func runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
+func runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
 	workingHistory := cloneConsoleChatMessages(history)
 	currentPrompt := strings.TrimSpace(userInput)
 	currentAttachments := cloneConsoleChatAttachments(attachments)
@@ -563,7 +563,7 @@ func runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, pr
 			}
 		}
 
-		execution, err := runConsoleRawChatTurn(ctx, protocol, provider, route, profile, systemPrompt, workingHistory, currentPrompt, currentAttachments, stream, deltaCallback, reasoningCallback)
+		execution, err := runConsoleRawChatTurn(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, workingHistory, currentPrompt, currentAttachments, stream, deltaCallback, reasoningCallback)
 		if turnOutput.Len() == 0 {
 			turnOutput.WriteString(consoleChatContinuationContent(execution.Result))
 		}
@@ -683,8 +683,9 @@ func finalizeConsoleChatExecutionAggregate(target *consoleChatExecution, route d
 	target.Result.TotalTokens = target.Usage.TotalTokens
 }
 
-func buildConsoleChatRequestBody(protocol string, route domain.ModelRoute, systemPrompt string, history []consoleChatMessageView, prompt string, attachments []consoleChatAttachmentView, stream bool) ([]byte, error) {
+func buildConsoleChatRequestBody(protocol string, provider domain.Provider, route domain.ModelRoute, systemPrompt string, history []consoleChatMessageView, prompt string, attachments []consoleChatAttachmentView, stream bool, reasoningEffort string) ([]byte, error) {
 	upstreamModel := firstNonEmpty(route.UpstreamModel, route.PublicName)
+	appliedReasoningEffort := consoleChatAppliedReasoningEffort(route, provider, reasoningEffort)
 	switch protocol {
 	case domain.ProtocolAnthropic:
 		payload := map[string]any{
@@ -696,6 +697,10 @@ func buildConsoleChatRequestBody(protocol string, route domain.ModelRoute, syste
 		if systemPrompt = strings.TrimSpace(systemPrompt); systemPrompt != "" {
 			payload["system"] = systemPrompt
 		}
+		if appliedReasoningEffort != "" {
+			payload["thinking"] = map[string]any{"type": "enabled"}
+			payload["output_config"] = map[string]any{"effort": appliedReasoningEffort}
+		}
 		return json.Marshal(payload)
 	default:
 		payload := map[string]any{
@@ -706,6 +711,10 @@ func buildConsoleChatRequestBody(protocol string, route domain.ModelRoute, syste
 		}
 		if stream {
 			payload["stream_options"] = map[string]any{"include_usage": true}
+		}
+		if appliedReasoningEffort != "" {
+			payload["thinking"] = map[string]any{"type": "enabled"}
+			payload["reasoning_effort"] = appliedReasoningEffort
 		}
 		return json.Marshal(payload)
 	}

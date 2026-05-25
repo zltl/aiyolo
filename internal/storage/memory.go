@@ -12,18 +12,25 @@ import (
 )
 
 type MemoryStore struct {
-	mu           sync.RWMutex
-	apiKeys      map[string]domain.APIKey
-	codexTokens  map[string]domain.CodexInstallToken
-	providers    map[string]domain.Provider
-	routes       map[string]domain.ModelRoute
-	pricingRules map[string]domain.PricingRule
-	proxies      map[string]domain.ProxyProfile
-	consoleAuth  *domain.ConsoleAuthSettings
-	chatSessions map[string]domain.ConsoleChatSession
-	usage        []domain.UsageRecord
-	limits       map[string]memoryLimitWindow
-	reservations map[string]domain.QuotaReservation
+	mu                 sync.RWMutex
+	apiKeys            map[string]domain.APIKey
+	codexTokens        map[string]domain.CodexInstallToken
+	providers          map[string]domain.Provider
+	routes             map[string]domain.ModelRoute
+	pricingRules       map[string]domain.PricingRule
+	proxies            map[string]domain.ProxyProfile
+	workerSSHKeys      map[string]domain.WorkerSSHKey
+	workers            map[string]domain.WorkerServer
+	workerDisks        map[string][]domain.WorkerDataDisk
+	workerJobs         map[string]domain.WorkerInitJob
+	workerJobEvents    map[string][]domain.WorkerInitJobEvent
+	cloudAgentAccounts map[string]domain.CloudAgentAccount
+	cloudAgentSessions map[string]domain.CloudAgentSession
+	consoleAuth        *domain.ConsoleAuthSettings
+	chatSessions       map[string]domain.ConsoleChatSession
+	usage              []domain.UsageRecord
+	limits             map[string]memoryLimitWindow
+	reservations       map[string]domain.QuotaReservation
 }
 
 type memoryLimitWindow struct {
@@ -33,15 +40,22 @@ type memoryLimitWindow struct {
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		apiKeys:      make(map[string]domain.APIKey),
-		codexTokens:  make(map[string]domain.CodexInstallToken),
-		providers:    make(map[string]domain.Provider),
-		routes:       make(map[string]domain.ModelRoute),
-		pricingRules: make(map[string]domain.PricingRule),
-		proxies:      make(map[string]domain.ProxyProfile),
-		chatSessions: make(map[string]domain.ConsoleChatSession),
-		limits:       make(map[string]memoryLimitWindow),
-		reservations: make(map[string]domain.QuotaReservation),
+		apiKeys:            make(map[string]domain.APIKey),
+		codexTokens:        make(map[string]domain.CodexInstallToken),
+		providers:          make(map[string]domain.Provider),
+		routes:             make(map[string]domain.ModelRoute),
+		pricingRules:       make(map[string]domain.PricingRule),
+		proxies:            make(map[string]domain.ProxyProfile),
+		workerSSHKeys:      make(map[string]domain.WorkerSSHKey),
+		workers:            make(map[string]domain.WorkerServer),
+		workerDisks:        make(map[string][]domain.WorkerDataDisk),
+		workerJobs:         make(map[string]domain.WorkerInitJob),
+		workerJobEvents:    make(map[string][]domain.WorkerInitJobEvent),
+		cloudAgentAccounts: make(map[string]domain.CloudAgentAccount),
+		cloudAgentSessions: make(map[string]domain.CloudAgentSession),
+		chatSessions:       make(map[string]domain.ConsoleChatSession),
+		limits:             make(map[string]memoryLimitWindow),
+		reservations:       make(map[string]domain.QuotaReservation),
 	}
 }
 

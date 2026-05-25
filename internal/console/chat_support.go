@@ -27,16 +27,18 @@ const (
 )
 
 type consoleChatRouteView struct {
-	PublicName    string
-	ProviderID    string
-	ProviderName  string
-	UpstreamModel string
-	Protocol      string
+	PublicName       string
+	ProviderID       string
+	ProviderName     string
+	UpstreamModel    string
+	Protocol         string
+	ReasoningEfforts []string
 }
 
 type consoleChatFormView struct {
 	ClientSessionID string                      `json:"clientSessionId"`
 	PublicName      string                      `json:"publicName"`
+	ReasoningEffort string                      `json:"reasoningEffort,omitempty"`
 	SystemPrompt    string                      `json:"systemPrompt"`
 	Draft           string                      `json:"draft"`
 	Attachments     []consoleChatAttachmentView `json:"attachments,omitempty"`
@@ -67,6 +69,7 @@ type consoleChatPromptView struct {
 }
 
 var consoleChatAllowedExactModels = []string{"deepseek-v4-pro", "gpt-5.4"}
+var consoleChatDeepSeekReasoningEfforts = []string{"high", "max"}
 
 func consoleChatCompletionTokens(route domain.ModelRoute) int {
 	modelID := strings.ToLower(strings.TrimSpace(firstNonEmpty(route.UpstreamModel, route.PublicName)))
@@ -74,6 +77,47 @@ func consoleChatCompletionTokens(route domain.ModelRoute) int {
 		return consoleChatReasoningCompletionTokens
 	}
 	return consoleChatDefaultCompletionTokens
+}
+
+func consoleChatRouteReasoningEfforts(route domain.ModelRoute, provider domain.Provider) []string {
+	if !domain.IsDeepSeekProvider(provider) {
+		return nil
+	}
+	modelID := strings.ToLower(strings.TrimSpace(firstNonEmpty(route.UpstreamModel, route.PublicName)))
+	if !strings.Contains(modelID, "deepseek-v4-pro") {
+		return nil
+	}
+	efforts := make([]string, 0, len(consoleChatDeepSeekReasoningEfforts))
+	efforts = append(efforts, consoleChatDeepSeekReasoningEfforts...)
+	return efforts
+}
+
+func consoleChatNormalizeReasoningEffort(efforts []string, raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+	for _, effort := range efforts {
+		if raw == effort {
+			return raw
+		}
+	}
+	return ""
+}
+
+func consoleChatAppliedReasoningEffort(route domain.ModelRoute, provider domain.Provider, raw string) string {
+	return consoleChatNormalizeReasoningEffort(consoleChatRouteReasoningEfforts(route, provider), raw)
+}
+
+func consoleChatReasoningEffortLabel(locale, effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "high":
+		return "high"
+	case "max":
+		return "max"
+	default:
+		return strings.TrimSpace(effort)
+	}
 }
 
 type consoleChatResultView struct {
@@ -476,11 +520,12 @@ func consoleChatRoutes(routes []domain.ModelRoute, providers []domain.Provider) 
 			continue
 		}
 		candidate := selectedConsoleChatRoute{route: route, view: consoleChatRouteView{
-			PublicName:    route.PublicName,
-			ProviderID:    provider.ID,
-			ProviderName:  firstNonEmpty(strings.TrimSpace(provider.Name), provider.ID),
-			UpstreamModel: firstNonEmpty(route.UpstreamModel, route.PublicName),
-			Protocol:      protocol,
+			PublicName:       route.PublicName,
+			ProviderID:       provider.ID,
+			ProviderName:     firstNonEmpty(strings.TrimSpace(provider.Name), provider.ID),
+			UpstreamModel:    firstNonEmpty(route.UpstreamModel, route.PublicName),
+			Protocol:         protocol,
+			ReasoningEfforts: consoleChatRouteReasoningEfforts(route, provider),
 		}}
 		current, exists := selected[slot]
 		if exists && !shouldPreferConsoleChatRoute(route, current.route, slot) {
@@ -523,6 +568,7 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 		Form: consoleChatFormView{
 			ClientSessionID: consoleChatRequestedSessionID(r),
 			PublicName:      strings.TrimSpace(r.FormValue("chat_public_name")),
+			ReasoningEffort: strings.TrimSpace(r.FormValue("chat_reasoning_effort")),
 			SystemPrompt:    strings.TrimSpace(r.FormValue("chat_system_prompt")),
 			Draft:           strings.TrimSpace(r.FormValue("chat_draft")),
 			Attachments:     parseConsoleChatDraftAttachments(r, handler.cfg.ChatAttachments),
@@ -555,6 +601,9 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 	}
 	if selected, ok := findConsoleChatRoute(state.Routes, state.Form.PublicName); ok {
 		state.SelectedRoute = selected
+		state.Form.ReasoningEffort = consoleChatNormalizeReasoningEffort(selected.ReasoningEfforts, state.Form.ReasoningEffort)
+	} else {
+		state.Form.ReasoningEffort = ""
 	}
 	return state, nil
 }
@@ -622,7 +671,7 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	state.Messages = append(state.Messages, buildConsoleChatMessageWithAttachments(locale, openai.ChatMessageRoleUser, state.Form.Draft, state.Form.Attachments))
 	executionProtocol := handler.consoleChatExecutionProtocol(target.Route, target.Provider, state.Messages[:len(state.Messages)-1], state.Form.Attachments)
-	execution, err := handler.runConsoleChatTurn(r.Context(), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments)
+	execution, err := handler.runConsoleChatTurn(r.Context(), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Form.ReasoningEffort, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments)
 	persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, executionProtocol, target.Route, target.Provider, target.PricingRule, started, execution)
 	if err != nil {
 		state.Messages = consoleChatAppendResultMessage(locale, state.Messages, execution.Result)
@@ -640,12 +689,12 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 	handler.renderChat(w, r, state)
 }
 
-func runConsoleChatTurn(ctx context.Context, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) (consoleChatExecution, error) {
+func runConsoleChatTurn(ctx context.Context, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) (consoleChatExecution, error) {
 	protocol := consoleChatRouteProtocol(route, provider)
 	if protocol == "" {
 		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest}}, &consoleUpstreamError{StatusCode: http.StatusBadRequest, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
 	}
-	return runConsoleRawChatTurn(ctx, protocol, provider, route, profile, systemPrompt, history, userInput, attachments, false, nil, nil)
+	return runConsoleRawChatTurn(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, history, userInput, attachments, false, nil, nil)
 }
 
 func buildConsoleChatUsageRecord(requestID, userID, protocol string, route domain.ModelRoute, provider domain.Provider, pricingRule domain.PricingRule, started time.Time, execution consoleChatExecution) domain.UsageRecord {

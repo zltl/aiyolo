@@ -19,6 +19,7 @@ import (
 	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
+	workerops "github.com/zltl/aiyolo/internal/workers"
 )
 
 type Config struct {
@@ -47,6 +48,9 @@ type Handler struct {
 	tmpl                       *template.Template
 	newChatAttachmentPublisher func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error)
 	newChatAttachmentReader    func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error)
+	probeWorker                func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (workerops.ProbeResult, error)
+	buildWorkerBootstrap       func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan
+	executeWorkerBootstrap     func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error)
 }
 
 func NewHandler(cfg Config, store storage.Store) *Handler {
@@ -63,7 +67,7 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 		return artifacts.NewPublisher(cfg)
 	}, newChatAttachmentReader: func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error) {
 		return artifacts.NewObjectReader(cfg)
-	}}
+	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap}
 }
 
 func (handler *Handler) Routes() http.Handler {
@@ -105,6 +109,12 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Post("/models/test", handler.testModel)
 		protected.Get("/proxies", handler.proxies)
 		protected.Post("/proxies", handler.createProxy)
+		protected.Get("/workers", handler.workers)
+		protected.Post("/workers/ssh-keys", handler.createWorkerSSHKey)
+		protected.Post("/workers", handler.createWorkerServer)
+		protected.Post("/workers/{id}/probe", handler.probeWorkerServer)
+		protected.Post("/workers/{id}/initialize", handler.initializeWorkerServer)
+		protected.Get("/workers/{id}/jobs/{jobID}/events", handler.workerJobEvents)
 		protected.Get("/billing", handler.billing)
 		protected.Get("/users", handler.users)
 		protected.Get("/settings", handler.settings)
@@ -1036,6 +1046,7 @@ func templateFuncs() template.FuncMap {
 		"orDash":                                orDash,
 		"pairShare":                             pairShare,
 		"pageEyebrow":                           pageEyebrow,
+		"reasoningEffortLabel":                  consoleChatReasoningEffortLabel,
 		"isOpenRouterProvider":                  isOpenRouterProvider,
 		"providerProtocolSummary":               providerProtocolSummary,
 		"protocolLabel":                         protocolLabel,
@@ -1140,10 +1151,12 @@ func protocolLabel(value string) string {
 
 func statusClass(value string) string {
 	switch strings.TrimSpace(strings.ToLower(value)) {
-	case domain.StatusEnabled, domain.StatusActive:
+	case "enabled", "active", "ready", "running", "succeeded":
 		return "badge tone-good"
-	case domain.StatusDisabled:
+	case "disabled", "failed", "error":
 		return "badge tone-danger"
+	case "pending", "initializing", "queued", "starting":
+		return "badge tone-warn"
 	case "degraded":
 		return "badge tone-warn"
 	default:
@@ -1153,16 +1166,34 @@ func statusClass(value string) string {
 
 func statusText(locale, value string) string {
 	switch strings.TrimSpace(strings.ToLower(value)) {
-	case domain.StatusEnabled:
+	case "enabled":
 		return consoleText(locale, "已启用", "Enabled")
-	case domain.StatusActive:
+	case "active":
 		return consoleText(locale, "生效中", "Active")
-	case domain.StatusDisabled:
+	case "disabled":
 		return consoleText(locale, "已停用", "Disabled")
 	case "degraded":
 		return consoleText(locale, "降级", "Degraded")
 	case "ready":
 		return consoleText(locale, "就绪", "Ready")
+	case "pending":
+		return consoleText(locale, "待处理", "Pending")
+	case "initializing":
+		return consoleText(locale, "初始化中", "Initializing")
+	case "failed", "error":
+		return consoleText(locale, "失败", "Failed")
+	case "queued":
+		return consoleText(locale, "排队中", "Queued")
+	case "running":
+		return consoleText(locale, "运行中", "Running")
+	case "succeeded":
+		return consoleText(locale, "完成", "Succeeded")
+	case "stopped":
+		return consoleText(locale, "已停止", "Stopped")
+	case "starting":
+		return consoleText(locale, "启动中", "Starting")
+	case "closed":
+		return consoleText(locale, "已关闭", "Closed")
 	default:
 		return value
 	}
