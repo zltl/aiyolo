@@ -1,0 +1,18 @@
+[Unit]
+Description=AIYolo local worker runtime
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User={{ worker_runtime_user | default('aiyolo-workerd') }}
+Group={{ worker_runtime_user | default('aiyolo-workerd') }}
+WorkingDirectory={{ worker_runtime_state_root | default(worker_data_root + '/workerd') }}
+ExecStart=/usr/bin/python3 {{ worker_runtime_script_path | default('/usr/local/lib/aiyolo/aiyolo_workerd.py') }} --config {{ worker_runtime_config_path | default('/etc/aiyolo/workerd.json') }}
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

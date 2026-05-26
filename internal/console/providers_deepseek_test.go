@@ -223,7 +223,7 @@ func TestProvidersPageCanEditExistingProvider(t *testing.T) {
 	if !strings.Contains(html, `option value="disabled" selected`) {
 		t.Fatalf("provider edit form did not load status: %s", html)
 	}
-	if !strings.Contains(html, "Leave blank to keep the saved master key") {
+	if !strings.Contains(html, "留空会保留已保存主密钥；填写新值会覆盖它。") {
 		t.Fatalf("provider edit form did not show saved master key hint: %s", html)
 	}
 

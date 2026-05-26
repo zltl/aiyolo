@@ -210,7 +210,7 @@ func (handler *Handler) initializeWorkerServer(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := handler.store.AppendWorkerInitJobEvent(ctx, domain.WorkerInitJobEvent{WorkerID: worker.ID, JobID: job.ID, Message: handler.requestText(r, "开始通过 SSH 执行初始化脚本", "Starting bootstrap execution over SSH")}); err != nil {
+	if err := handler.store.AppendWorkerInitJobEvent(ctx, domain.WorkerInitJobEvent{WorkerID: worker.ID, JobID: job.ID, Message: handler.requestText(r, "开始通过 Ansible over SSH 执行初始化", "Starting bootstrap execution with Ansible over SSH")}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -232,6 +232,35 @@ func (handler *Handler) initializeWorkerServer(w http.ResponseWriter, r *http.Re
 	job.CompletedAt = &completedAt
 	notice := handler.requestText(r, "初始化完成", "Initialization completed")
 	errorMessage := ""
+	var health workerops.BootstrapHealth
+	if execErr == nil {
+		if err := handler.store.AppendWorkerInitJobEvent(ctx, domain.WorkerInitJobEvent{WorkerID: worker.ID, JobID: job.ID, Message: handler.requestText(r, "开始执行初始化后的健康检查", "Running post-bootstrap health verification")}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		health, execErr = handler.verifyWorkerBootstrap(ctx, worker, key)
+		if execErr == nil {
+			healthPayload, err := json.Marshal(health)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			trimmedHealth := strings.TrimSpace(string(healthPayload))
+			if trimmedHealth != "" {
+				if strings.TrimSpace(job.LogSummary) == "" {
+					job.LogSummary = trimmedHealth
+				} else {
+					job.LogSummary += "\n\n# Post-init health\n" + trimmedHealth
+				}
+				for _, line := range workerInitOutputLines(trimmedHealth) {
+					if err := handler.store.AppendWorkerInitJobEvent(ctx, domain.WorkerInitJobEvent{WorkerID: worker.ID, JobID: job.ID, Message: line}); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+				}
+			}
+		}
+	}
 	if execErr != nil {
 		job.Status = domain.WorkerJobStatusFailed
 		job.LastError = strings.TrimSpace(execErr.Error())

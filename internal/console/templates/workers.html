@@ -116,7 +116,7 @@
         <label class="field span-2">
           <span class="field-label">{{msg .Locale "数据盘" "Data disks"}}</span>
           <textarea name="data_disks" rows="4" placeholder="/dev/vdb /srv/aiyolo&#10;/dev/vdc /mnt/build-cache">{{.WorkerServerForm.DataDisksText}}</textarea>
-          <span class="field-help">{{msg .Locale "每行一块盘：`设备 挂载点`。当前只做显式登记，不会自动格式化。" "One disk per line in the form `device mount-path`. This only records explicit selections and does not auto-format anything yet."}}</span>
+          <span class="field-help">{{msg .Locale "每行一块盘：`设备 挂载点`。初始化时会为未格式化磁盘创建 ext4、写入持久挂载并完成挂载。" "One disk per line in the form `device mount-path`. Initialization formats blank disks as ext4, writes a persistent mount, and mounts them."}}</span>
         </label>
         <div class="field span-2">
           <div class="chip-row">

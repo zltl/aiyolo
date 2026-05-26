@@ -2,14 +2,11 @@ package console
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 )
 
 const (
-	consoleLocaleCookieName = "aiyolo_console_locale"
-	consoleLocaleZH         = "zh-CN"
-	consoleLocaleEN         = "en"
+	consoleLocaleZH = "zh-CN"
 )
 
 type navItemView struct {
@@ -22,29 +19,8 @@ type navItemView struct {
 	Tone   string
 }
 
-type localeOptionView struct {
-	Code   string
-	Label  string
-	Href   string
-	Active bool
-}
-
 func consoleText(locale, zh, en string) string {
-	if normalizeConsoleLocale(locale) == consoleLocaleEN {
-		return en
-	}
 	return zh
-}
-
-func normalizeConsoleLocale(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "en", "en-us", "en-gb":
-		return consoleLocaleEN
-	case "zh", "zh-cn", "zh-hans", "zh-sg", "zh-hk", "zh-tw":
-		return consoleLocaleZH
-	default:
-		return ""
-	}
 }
 
 func resolveConsoleLocale(r *http.Request) string {
@@ -57,14 +33,6 @@ func sanitizeConsoleNext(next string) string {
 		return "/console/"
 	}
 	return next
-}
-
-func localeSwitches(currentURI, locale string) []localeOptionView {
-	currentURI = sanitizeConsoleNext(currentURI)
-	return []localeOptionView{
-		{Code: consoleLocaleZH, Label: "中", Href: "/console/locale?lang=" + url.QueryEscape(consoleLocaleZH) + "&next=" + url.QueryEscape(currentURI), Active: locale == consoleLocaleZH},
-		{Code: consoleLocaleEN, Label: "EN", Href: "/console/locale?lang=" + url.QueryEscape(consoleLocaleEN) + "&next=" + url.QueryEscape(currentURI), Active: locale == consoleLocaleEN},
-	}
 }
 
 func consoleNavItems(locale string) []navItemView {

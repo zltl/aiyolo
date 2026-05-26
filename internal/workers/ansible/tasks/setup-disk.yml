@@ -1,0 +1,76 @@
+- name: Ensure declared mount path exists
+  ansible.builtin.file:
+    path: "{{ worker_disk.mount_path }}"
+    state: directory
+    mode: "0755"
+
+- name: Probe current filesystem type for worker disk
+  ansible.builtin.command:
+    argv:
+      - lsblk
+      - -nr
+      - -o
+      - FSTYPE
+      - "{{ worker_disk.device_path }}"
+  register: worker_disk_fstype_probe
+  changed_when: false
+
+- name: Probe current mountpoint for worker disk
+  ansible.builtin.command:
+    argv:
+      - lsblk
+      - -nr
+      - -o
+      - MOUNTPOINT
+      - "{{ worker_disk.device_path }}"
+  register: worker_disk_mountpoint_probe
+  changed_when: false
+
+- name: Refuse disks mounted somewhere else
+  ansible.builtin.assert:
+    that:
+      - worker_disk_mountpoint_probe.stdout | trim in ['', worker_disk.mount_path]
+    fail_msg: "worker data disk {{ worker_disk.device_path }} is already mounted at {{ worker_disk_mountpoint_probe.stdout | trim }}"
+
+- name: Format previously blank worker disk as ext4
+  community.general.filesystem:
+    dev: "{{ worker_disk.device_path }}"
+    fstype: ext4
+  when: worker_disk_fstype_probe.stdout | trim == ''
+
+- name: Refresh filesystem type after optional formatting
+  ansible.builtin.command:
+    argv:
+      - lsblk
+      - -nr
+      - -o
+      - FSTYPE
+      - "{{ worker_disk.device_path }}"
+  register: worker_disk_fstype_current
+  changed_when: false
+
+- name: Require worker disk filesystem to be detectable
+  ansible.builtin.assert:
+    that:
+      - worker_disk_fstype_current.stdout | trim != ''
+    fail_msg: "worker data disk {{ worker_disk.device_path }} does not have a detectable filesystem"
+
+- name: Read worker disk UUID
+  ansible.builtin.command:
+    argv:
+      - blkid
+      - -o
+      - value
+      - -s
+      - UUID
+      - "{{ worker_disk.device_path }}"
+  register: worker_disk_uuid_probe
+  changed_when: false
+
+- name: Mount worker disk persistently
+  ansible.posix.mount:
+    path: "{{ worker_disk.mount_path }}"
+    src: "{{ 'UUID=' + (worker_disk_uuid_probe.stdout | trim) if worker_disk_uuid_probe.stdout | trim != '' else worker_disk.device_path }}"
+    fstype: "{{ worker_disk_fstype_current.stdout | trim }}"
+    opts: defaults,nofail
+    state: mounted

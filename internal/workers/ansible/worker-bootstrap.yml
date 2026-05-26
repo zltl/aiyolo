@@ -1,0 +1,364 @@
+- name: Bootstrap AIYolo worker host
+  hosts: worker
+  become: true
+  gather_facts: true
+  vars:
+    worker_environment: "{{ worker_proxy_env | default({}) | combine({'DEBIAN_FRONTEND': 'noninteractive'}) }}"
+    docker_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+    docker_packages:
+      - ca-certificates
+      - curl
+      - e2fsprogs
+      - gnupg
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+
+  pre_tasks:
+    - name: Require Ubuntu worker target
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - worker_expected_ubuntu_version | trim == '' or ansible_facts['distribution_version'] == worker_expected_ubuntu_version
+        fail_msg: "expected Ubuntu {{ worker_expected_ubuntu_version }}, got {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+
+  tasks:
+    - name: Refresh apt cache for bootstrap prerequisite packages
+      ansible.builtin.command:
+        argv:
+          - apt-get
+          - update
+      changed_when: false
+      environment: "{{ worker_environment }}"
+
+    - name: Install bootstrap prerequisite packages
+      ansible.builtin.command:
+        argv:
+          - apt-get
+          - install
+          - -y
+          - ca-certificates
+          - curl
+          - e2fsprogs
+          - gnupg
+      register: bootstrap_prerequisite_install
+      changed_when: "'0 upgraded, 0 newly installed, 0 to remove' not in (bootstrap_prerequisite_install.stdout | default(''))"
+      environment: "{{ worker_environment }}"
+
+    - name: Ensure Docker apt keyring directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker apt signing key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+      environment: "{{ worker_environment }}"
+
+    - name: Convert Docker apt signing key to keyring format
+      ansible.builtin.command:
+        argv:
+          - gpg
+          - --dearmor
+          - --yes
+          - --output
+          - /etc/apt/keyrings/docker.gpg
+          - /etc/apt/keyrings/docker.asc
+
+    - name: Ensure Docker apt signing key permissions
+      ansible.builtin.file:
+        path: /etc/apt/keyrings/docker.gpg
+        state: file
+        mode: "0644"
+
+    - name: Configure Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ docker_arch_map.get(ansible_facts['architecture'], ansible_facts['architecture']) }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable"
+        filename: docker
+        state: present
+      environment: "{{ worker_environment }}"
+
+    - name: Refresh apt cache for Docker repository
+      ansible.builtin.command:
+        argv:
+          - apt-get
+          - update
+      changed_when: false
+      environment: "{{ worker_environment }}"
+
+    - name: Install Docker engine packages
+      ansible.builtin.command:
+        argv:
+          - apt-get
+          - install
+          - -y
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+      register: docker_package_install
+      changed_when: "'0 upgraded, 0 newly installed, 0 to remove' not in (docker_package_install.stdout | default(''))"
+      environment: "{{ worker_environment }}"
+
+    - name: Ensure Docker systemd override directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        mode: "0755"
+      when: worker_proxy_env | default({}) | length > 0
+
+    - name: Configure Docker proxy environment
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/docker.service.d/http-proxy.conf
+        mode: "0644"
+        content: |
+          [Service]
+          {% for key in docker_proxy_env_keys | default([]) %}
+          Environment="{{ key }}={{ worker_proxy_env[key] }}"
+          {% endfor %}
+      when: worker_proxy_env | default({}) | length > 0
+
+    - name: Remove Docker proxy environment override for direct access
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d/http-proxy.conf
+        state: absent
+      when: worker_proxy_env | default({}) | length == 0
+
+    - name: Initialize and mount declared worker data disks
+      ansible.builtin.include_tasks: tasks/setup-disk.yml
+      loop: "{{ worker_data_disks | default([]) }}"
+      loop_control:
+        loop_var: worker_disk
+
+    - name: Ensure worker data root exists
+      ansible.builtin.file:
+        path: "{{ worker_data_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Ensure Docker configuration directory exists
+      ansible.builtin.file:
+        path: /etc/docker
+        state: directory
+        mode: "0755"
+
+    - name: Ensure Docker data root exists
+      ansible.builtin.file:
+        path: "{{ worker_docker_data_root }}"
+        state: directory
+        mode: "0711"
+
+    - name: Detect current Docker root directory
+      ansible.builtin.shell: |
+        set -eu
+        if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; then
+          docker info --format '{{ "{{.DockerRootDir}}" }}'
+        else
+          printf '/var/lib/docker'
+        fi
+      args:
+        executable: /bin/bash
+      register: docker_current_root
+      changed_when: false
+
+    - name: Stop Docker before data-root migration
+      ansible.builtin.systemd_service:
+        name: docker
+        state: stopped
+      when: docker_current_root.stdout | trim != worker_docker_data_root
+
+    - name: Migrate Docker data root onto worker data volume
+      ansible.builtin.shell: |
+        set -eu
+        src={{ (docker_current_root.stdout | trim) | to_json }}
+        dst={{ worker_docker_data_root | to_json }}
+        if [ "$src" = "$dst" ]; then
+          printf 'unchanged'
+          exit 0
+        fi
+        mkdir -p "$dst"
+        if [ -d "$src" ] && find "$src" -mindepth 1 -maxdepth 1 | read -r _; then
+          if find "$dst" -mindepth 1 -maxdepth 1 | read -r _; then
+            printf 'target-populated'
+          else
+            cp -a "$src"/. "$dst"/
+            printf 'migrated'
+          fi
+        else
+          printf 'empty-source'
+        fi
+      args:
+        executable: /bin/bash
+      register: docker_data_root_migration
+      changed_when: docker_data_root_migration.stdout | trim == 'migrated'
+
+    - name: Persist Docker daemon data root
+      ansible.builtin.shell: |
+        python3 - <<'PY'
+        import json
+        import os
+
+        path = "/etc/docker/daemon.json"
+        target = {{ worker_docker_data_root | to_json }}
+        data = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = handle.read().strip()
+            if raw:
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    raise SystemExit("docker daemon config must be a JSON object")
+        if data.get("data-root") == target:
+            raise SystemExit(100)
+        data["data-root"] = target
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=True, indent=2, sort_keys=True)
+            handle.write("\n")
+        PY
+      register: docker_daemon_config
+      changed_when: docker_daemon_config.rc == 0
+      failed_when: docker_daemon_config.rc not in [0, 100]
+
+    - name: Ensure worker runtime group exists
+      ansible.builtin.group:
+        name: "{{ worker_runtime_user }}"
+        system: true
+
+    - name: Ensure worker runtime user exists
+      ansible.builtin.user:
+        name: "{{ worker_runtime_user }}"
+        group: "{{ worker_runtime_user }}"
+        home: "{{ worker_runtime_state_root }}"
+        create_home: false
+        system: true
+        shell: /usr/sbin/nologin
+
+    - name: Ensure runtime directories exist
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "/etc/aiyolo", owner: "root", group: "root", mode: "0755" }
+        - { path: "/usr/local/lib/aiyolo", owner: "root", group: "root", mode: "0755" }
+        - { path: "{{ worker_runtime_state_root }}", owner: "{{ worker_runtime_user }}", group: "{{ worker_runtime_user }}", mode: "0755" }
+        - { path: "{{ worker_workspace_root }}", owner: "{{ worker_runtime_user }}", group: "{{ worker_runtime_user }}", mode: "0755" }
+
+    - name: Render worker runtime configuration
+      ansible.builtin.template:
+        src: templates/workerd.json.j2
+        dest: "{{ worker_runtime_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install worker runtime script
+      ansible.builtin.template:
+        src: templates/aiyolo-workerd.py.j2
+        dest: "{{ worker_runtime_script_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install worker runtime systemd unit
+      ansible.builtin.template:
+        src: templates/aiyolo-workerd.service.j2
+        dest: "/etc/systemd/system/{{ worker_runtime_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd after worker changes
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Ensure Docker service is enabled and restarted
+      ansible.builtin.systemd_service:
+        name: docker
+        enabled: true
+        state: restarted
+
+    - name: Verify Docker data root after restart
+      ansible.builtin.command:
+        argv:
+          - docker
+          - info
+          - --format
+          - "{{.DockerRootDir}}"
+      register: docker_root_verification
+      changed_when: false
+
+    - name: Require Docker data root on worker data volume
+      ansible.builtin.assert:
+        that:
+          - docker_root_verification.stdout | trim == worker_docker_data_root
+        fail_msg: "docker data root {{ docker_root_verification.stdout | trim }} did not move to {{ worker_docker_data_root }}"
+
+    - name: Remove old Docker data root contents after migration
+      ansible.builtin.shell: |
+        set -eu
+        src={{ (docker_current_root.stdout | trim) | to_json }}
+        dst={{ worker_docker_data_root | to_json }}
+        if [ "$src" = "$dst" ] || [ ! -d "$src" ]; then
+          printf 'unchanged'
+          exit 0
+        fi
+        if find "$src" -mindepth 1 -maxdepth 1 | read -r _; then
+          find "$src" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          printf 'cleaned'
+        else
+          printf 'already-empty'
+        fi
+      args:
+        executable: /bin/bash
+      when: docker_root_verification.stdout | trim == worker_docker_data_root
+      register: docker_source_cleanup
+      changed_when: docker_source_cleanup.stdout | trim == 'cleaned'
+
+    - name: Ensure worker runtime service is enabled and restarted
+      ansible.builtin.systemd_service:
+        name: "{{ worker_runtime_service_name }}"
+        enabled: true
+        state: restarted
+
+    - name: Wait for worker runtime port
+      ansible.builtin.wait_for:
+        host: "{{ worker_runtime_listen_host }}"
+        port: "{{ worker_runtime_listen_port }}"
+        timeout: 15
+
+    - name: Query worker runtime health endpoint
+      ansible.builtin.uri:
+        url: "{{ worker_runtime_health_url }}"
+        return_content: true
+      register: worker_runtime_health
+
+    - name: Require worker runtime to be ready
+      ansible.builtin.assert:
+        that:
+          - worker_runtime_health.status == 200
+          - worker_runtime_health.json.status == 'ready'
+          - worker_runtime_health.json.worker_id == worker_id
+          - worker_runtime_health.json.data_root == worker_data_root
+          - worker_runtime_health.json.workspace_root == worker_workspace_root
+          - worker_runtime_health.json.docker_socket_exists | bool
+        fail_msg: "{{ worker_runtime_health.content | default('worker runtime health check failed') }}"
+
+    - name: Emit bootstrap summary
+      ansible.builtin.debug:
+        msg:
+          - "worker={{ worker_id }}"
+          - "data_root={{ worker_data_root }}"
+          - "mount_paths={{ worker_mount_paths | default([]) | join(', ') if worker_mount_paths | default([]) | length > 0 else 'none' }}"
+          - "runtime={{ worker_runtime_service_name }}"
+          - "workspace_root={{ worker_workspace_root }}"

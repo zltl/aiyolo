@@ -927,7 +927,7 @@ func TestConsoleModelRouteTestBox(t *testing.T) {
 	if !strings.Contains(html, "ok from openrouter test") {
 		t.Fatalf("test response missing assistant output: %s", html)
 	}
-	if !strings.Contains(html, "Test succeeded") {
+	if !strings.Contains(html, "测试成功，已从上游拿到响应。") {
 		t.Fatalf("success message missing: %s", html)
 	}
 	usage, err := store.ListUsage(ctx, 5)
@@ -1156,7 +1156,7 @@ func TestConsoleChatPageIsPrimaryEntry(t *testing.T) {
 	if strings.Contains(html, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
 		t.Fatalf("advanced chat settings should be collapsed by default: %s", html)
 	}
-	if !strings.Contains(html, "You are an AI assistant provided by AIYolo.") {
+	if !strings.Contains(html, "你正在 AIYolo 提供的 AI 助手") {
 		t.Fatalf("default production system prompt missing from chat page: %s", html)
 	}
 	if strings.Contains(html, "legacy-ops-chat") {
@@ -1834,7 +1834,7 @@ func TestConsoleChatPageShowsReasoningWithoutFinalAnswer(t *testing.T) {
 	if !strings.Contains(html, "Inspect route weights before selecting a provider.") {
 		t.Fatalf("reasoning missing from chat html: %s", html)
 	}
-	if !strings.Contains(html, "The model returned reasoning but no final answer text.") {
+	if !strings.Contains(html, "模型只返回了思考过程，没有返回最终答复。") {
 		t.Fatalf("reasoning-only placeholder missing from chat html: %s", html)
 	}
 	if !strings.Contains(html, "chat-reasoning") {
@@ -2187,13 +2187,13 @@ func TestConsoleChatStreamEndpointEmitsReasoningAndPlaceholder(t *testing.T) {
 	if reasoningText.String() != "Inspect route weights. Check provider health." {
 		t.Fatalf("unexpected streamed reasoning text: %q", reasoningText.String())
 	}
-	if doneResult == nil || doneResult.Output != "The model returned reasoning but no final answer text." || doneResult.TotalTokens != 11 {
+	if doneResult == nil || doneResult.Output != "模型只返回了思考过程，没有返回最终答复。" || doneResult.TotalTokens != 11 {
 		t.Fatalf("unexpected reasoning done event: %+v", doneResult)
 	}
 	if !strings.Contains(replaceHTML, "Inspect route weights. Check provider health.") {
 		t.Fatalf("stream replacement html missing reasoning: %s", replaceHTML)
 	}
-	if !strings.Contains(replaceHTML, "The model returned reasoning but no final answer text.") {
+	if !strings.Contains(replaceHTML, "模型只返回了思考过程，没有返回最终答复。") {
 		t.Fatalf("stream replacement html missing reasoning-only placeholder: %s", replaceHTML)
 	}
 	usage, err := store.ListUsage(ctx, 5)
@@ -2459,7 +2459,7 @@ func TestConsoleChatStreamEndpointEmitsErrorEventWithPartialOutput(t *testing.T)
 			replaceHTML = events[index].HTML
 		}
 	}
-	if errorEvent == nil || !strings.Contains(errorEvent.Error, "Chat failed:") {
+	if errorEvent == nil || !strings.Contains(errorEvent.Error, "对话失败：") {
 		t.Fatalf("expected error event, got %+v", events)
 	}
 	if !strings.Contains(errorEvent.Error, "completion marker") {
@@ -2736,7 +2736,7 @@ func TestConsoleDirectProxyResourceCannotBeEdited(t *testing.T) {
 	if strings.Contains(pageHTML, `href="/console/proxies?edit_proxy_id=direct"`) {
 		t.Fatalf("direct proxy should not expose an edit link: %s", pageHTML)
 	}
-	if !strings.Contains(pageHTML, "Built-in direct, not editable") {
+	if !strings.Contains(pageHTML, "内置直连，不可编辑") {
 		t.Fatalf("direct proxy should be marked as locked: %s", pageHTML)
 	}
 
@@ -2759,7 +2759,7 @@ func TestConsoleDirectProxyResourceCannotBeEdited(t *testing.T) {
 	if strings.Contains(editHTML, `name="id" value="direct" readonly`) {
 		t.Fatalf("direct proxy should not load into edit mode: %s", editHTML)
 	}
-	if !strings.Contains(editHTML, "The built-in direct profile cannot be edited") {
+	if !strings.Contains(editHTML, "内置 direct Profile 不可编辑") {
 		t.Fatalf("direct edit attempt should show an error: %s", editHTML)
 	}
 
@@ -2785,7 +2785,7 @@ func TestConsoleDirectProxyResourceCannotBeEdited(t *testing.T) {
 		t.Fatalf("direct update status=%d body=%s", updateResponse.StatusCode, body)
 	}
 	updateBody, _ := io.ReadAll(updateResponse.Body)
-	if !strings.Contains(string(updateBody), "The built-in direct profile cannot be edited") {
+	if !strings.Contains(string(updateBody), "内置 direct Profile 不可编辑") {
 		t.Fatalf("unexpected direct update error: %s", updateBody)
 	}
 

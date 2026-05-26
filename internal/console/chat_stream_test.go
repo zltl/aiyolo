@@ -568,19 +568,14 @@ func TestConsoleChatStreamFailureDetailClassifiesIdleTimeout(t *testing.T) {
 	}
 
 	detail := handler.consoleChatStreamFailureDetail(request, err, domain.Provider{TimeoutSeconds: 30, StreamIdleTimeoutSeconds: 15}, domain.ProxyProfile{})
-	if !strings.Contains(detail, "15-second stream idle timeout") {
+	if !strings.Contains(detail, "15 秒的流空闲超时") {
 		t.Fatalf("unexpected timeout detail: %q", detail)
 	}
 }
 
 func TestConsoleChatDisplayOutputUsesReasoningPlaceholder(t *testing.T) {
-	output := consoleChatDisplayOutput("en", consoleChatResultView{Output: consoleChatEmptyOutput, Reasoning: "Inspect route weights."})
-	if output != "The model returned reasoning but no final answer text." {
+	output := consoleChatDisplayOutput("zh-CN", consoleChatResultView{Output: consoleChatEmptyOutput, Reasoning: "先检查权重。"})
+	if output != "模型只返回了思考过程，没有返回最终答复。" {
 		t.Fatalf("unexpected display output: %q", output)
-	}
-
-	zhOutput := consoleChatDisplayOutput("zh-CN", consoleChatResultView{Output: consoleChatEmptyOutput, Reasoning: "先检查权重。"})
-	if zhOutput != "模型只返回了思考过程，没有返回最终答复。" {
-		t.Fatalf("unexpected localized display output: %q", zhOutput)
 	}
 }

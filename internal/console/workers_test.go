@@ -59,6 +59,15 @@ func TestWorkersHandlersCreateProbeAndInitialize(t *testing.T) {
 		}
 		return "docker installed", nil
 	}
+	handler.verifyWorkerBootstrap = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error) {
+		return workerops.BootstrapHealth{
+			Status:             "ready",
+			WorkerID:           worker.ID,
+			DataRoot:           worker.DataRoot,
+			WorkspaceRoot:      worker.DataRoot + "/workspace",
+			DockerSocketExists: true,
+		}, nil
+	}
 
 	router := chi.NewRouter()
 	router.Mount("/console", handler.Routes())
@@ -152,7 +161,7 @@ func TestWorkersHandlersCreateProbeAndInitialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job.Status != domain.WorkerJobStatusSucceeded || job.StartedAt == nil || job.CompletedAt == nil || !strings.Contains(job.LogSummary, "docker installed") {
+	if job.Status != domain.WorkerJobStatusSucceeded || job.StartedAt == nil || job.CompletedAt == nil || !strings.Contains(job.LogSummary, "docker installed") || !strings.Contains(job.LogSummary, `"status":"ready"`) {
 		t.Fatalf("unexpected init job: %+v", job)
 	}
 	eventsResponse, err := client.Get(server.URL + "/console/workers/worker-1/jobs/" + worker.LastInitJobID + "/events")
@@ -180,6 +189,16 @@ func TestWorkersHandlersCreateProbeAndInitialize(t *testing.T) {
 	}
 	if !foundExecutionComplete {
 		t.Fatalf("expected execution completion event, got %+v", events)
+	}
+	foundHealthVerification := false
+	for _, event := range events {
+		if strings.Contains(event.Message, "post-bootstrap health verification") || strings.Contains(event.Message, "初始化后的健康检查") {
+			foundHealthVerification = true
+			break
+		}
+	}
+	if !foundHealthVerification {
+		t.Fatalf("expected health verification event, got %+v", events)
 	}
 	pageResponse, err := client.Get(server.URL + "/console/workers")
 	if err != nil {
@@ -270,6 +289,89 @@ func TestWorkersHandlerInitializeFailureMarksJobFailed(t *testing.T) {
 	}
 	if job.Status != domain.WorkerJobStatusFailed || job.LastError != "exit status 100" || worker.Status != domain.WorkerStatusFailed {
 		t.Fatalf("unexpected failed init state worker=%+v job=%+v", worker, job)
+	}
+}
+
+func TestWorkersHandlerInitializeHealthFailureMarksJobFailed(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(Config{SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password"}, store)
+	handler.probeWorker = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (workerops.ProbeResult, error) {
+		return workerops.ProbeResult{OSName: "Ubuntu 26.04 LTS", UbuntuVersion: "26.04", DockerInstalled: true, ProxyReachable: true, DataRootWritable: true, CheckedAt: time.Now().UTC()}, nil
+	}
+	handler.buildWorkerBootstrap = func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan {
+		return workerops.BootstrapPlan{Summary: "bootstrap plan ready", Script: "# ansible preview\nruntime=aiyolo-workerd\n"}
+	}
+	handler.executeWorkerBootstrap = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error) {
+		return "runtime installed", nil
+	}
+	handler.verifyWorkerBootstrap = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error) {
+		return workerops.BootstrapHealth{}, errors.New("readyz returned 503")
+	}
+
+	router := chi.NewRouter()
+	router.Mount("/console", handler.Routes())
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sshKeyResponse, err := client.PostForm(server.URL+"/console/workers/ssh-keys", url.Values{"id": {"ssh-key-1"}, "name": {"Primary Key"}, "private_key": {mustGenerateWorkersPrivateKeyPEM(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sshKeyResponse.Body.Close()
+	if sshKeyResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(sshKeyResponse.Body)
+		t.Fatalf("ssh key create status=%d body=%s", sshKeyResponse.StatusCode, body)
+	}
+	workerResponse, err := client.PostForm(server.URL+"/console/workers", url.Values{"id": {"worker-1"}, "name": {"Tokyo GPU"}, "expected_ubuntu_version": {"26.04"}, "ssh_host": {"10.0.0.9"}, "ssh_port": {"22"}, "ssh_username": {"ubuntu"}, "ssh_key_id": {"ssh-key-1"}, "install_proxy_id": {"direct"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workerResponse.Body.Close()
+	if workerResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(workerResponse.Body)
+		t.Fatalf("worker create status=%d body=%s", workerResponse.StatusCode, body)
+	}
+	probeResponse, err := client.PostForm(server.URL+"/console/workers/worker-1/probe", url.Values{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probeResponse.Body.Close()
+	if probeResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(probeResponse.Body)
+		t.Fatalf("probe status=%d body=%s", probeResponse.StatusCode, body)
+	}
+	initResponse, err := client.PostForm(server.URL+"/console/workers/worker-1/initialize", url.Values{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer initResponse.Body.Close()
+	if initResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(initResponse.Body)
+		t.Fatalf("initialize status=%d body=%s", initResponse.StatusCode, body)
+	}
+	body, _ := io.ReadAll(initResponse.Body)
+	html := string(body)
+	if !strings.Contains(html, "readyz returned 503") {
+		t.Fatalf("expected verify error in page, got %s", html)
+	}
+	worker, err := store.GetWorkerServer(context.Background(), "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.GetWorkerInitJob(context.Background(), "worker-1", worker.LastInitJobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != domain.WorkerJobStatusFailed || job.LastError != "readyz returned 503" || worker.Status != domain.WorkerStatusFailed {
+		t.Fatalf("unexpected failed verify state worker=%+v job=%+v", worker, job)
 	}
 }
 

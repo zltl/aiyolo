@@ -17,7 +17,7 @@ func (handler *Handler) runConsoleChatTurn(ctx context.Context, provider domain.
 	if err != nil {
 		return consoleChatExecution{StatusCode: 502, Usage: domain.UsageRecord{Currency: "USD", StatusCode: 502}}, err
 	}
-	return runConsoleRawChatTurn(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, preparedHistory, userInput, preparedAttachments, false, nil, nil)
+	return runConsoleChatTurnWithContinuation(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, preparedHistory, userInput, preparedAttachments, false, nil, nil)
 }
 
 func (handler *Handler) runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {

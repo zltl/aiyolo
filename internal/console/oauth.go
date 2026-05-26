@@ -161,15 +161,15 @@ func (handler *Handler) settingsTemplateData(ctx context.Context, r *http.Reques
 		})
 	}
 	return map[string]any{
-		"Title":               "Settings",
-		"Notice":              notice,
-		"Error":               errorMessage,
+		"Title":                "Settings",
+		"Notice":               notice,
+		"Error":                errorMessage,
 		"LocalPasswordEnabled": settings.LocalPasswordEnabled,
-		"AllowedEmailsText":   strings.Join(settings.AllowedEmails, "\n"),
-		"AllowedDomainsText":  strings.Join(settings.AllowedDomains, "\n"),
-		"AdminEmail":          handler.cfg.AdminEmail,
-		"AuthProviders":       providers,
-		"UserDirectory":       userDirectory,
+		"AllowedEmailsText":    strings.Join(settings.AllowedEmails, "\n"),
+		"AllowedDomainsText":   strings.Join(settings.AllowedDomains, "\n"),
+		"AdminEmail":           handler.cfg.AdminEmail,
+		"AuthProviders":        providers,
+		"UserDirectory":        userDirectory,
 	}, nil
 }
 

@@ -694,7 +694,7 @@ func runConsoleChatTurn(ctx context.Context, provider domain.Provider, route dom
 	if protocol == "" {
 		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest}}, &consoleUpstreamError{StatusCode: http.StatusBadRequest, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
 	}
-	return runConsoleRawChatTurn(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, history, userInput, attachments, false, nil, nil)
+	return runConsoleChatTurnWithContinuation(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, history, userInput, attachments, false, nil, nil)
 }
 
 func buildConsoleChatUsageRecord(requestID, userID, protocol string, route domain.ModelRoute, provider domain.Provider, pricingRule domain.PricingRule, started time.Time, execution consoleChatExecution) domain.UsageRecord {

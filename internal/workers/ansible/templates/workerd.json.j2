@@ -1,0 +1,8 @@
+{
+  "worker_id": {{ worker_id | to_json }},
+  "data_root": {{ worker_data_root | to_json }},
+  "workspace_root": {{ worker_workspace_root | default(worker_data_root + '/workspace') | to_json }},
+  "listen_host": {{ worker_runtime_listen_host | default('127.0.0.1') | to_json }},
+  "listen_port": {{ worker_runtime_listen_port | default(17810) | to_json }},
+  "service_name": {{ worker_runtime_service_name | default('aiyolo-workerd') | to_json }}
+}

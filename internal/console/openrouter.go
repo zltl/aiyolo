@@ -57,40 +57,40 @@ type openRouterSyncSummary struct {
 }
 
 type compatibleProviderManualPricing struct {
-	Currency       string
-	InputPerMillion string
-	OutputPerMillion string
-	CacheReadPerMillion string
+	Currency             string
+	InputPerMillion      string
+	OutputPerMillion     string
+	CacheReadPerMillion  string
 	CacheWritePerMillion string
 }
 
 var deepSeekCompatibleModelPricing = map[string]compatibleProviderManualPricing{
 	"deepseek-v4-flash": {
-		Currency:            "CNY",
-		InputPerMillion:     "1",
-		OutputPerMillion:    "2",
-		CacheReadPerMillion: "0.02",
+		Currency:             "CNY",
+		InputPerMillion:      "1",
+		OutputPerMillion:     "2",
+		CacheReadPerMillion:  "0.02",
 		CacheWritePerMillion: "1",
 	},
 	"deepseek-v4-pro": {
-		Currency:            "CNY",
-		InputPerMillion:     "3",
-		OutputPerMillion:    "6",
-		CacheReadPerMillion: "0.025",
+		Currency:             "CNY",
+		InputPerMillion:      "3",
+		OutputPerMillion:     "6",
+		CacheReadPerMillion:  "0.025",
 		CacheWritePerMillion: "3",
 	},
 	"deepseek-chat": {
-		Currency:            "CNY",
-		InputPerMillion:     "1",
-		OutputPerMillion:    "2",
-		CacheReadPerMillion: "0.02",
+		Currency:             "CNY",
+		InputPerMillion:      "1",
+		OutputPerMillion:     "2",
+		CacheReadPerMillion:  "0.02",
 		CacheWritePerMillion: "1",
 	},
 	"deepseek-reasoner": {
-		Currency:            "CNY",
-		InputPerMillion:     "1",
-		OutputPerMillion:    "2",
-		CacheReadPerMillion: "0.02",
+		Currency:             "CNY",
+		InputPerMillion:      "1",
+		OutputPerMillion:     "2",
+		CacheReadPerMillion:  "0.02",
 		CacheWritePerMillion: "1",
 	},
 }
@@ -147,13 +147,13 @@ func deepSeekPricingRule(providerID, modelID string) (domain.PricingRule, bool) 
 	}
 	ruleID := openRouterPricingRuleID(providerID, trimmedModelID)
 	return domain.PricingRule{
-		ID:                             ruleID,
-		ModelAlias:                     trimmedModelID,
-		ProviderID:                     providerID,
-		Currency:                       pricing.Currency,
-		InputPricePerMillionTokens:     pricePerMillionToMicroCents(pricing.InputPerMillion),
-		OutputPricePerMillionTokens:    pricePerMillionToMicroCents(pricing.OutputPerMillion),
-		CacheReadPricePerMillionTokens: pricePerMillionToMicroCents(pricing.CacheReadPerMillion),
+		ID:                              ruleID,
+		ModelAlias:                      trimmedModelID,
+		ProviderID:                      providerID,
+		Currency:                        pricing.Currency,
+		InputPricePerMillionTokens:      pricePerMillionToMicroCents(pricing.InputPerMillion),
+		OutputPricePerMillionTokens:     pricePerMillionToMicroCents(pricing.OutputPerMillion),
+		CacheReadPricePerMillionTokens:  pricePerMillionToMicroCents(pricing.CacheReadPerMillion),
 		CacheWritePricePerMillionTokens: pricePerMillionToMicroCents(pricing.CacheWritePerMillion),
 	}, true
 }

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"path"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,38 +26,6 @@ type ProbeResult struct {
 	LSBLKJSON        string    `json:"lsblkJSON,omitempty"`
 	MountsJSON       string    `json:"mountsJSON,omitempty"`
 	CheckedAt        time.Time `json:"checkedAt"`
-}
-
-type BootstrapPlan struct {
-	ProxyEnv map[string]string `json:"proxyEnv,omitempty"`
-	Script   string            `json:"script"`
-	Summary  string            `json:"summary"`
-}
-
-func ExecuteBootstrap(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan BootstrapPlan) (string, error) {
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	default:
-	}
-	worker, err := domain.NormalizeWorkerServer(worker)
-	if err != nil {
-		return "", err
-	}
-	key, err = domain.NormalizeWorkerSSHKey(key)
-	if err != nil {
-		return "", err
-	}
-	client, err := dialSSH(worker, key)
-	if err != nil {
-		return "", err
-	}
-	defer client.Close()
-	output, err := runSSHScript(client, "bash -seu", plan.Script)
-	if err != nil {
-		return strings.TrimSpace(output), fmt.Errorf("execute bootstrap: %w", err)
-	}
-	return strings.TrimSpace(output), nil
 }
 
 func Probe(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (ProbeResult, error) {
@@ -124,71 +90,6 @@ func Probe(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKe
 	}
 
 	return result, nil
-}
-
-func BuildBootstrapPlan(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) BootstrapPlan {
-	worker, _ = domain.NormalizeWorkerServer(worker)
-	proxyEnv := RenderProxyEnv(proxy)
-	lines := []string{
-		"#!/usr/bin/env bash",
-		"set -euo pipefail",
-		"export DEBIAN_FRONTEND=noninteractive",
-	}
-	if len(proxyEnv) > 0 {
-		keys := make([]string, 0, len(proxyEnv))
-		for key := range proxyEnv {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			lines = append(lines, fmt.Sprintf("export %s=%s", key, shellQuote(proxyEnv[key])))
-		}
-		lines = append(lines,
-			"install -d -m 0755 /etc/systemd/system/docker.service.d",
-			"cat > /etc/systemd/system/docker.service.d/http-proxy.conf <<'EOF'",
-			"[Service]",
-		)
-		for _, key := range keys {
-			if key == strings.ToUpper(key) {
-				lines = append(lines, fmt.Sprintf("Environment=\"%s=%s\"", key, proxyEnv[key]))
-			}
-		}
-		lines = append(lines, "EOF")
-	}
-	lines = append(lines,
-		"if ! command -v docker >/dev/null 2>&1; then",
-		"  apt-get update",
-		"  apt-get install -y ca-certificates curl gnupg",
-		"  install -d -m 0755 /etc/apt/keyrings",
-		"  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg",
-		"  chmod a+r /etc/apt/keyrings/docker.gpg",
-		"  . /etc/os-release",
-		"  echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable\" > /etc/apt/sources.list.d/docker.list",
-		"  apt-get update",
-		"  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
-		"fi",
-		fmt.Sprintf("install -d -m 0755 %s", shellQuote(worker.DataRoot)),
-	)
-	if len(disks) == 0 {
-		lines = append(lines, fmt.Sprintf("# no explicit data disks selected; workspace remains under %s", worker.DataRoot))
-	} else {
-		for _, disk := range disks {
-			lines = append(lines,
-				fmt.Sprintf("# explicit data disk selection: %s -> %s", disk.DevicePath, disk.MountPath),
-				fmt.Sprintf("install -d -m 0755 %s", shellQuote(path.Clean(disk.MountPath))),
-			)
-		}
-	}
-	lines = append(lines,
-		"systemctl daemon-reload || true",
-		"systemctl enable --now docker || true",
-		"# TODO: upload and enable the local-only aiyolo-workerd runtime service.",
-	)
-	return BootstrapPlan{
-		ProxyEnv: proxyEnv,
-		Script:   strings.Join(lines, "\n") + "\n",
-		Summary:  fmt.Sprintf("Bootstrap plan prepared for %s with %d explicit data disk selection(s).", worker.ID, len(disks)),
-	}
 }
 
 func RenderProxyEnv(profile domain.ProxyProfile) map[string]string {

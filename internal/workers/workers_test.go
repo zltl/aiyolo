@@ -23,13 +23,31 @@ func TestBuildBootstrapPlanMentionsSelectedDisks(t *testing.T) {
 		[]domain.WorkerDataDisk{{DevicePath: "/dev/vdb", MountPath: "/srv/aiyolo"}},
 		domain.ProxyProfile{ID: "edge", Type: domain.ProxyTypeHTTP, Endpoint: "http://proxy.example.com:8080"},
 	)
-	if !strings.Contains(plan.Script, "explicit data disk selection: /dev/vdb -> /srv/aiyolo") {
-		t.Fatalf("bootstrap script missing disk selection: %s", plan.Script)
+	if !strings.Contains(plan.VarsJSON, `"device_path": "/dev/vdb"`) || !strings.Contains(plan.VarsJSON, `"mount_path": "/srv/aiyolo"`) {
+		t.Fatalf("bootstrap vars missing disk selection: %s", plan.VarsJSON)
 	}
-	if !strings.Contains(plan.Script, "Environment=\"HTTPS_PROXY=http://proxy.example.com:8080\"") {
-		t.Fatalf("bootstrap script missing proxy env: %s", plan.Script)
+	if !strings.Contains(plan.VarsJSON, `"HTTPS_PROXY": "http://proxy.example.com:8080"`) {
+		t.Fatalf("bootstrap vars missing proxy env: %s", plan.VarsJSON)
 	}
-	if !strings.Contains(plan.Summary, "1 explicit data disk selection") {
+	if !strings.Contains(plan.VarsJSON, `"worker_workspace_root": "/var/lib/aiyolo-agent/workspace"`) {
+		t.Fatalf("bootstrap vars missing workspace root: %s", plan.VarsJSON)
+	}
+	if !strings.Contains(plan.VarsJSON, `"worker_docker_data_root": "/var/lib/aiyolo-agent/docker"`) {
+		t.Fatalf("bootstrap vars missing docker data root: %s", plan.VarsJSON)
+	}
+	if !strings.Contains(plan.VarsJSON, `"worker_runtime_service_name": "aiyolo-workerd"`) {
+		t.Fatalf("bootstrap vars missing runtime service name: %s", plan.VarsJSON)
+	}
+	if !strings.Contains(plan.Playbook, "Configure Docker proxy environment") {
+		t.Fatalf("bootstrap playbook missing docker proxy task: %s", plan.Playbook)
+	}
+	if !strings.Contains(plan.Playbook, "Initialize and mount declared worker data disks") || !strings.Contains(plan.Playbook, "Persist Docker daemon data root") || !strings.Contains(plan.Playbook, "Ensure worker runtime service is enabled and restarted") {
+		t.Fatalf("bootstrap playbook missing storage or runtime tasks: %s", plan.Playbook)
+	}
+	if !strings.Contains(plan.Inventory, "ansible_host=10.0.0.5") {
+		t.Fatalf("bootstrap inventory missing host: %s", plan.Inventory)
+	}
+	if !strings.Contains(plan.Summary, "Ansible bootstrap plan prepared") || !strings.Contains(plan.Summary, "1 explicit data disk selection") || !strings.Contains(plan.Summary, "post-init health verification") {
 		t.Fatalf("unexpected summary: %s", plan.Summary)
 	}
 }

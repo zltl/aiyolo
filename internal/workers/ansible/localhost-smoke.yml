@@ -1,0 +1,68 @@
+- name: Validate AIYolo worker bootstrap inputs on localhost
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Require smoke_root to be provided
+      ansible.builtin.assert:
+        that:
+          - smoke_root is defined
+          - smoke_root | trim | length > 0
+          - smoke_root.startswith('/')
+          - worker_id | trim | length > 0
+          - worker_data_root | trim | length > 0
+        fail_msg: "smoke_root, worker_id, and worker_data_root must be provided"
+
+    - name: Ensure smoke root exists
+      ansible.builtin.file:
+        path: "{{ smoke_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write rendered bootstrap summary
+      ansible.builtin.copy:
+        dest: "{{ smoke_root }}/summary.json"
+        mode: "0644"
+        content: |
+          {
+            "worker_id": {{ worker_id | to_json }},
+            "worker_data_root": {{ worker_data_root | to_json }},
+            "worker_mount_paths": {{ worker_mount_paths | default([]) | to_json }},
+            "docker_proxy_env_keys": {{ docker_proxy_env_keys | default([]) | to_json }},
+            "worker_workspace_root": {{ worker_workspace_root | default(worker_data_root + '/workspace') | to_json }},
+            "worker_runtime_health_url": {{ worker_runtime_health_url | default('http://127.0.0.1:17810/readyz') | to_json }}
+          }
+
+    - name: Ensure smoke markers exist for declared mount paths
+      ansible.builtin.file:
+        path: "{{ smoke_root }}/mounts/{{ item | regex_replace('^/', '') | regex_replace('/', '__') }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ worker_mount_paths | default([]) }}"
+
+    - name: Render worker runtime config template into smoke root
+      ansible.builtin.template:
+        src: templates/workerd.json.j2
+        dest: "{{ smoke_root }}/workerd.json"
+        mode: "0644"
+
+    - name: Render worker runtime systemd unit into smoke root
+      ansible.builtin.template:
+        src: templates/aiyolo-workerd.service.j2
+        dest: "{{ smoke_root }}/aiyolo-workerd.service"
+        mode: "0644"
+
+    - name: Render worker runtime script into smoke root
+      ansible.builtin.template:
+        src: templates/aiyolo-workerd.py.j2
+        dest: "{{ smoke_root }}/aiyolo_workerd.py"
+        mode: "0755"
+
+    - name: Emit smoke summary
+      ansible.builtin.debug:
+        msg:
+          - "smoke_root={{ smoke_root }}"
+          - "worker={{ worker_id }}"
+          - "mount_count={{ worker_mount_paths | default([]) | length }}"
+          - "runtime_health_url={{ worker_runtime_health_url | default('http://127.0.0.1:17810/readyz') }}"

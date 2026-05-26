@@ -79,7 +79,7 @@ page data 装配由 handler 侧统一完成，避免模板内做复杂逻辑。
 
 - 页面标题、eyebrow、description 要支持中英双语。
 - 侧栏导航由 `consoleNavItems` 输出。
-- 当前语言切换通过 `/console/locale?lang=...&next=...` 实现。
+- 当前控制台固定使用中文，不再维护中英切换。
 
 新增页面时，必须同步补齐：
 

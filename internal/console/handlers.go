@@ -51,6 +51,7 @@ type Handler struct {
 	probeWorker                func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (workerops.ProbeResult, error)
 	buildWorkerBootstrap       func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan
 	executeWorkerBootstrap     func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error)
+	verifyWorkerBootstrap      func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error)
 }
 
 func NewHandler(cfg Config, store storage.Store) *Handler {
@@ -67,7 +68,7 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 		return artifacts.NewPublisher(cfg)
 	}, newChatAttachmentReader: func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error) {
 		return artifacts.NewObjectReader(cfg)
-	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap}
+	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap}
 }
 
 func (handler *Handler) Routes() http.Handler {
@@ -158,7 +159,6 @@ func (handler *Handler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) setLocale(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: consoleLocaleCookieName, Value: "", Path: "/console", MaxAge: -1, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, sanitizeConsoleNext(r.URL.Query().Get("next")), http.StatusSeeOther)
 }
 
