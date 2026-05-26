@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260525b">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260526c">
 </head>
 <body class="chat-workspace-body">
   {{template "chat-content" .}}
@@ -15,7 +15,7 @@
 
 {{define "chat-content"}}
 <div id="chat-content" class="chat-workspace-page">
-  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-session-save-url="/console/chat/session" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
+  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
     <aside class="chat-sidebar">
       <div class="chat-sidebar-surface">
         <div class="chat-sidebar-top">
@@ -137,6 +137,29 @@
               {{end}}
             </div>
             <div class="chat-composer-right">
+              {{if gt (len .ChatEnvironmentOptions) 1}}
+              <input type="hidden" name="chat_environment" value="{{.ChatForm.Environment}}" data-chat-environment-input>
+              <details class="chat-model-picker chat-environment-picker" data-chat-environment-picker>
+                <summary class="chat-model-picker-trigger chat-environment-picker-trigger" aria-label="{{msg .Locale "选择环境" "Choose environment"}}">
+                  <span class="chat-model-picker-value chat-environment-picker-value" data-chat-environment-picker-copy>{{chatEnvironmentLabel .ChatForm.Environment .ChatEnvironmentOptions}}</span>
+                  <span class="chat-model-picker-icon chat-environment-picker-icon" aria-hidden="true">
+                    <i class="chat-control-icon" data-lucide="chevron-down"></i>
+                  </span>
+                </summary>
+                <div class="chat-model-picker-menu chat-environment-picker-menu" role="radiogroup" aria-label="{{msg .Locale "环境" "Environment"}}">
+                  {{range .ChatEnvironmentOptions}}
+                  <label class="chat-model-picker-option chat-environment-picker-option {{if eq $.ChatForm.Environment .Value}}is-active{{end}}">
+                    <input class="chat-route-control chat-environment-option-control" type="radio" name="chat_environment_choice" value="{{.Value}}" data-chat-environment-option data-chat-environment-label="{{.Label}}" {{if eq $.ChatForm.Environment .Value}}checked{{end}}>
+                    <span class="chat-model-name">{{.Label}}</span>
+                  </label>
+                  {{end}}
+                </div>
+              </details>
+              <button class="chat-shell-launch" type="button" data-chat-action="open-shell" {{if eq .ChatForm.Environment "local"}}disabled{{end}} aria-label="{{msg .Locale "打开 Shell" "Open shell"}}" title="{{msg .Locale "打开 Claude Agent 容器 Shell" "Open the Claude Agent container shell"}}">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4.75 6.25A1.25 1.25 0 0 1 6 5h12a1.25 1.25 0 0 1 1.25 1.25v11.5A1.25 1.25 0 0 1 18 19H6a1.25 1.25 0 0 1-1.25-1.25z"></path><path d="m8.5 9.5 2.75 2.5-2.75 2.5"></path><path d="M13.5 14.5h2.75"></path></svg>
+                <span class="chat-visually-hidden">{{msg .Locale "打开 Shell" "Open shell"}}</span>
+              </button>
+              {{end}}
               {{if .ChatRoutes}}
               <details class="chat-model-picker">
                 <summary class="chat-model-picker-trigger" aria-label="{{msg .Locale "选择模型" "Choose model"}}">
@@ -195,6 +218,6 @@
     </section>
   </form>
   <script src="https://unpkg.com/lucide@1.16.0/dist/umd/lucide.min.js"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260525b"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260526b"></script>
 </div>
 {{end}}

@@ -5,6 +5,8 @@ ADD rootfs.tar.gz /
 ARG UBUNTU_RELEASE=noble
 ARG APT_MIRROR=https://mirrors.aliyun.com/ubuntu
 ARG CHROME_DEB_URL=https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+ARG NODE_VERSION=20.20.2
+ARG CLAUDE_CODE_VERSION=2.1.150
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
@@ -34,10 +36,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libu2f-udev libxss1 libxtst6 mesa-utils netcat-openbsd procps psmisc python3 python3-dev python3-pip \
     python3-venv rsync sudo tini tzdata uidmap unzip wget x11vnc xauth xdg-utils xterm xvfb zip \
     docker.io fuse-overlayfs \
+ && install -d -m 0755 /workspace /etc/aiyolo /usr/local/bin /tmp/runtime-root /opt \
  && wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
  && apt-get install -y /tmp/google-chrome.deb \
  && rm -f /tmp/google-chrome.deb \
- && install -d -m 0755 /workspace /etc/aiyolo /usr/local/bin /tmp/runtime-root \
+ && curl -fsSL --retry 5 --connect-timeout 30 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" -o /tmp/node.tar.gz \
+ && tar -xzf /tmp/node.tar.gz -C /opt \
+ && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/node" /usr/local/bin/node \
+ && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npm" /usr/local/bin/npm \
+ && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npx" /usr/local/bin/npx \
+ && npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" --cache /tmp/.npm-cache --fund=false --audit=false \
+ && node --version \
+ && npm --version \
+ && claude --version \
+ && rm -f /tmp/node.tar.gz \
+ && rm -rf /tmp/.npm-cache \
  && rm -rf /var/lib/apt/lists/*
 
 COPY cloud-agent-base.json /etc/aiyolo/cloud-agent-base.json

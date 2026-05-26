@@ -38,6 +38,7 @@ type consoleChatRouteView struct {
 type consoleChatFormView struct {
 	ClientSessionID string                      `json:"clientSessionId"`
 	PublicName      string                      `json:"publicName"`
+	Environment     string                      `json:"environment,omitempty"`
 	ReasoningEffort string                      `json:"reasoningEffort,omitempty"`
 	SystemPrompt    string                      `json:"systemPrompt"`
 	Draft           string                      `json:"draft"`
@@ -141,6 +142,7 @@ type consoleChatExecution struct {
 
 type consoleChatPageState struct {
 	Form                    consoleChatFormView
+	EnvironmentOptions      []consoleChatEnvironmentOption
 	Routes                  []consoleChatRouteView
 	Messages                []consoleChatMessageView
 	Presets                 []consoleChatPromptView
@@ -157,7 +159,9 @@ func (state consoleChatPageState) data() map[string]any {
 	return map[string]any{
 		"Title":                       "Chat",
 		"ChatForm":                    state.Form,
+		"ChatEnvironmentOptions":      state.EnvironmentOptions,
 		"ChatRoutes":                  state.Routes,
+		"ChatShellPageURL":            consoleChatShellPagePath,
 		"ChatMessages":                state.Messages,
 		"ChatPresets":                 state.Presets,
 		"SelectedChatRoute":           state.SelectedRoute,
@@ -564,15 +568,22 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 		return consoleChatPageState{}, err
 	}
 	locale := resolveConsoleLocale(r)
+	userID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+	environmentOptions, err := handler.chatEnvironmentOptions(ctx, r)
+	if err != nil {
+		return consoleChatPageState{}, err
+	}
 	state := consoleChatPageState{
 		Form: consoleChatFormView{
 			ClientSessionID: consoleChatRequestedSessionID(r),
 			PublicName:      strings.TrimSpace(r.FormValue("chat_public_name")),
+			Environment:     strings.TrimSpace(r.FormValue("chat_environment")),
 			ReasoningEffort: strings.TrimSpace(r.FormValue("chat_reasoning_effort")),
 			SystemPrompt:    strings.TrimSpace(r.FormValue("chat_system_prompt")),
 			Draft:           strings.TrimSpace(r.FormValue("chat_draft")),
 			Attachments:     parseConsoleChatDraftAttachments(r, handler.cfg.ChatAttachments),
 		},
+		EnvironmentOptions:      environmentOptions,
 		Routes:                  consoleChatRoutes(routes, providers),
 		Messages:                parseConsoleChatMessages(r, locale, handler.cfg.ChatAttachments),
 		Presets:                 defaultConsoleChatPrompts(locale),
@@ -588,11 +599,13 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 	if activeSession != nil && !consoleChatRequestHasSubmittedState(r) {
 		state.Form.ClientSessionID = activeSession.ID
 		state.Form.PublicName = firstNonEmpty(state.Form.PublicName, activeSession.PublicName)
+		state.Form.Environment = firstNonEmpty(state.Form.Environment, handler.restoreConsoleChatEnvironment(ctx, userID, activeSession.ID))
 		state.Form.SystemPrompt = firstNonEmpty(state.Form.SystemPrompt, activeSession.SystemPrompt)
 		state.Form.Draft = firstNonEmpty(state.Form.Draft, activeSession.Draft)
 		state.Form.Attachments = cloneConsoleChatAttachments(activeSession.DraftAttachments)
 		state.Messages = cloneConsoleChatMessages(activeSession.Messages)
 	}
+	state.Form.Environment = normalizeConsoleChatEnvironmentValue(state.Form.Environment, state.EnvironmentOptions)
 	if state.Form.PublicName == "" && len(state.Routes) > 0 {
 		state.Form.PublicName = state.Routes[0].PublicName
 	}
@@ -655,6 +668,11 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := findConsoleChatRoute(state.Routes, state.Form.PublicName); !ok {
 		state.Error = handler.requestText(r, "请选择当前可用的 public model。", "Choose a public model that is currently available in this chat page.")
+		handler.renderChat(w, r, state)
+		return
+	}
+	if _, err := handler.ensureConsoleChatEnvironment(r.Context(), r, &state); err != nil {
+		state.Error = err.Error()
 		handler.renderChat(w, r, state)
 		return
 	}

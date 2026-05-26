@@ -324,6 +324,11 @@ func (handler *Handler) streamChat(w http.ResponseWriter, r *http.Request) {
 		handler.streamChatReplace(w, r, state)
 		return
 	}
+	if _, err := handler.ensureConsoleChatEnvironment(r.Context(), r, &state); err != nil {
+		state.Error = err.Error()
+		handler.streamChatReplace(w, r, state)
+		return
+	}
 
 	target, errorMessage := handler.resolveConsoleChatTarget(r.Context(), r, state.Form.PublicName)
 	if errorMessage != "" {

@@ -1,0 +1,63 @@
+{{define "chat-shell"}}
+<!doctype html>
+<html lang="{{.Locale}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.DisplayTitle}} - AIYolo Shell</title>
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260526b">
+  <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
+</head>
+<body class="chat-terminal-body">
+  <div class="chat-terminal-page" data-chat-shell-page {{if .ChatShell.SocketURL}}data-chat-shell-socket-url="{{.ChatShell.SocketURL}}"{{end}}>
+    <header class="chat-terminal-header">
+      <div class="chat-terminal-heading">
+        <p class="chat-terminal-kicker">{{msg .Locale "Claude Agent Shell" "Claude Agent Shell"}}</p>
+        <h1>{{if .ChatShell.WorkerID}}{{.ChatShell.WorkerID}}{{else}}AIYolo{{end}}</h1>
+        <p class="chat-terminal-copy">{{msg .Locale "直接连接当前 chat 绑定的 claude-agent container，可像真实终端一样输入命令。" "Directly connect to the claude-agent container attached to this chat session and type commands like a real shell."}}</p>
+      </div>
+      <div class="chat-terminal-actions">
+        {{if .ChatShell.ChatURL}}
+        <a class="ghost-button" href="{{.ChatShell.ChatURL}}">{{msg .Locale "返回对话" "Back to chat"}}</a>
+        {{end}}
+        <button class="ghost-button" type="button" data-chat-shell-action="reconnect" {{if .ChatShellError}}disabled{{end}}>{{msg .Locale "重新连接" "Reconnect"}}</button>
+      </div>
+    </header>
+
+    {{if not .ChatShellError}}
+    <section class="chat-terminal-meta">
+      <div class="chat-terminal-chip">
+        <span>Session</span>
+        <strong>{{.ChatShell.SessionID}}</strong>
+      </div>
+      <div class="chat-terminal-chip">
+        <span>Container</span>
+        <strong>{{.ChatShell.ContainerName}}</strong>
+      </div>
+      <div class="chat-terminal-chip">
+        <span>Workspace</span>
+        <strong>{{.ChatShell.WorkspacePath}}</strong>
+      </div>
+    </section>
+    {{end}}
+
+    {{if .ChatShellError}}
+    <div class="flash flash-error chat-terminal-flash" role="alert">{{.ChatShellError}}</div>
+    {{else}}
+    <section class="chat-terminal-stage">
+      <div class="chat-terminal-toolbar">
+        <span class="chat-terminal-status" data-chat-shell-status>{{msg .Locale "正在连接 shell…" "Connecting shell…"}}</span>
+      </div>
+      <div class="chat-terminal-surface">
+        <div class="chat-terminal-canvas" data-chat-shell-terminal></div>
+      </div>
+    </section>
+    {{end}}
+  </div>
+
+  <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+  <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+  <script src="/console/static/chat-shell.js?v=chat-shell-20260526a"></script>
+</body>
+</html>
+{{end}}

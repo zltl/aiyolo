@@ -52,6 +52,8 @@ type Handler struct {
 	buildWorkerBootstrap       func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan
 	executeWorkerBootstrap     func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error)
 	verifyWorkerBootstrap      func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error)
+	ensureCloudAgent           func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error)
+	openCloudAgentShell        func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error)
 }
 
 func NewHandler(cfg Config, store storage.Store) *Handler {
@@ -68,27 +70,27 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 		return artifacts.NewPublisher(cfg)
 	}, newChatAttachmentReader: func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error) {
 		return artifacts.NewObjectReader(cfg)
-	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap}
+	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell}
 }
 
 func (handler *Handler) Routes() http.Handler {
 	router := chi.NewRouter()
 	router.Get("/static/console.css", handler.styles)
 	router.Get("/static/chat.js", handler.chatScript)
+	router.Get("/static/chat-shell.js", handler.chatShellScript)
 	router.Get("/locale", handler.setLocale)
 	router.Get("/login", handler.loginPage)
 	router.Post("/login", handler.login)
 	router.Get("/login/{provider}", handler.oauthLogin)
 	router.Get("/oauth/{provider}/callback", handler.oauthCallback)
-	router.Get("/codex/install.ps1", handler.codexInstallScript)
-	router.Get("/codex/artifacts/aiyolo.exe", handler.codexWindowsArtifact)
 	router.Group(func(protected chi.Router) {
 		protected.Use(handler.requireSession)
 		protected.Get("/", handler.dashboard)
-		protected.Get("/codex", handler.codex)
-		protected.Post("/codex/install-tokens", handler.createCodexInstallToken)
 		protected.Get("/chat", handler.chat)
 		protected.Post("/chat", handler.sendChat)
+		protected.Get("/chat/shell", handler.chatShellPage)
+		protected.Handle("/chat/shell/ws", http.HandlerFunc(handler.chatShellSocket))
+		protected.Post("/chat/environment/ensure", handler.chatEnvironmentEnsure)
 		protected.Post("/chat/session", handler.saveChatSession)
 		protected.Delete("/chat/session/{sessionID}", handler.deleteChatSession)
 		protected.Post("/chat/stream", handler.streamChat)
@@ -686,6 +688,17 @@ func (handler *Handler) chatScript(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(script)
 }
 
+func (handler *Handler) chatShellScript(w http.ResponseWriter, r *http.Request) {
+	script, err := consoleAssets.ReadFile("static/chat-shell.js")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(script)
+}
+
 func (handler *Handler) apiKeysPageData(ctx context.Context, createdKey string, notice string) (map[string]any, error) {
 	keys, err := handler.store.ListAPIKeys(ctx)
 	if err != nil {
@@ -1041,6 +1054,7 @@ func templateFuncs() template.FuncMap {
 		"msg":                                   consoleText,
 		"money":                                 money,
 		"countShare":                            countShare,
+		"chatEnvironmentLabel":                  consoleChatEnvironmentLabel,
 		"join":                                  strings.Join,
 		"navClass":                              navClass,
 		"orDash":                                orDash,

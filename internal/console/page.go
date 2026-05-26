@@ -38,7 +38,6 @@ func sanitizeConsoleNext(next string) string {
 func consoleNavItems(locale string) []navItemView {
 	return []navItemView{
 		{Key: "Dashboard", Label: consoleText(locale, "总览", "Dashboard"), Href: "/console/", Icon: "dashboard", Tone: "tone-clay"},
-		{Key: "Codex", Label: consoleText(locale, "Codex", "Codex"), Href: "/console/codex", Icon: "codex", Tone: "tone-forest"},
 		{Key: "Chat", Label: consoleText(locale, "对话", "Chat"), Href: "/console/chat", Target: "_blank", Rel: "noopener noreferrer", Icon: "chat", Tone: "tone-sea"},
 		{Key: "Usage", Label: consoleText(locale, "用量", "Usage"), Href: "/console/usage", Icon: "usage", Tone: "tone-sand"},
 		{Key: "API Keys", Label: consoleText(locale, "API 密钥", "API Keys"), Href: "/console/api-keys", Icon: "keys", Tone: "tone-clay"},
@@ -54,8 +53,6 @@ func pageTitleLocalized(locale, title string) string {
 	switch title {
 	case "Dashboard":
 		return consoleText(locale, "总览", "Dashboard")
-	case "Codex":
-		return "Codex"
 	case "Chat":
 		return consoleText(locale, "对话", "Chat")
 	case "Usage":
@@ -83,8 +80,6 @@ func pageEyebrowLocalized(locale, title string) string {
 	switch title {
 	case "Dashboard":
 		return consoleText(locale, "控制中枢", "Control Center")
-	case "Codex":
-		return consoleText(locale, "Windows 安装器", "Windows Installer")
 	case "Chat":
 		return consoleText(locale, "对话工作台", "Conversation Workbench")
 	case "Usage":
@@ -112,8 +107,6 @@ func pageDescriptionLocalized(locale, title string) string {
 	switch title {
 	case "Dashboard":
 		return consoleText(locale, "把请求、错误、费用和热点路由压缩进一块更易读的运营总览。", "Compress requests, errors, spend, and hot routes into a faster operational overview.")
-	case "Codex":
-		return consoleText(locale, "为 Windows 用户生成一次性 AIYolo Codex 安装命令，并自动配置受限 API 密钥。", "Generate one-time Windows AIYolo Codex install commands with scoped API keys configured automatically.")
 	case "Chat":
 		return consoleText(locale, "直接在独立对话工作区里验证公共模型的路由、代理与上游响应。", "Use the dedicated chat workspace to validate routing, proxies, and upstream behavior.")
 	case "Usage":

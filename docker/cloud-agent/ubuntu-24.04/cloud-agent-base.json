@@ -4,8 +4,11 @@
   "image_flavor": "local-cloud-agent",
   "features": [
     "git",
+    "nodejs",
+    "npm",
     "python3",
     "jq",
+    "claude-code",
     "xvfb",
     "fluxbox",
     "x11vnc",

@@ -71,3 +71,45 @@ func TestInstallProxyEndpointAddressDefaultsHTTPPort(t *testing.T) {
 		t.Fatalf("host=%q port=%d", host, port)
 	}
 }
+
+func TestCloudAgentContainerEnvUsesConsoleBaseURLAndCustomModel(t *testing.T) {
+	env := cloudAgentContainerEnv(CloudAgentStartOptions{
+		UserID:         "user-1",
+		AgentType:      domain.CloudAgentTypeClaudeCode,
+		APIBaseURL:     "https://aiyolo.quant67.com/v1",
+		ConsoleBaseURL: "https://aiyolo.quant67.com",
+		APIKey:         "test-key",
+		DefaultModel:   "deepseek-v4-pro",
+		AllowedModels:  []string{"deepseek-v4-pro"},
+	})
+	if env["ANTHROPIC_BASE_URL"] != "https://aiyolo.quant67.com" || env["ANTHROPIC_API_URL"] != "https://aiyolo.quant67.com" {
+		t.Fatalf("unexpected anthropic urls: %+v", env)
+	}
+	if env["ANTHROPIC_MODEL"] != "deepseek-v4-pro" {
+		t.Fatalf("unexpected anthropic model: %+v", env)
+	}
+	if env["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "deepseek-v4-pro" {
+		t.Fatalf("missing custom model option: %+v", env)
+	}
+	if env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] != "deepseek-v4-pro" {
+		t.Fatalf("unexpected custom model option name: %+v", env)
+	}
+}
+
+func TestCloudAgentContainerEnvSkipsCustomModelOptionForClaudeModel(t *testing.T) {
+	env := cloudAgentContainerEnv(CloudAgentStartOptions{
+		UserID:         "user-1",
+		AgentType:      domain.CloudAgentTypeClaudeCode,
+		APIBaseURL:     "https://aiyolo.quant67.com/v1",
+		ConsoleBaseURL: "https://aiyolo.quant67.com",
+		APIKey:         "test-key",
+		DefaultModel:   "claude-sonnet-4-6",
+		AllowedModels:  []string{"claude-sonnet-4-6"},
+	})
+	if env["ANTHROPIC_MODEL"] != "claude-sonnet-4-6" {
+		t.Fatalf("unexpected anthropic model: %+v", env)
+	}
+	if _, ok := env["ANTHROPIC_CUSTOM_MODEL_OPTION"]; ok {
+		t.Fatalf("did not expect custom model option for claude model: %+v", env)
+	}
+}

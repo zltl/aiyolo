@@ -411,6 +411,84 @@
       field.value = String(value || "").trim();
     }
   };
+  const environmentField = (form = currentForm()) => form?.querySelector("[data-chat-environment-input], select[name=\"chat_environment\"]") || null;
+  const environmentPicker = (form = currentForm()) => form?.querySelector("[data-chat-environment-picker]") || null;
+  const environmentPickerCopy = (form = currentForm()) => form?.querySelector("[data-chat-environment-picker-copy]") || null;
+  const environmentOptionInputs = (form = currentForm()) => Array.from(form?.querySelectorAll("[data-chat-environment-option]") || []).filter((input) => input instanceof HTMLInputElement);
+  const currentSelectedEnvironment = (form) => {
+    const field = environmentField(form);
+    if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement)) {
+      return "local";
+    }
+    return field.value.trim() || "local";
+  };
+  const environmentLabel = (form, value) => {
+    const next = String(value || "").trim() || "local";
+    const option = environmentOptionInputs(form).find((input) => input.value.trim() === next);
+    if (option instanceof HTMLInputElement) {
+      const label = String(option.dataset.chatEnvironmentLabel || "").trim();
+      if (label !== "") {
+        return label;
+      }
+    }
+    return next === "local" ? "本地 Chat" : next;
+  };
+  const refreshEnvironmentOptionStates = (form) => {
+    const selected = currentSelectedEnvironment(form);
+    environmentOptionInputs(form).forEach((input) => {
+      const option = input.closest(".chat-environment-picker-option");
+      const active = input.value.trim() === selected;
+      input.checked = active;
+      if (option instanceof HTMLElement) {
+        option.classList.toggle("is-active", active);
+      }
+    });
+  };
+  const setEnvironmentPickerBusy = (form, busy) => {
+    const picker = environmentPicker(form);
+    if (!(picker instanceof HTMLDetailsElement)) {
+      return;
+    }
+    if (busy) {
+      picker.open = false;
+    }
+    picker.classList.toggle("is-disabled", busy);
+    const summary = picker.querySelector("summary");
+    if (summary instanceof HTMLElement) {
+      summary.setAttribute("aria-disabled", busy ? "true" : "false");
+      if (busy) {
+        summary.tabIndex = -1;
+      } else {
+        summary.removeAttribute("tabindex");
+      }
+    }
+    environmentOptionInputs(form).forEach((input) => {
+      input.disabled = busy;
+    });
+  };
+  const setSelectedEnvironment = (form, value) => {
+    const field = environmentField(form);
+    const next = String(value || "").trim() || "local";
+    if (field instanceof HTMLSelectElement) {
+      const hasOption = Array.from(field.options).some((option) => option.value === next);
+      field.value = hasOption ? next : "local";
+      return;
+    }
+    if (!(field instanceof HTMLInputElement)) {
+      return;
+    }
+    const options = environmentOptionInputs(form);
+    const selected = options.find((input) => input.value.trim() === next)
+      || options.find((input) => input.value.trim() === "local")
+      || null;
+    field.value = selected ? selected.value.trim() : "local";
+    const copy = environmentPickerCopy(form);
+    if (copy instanceof HTMLElement) {
+      copy.textContent = environmentLabel(form, field.value);
+    }
+    refreshEnvironmentOptionStates(form);
+  };
+  const environmentEnsureURL = (form = currentForm()) => String(form?.dataset.chatEnvironmentEnsureUrl || "").trim();
 
   const currentSelectedModel = (form) => {
     const checked = form?.querySelector("input[name=\"chat_public_name\"]:checked");
@@ -561,6 +639,8 @@
   const composerPrimaryStartGlyph = (form = currentForm()) => composerPrimaryButton(form)?.querySelector("[data-chat-primary-start]") || null;
   const composerPrimaryStopGlyph = (form = currentForm()) => composerPrimaryButton(form)?.querySelector("[data-chat-primary-stop]") || null;
   const composerQueueIndicator = (form = currentForm()) => form?.querySelector("[data-chat-queue-indicator]") || null;
+  const shellLaunchButton = (form = currentForm()) => form?.querySelector("[data-chat-action=\"open-shell\"]") || null;
+  const shellPageURL = (form = currentForm()) => String(form?.dataset.chatShellUrl || "").trim();
 
   const syncDraftFieldHeight = (field) => {
     if (!(field instanceof HTMLTextAreaElement)) {
@@ -611,6 +691,7 @@
     const startGlyph = composerPrimaryStartGlyph(form);
     const stopGlyph = composerPrimaryStopGlyph(form);
     const indicator = composerQueueIndicator(form);
+    const shellButton = shellLaunchButton(form);
     const streaming = form.dataset.streaming === "true";
     const payload = readDraftPayload(form);
 
@@ -638,6 +719,15 @@
       const queuedCount = queuedTurns.length;
       indicator.hidden = queuedCount === 0;
       indicator.textContent = queuedCount > 0 ? t(`已排队 ${queuedCount} 条`, `Queued ${queuedCount}`) : "";
+    }
+    if (shellButton instanceof HTMLButtonElement) {
+      const hasShellRoute = shellPageURL(form) !== "";
+      const canOpenShell = hasShellRoute && currentSelectedEnvironment(form) !== "local" && currentSelectedModel(form) !== "";
+      shellButton.hidden = !hasShellRoute;
+      shellButton.disabled = !canOpenShell;
+      shellButton.title = canOpenShell
+        ? t("打开 Claude Agent 容器 Shell", "Open the Claude Agent container shell")
+        : t("切换到 Cloud Agent 环境后即可打开 shell", "Switch to a Cloud Agent environment to open the shell");
     }
   };
 
@@ -774,6 +864,7 @@
       title: String(session.title || existingSession?.title || "").trim(),
       customTitle: Boolean(session.customTitle || existingSession?.customTitle),
       publicName: resolvedRoute,
+      environment: String(session.environment || existingSession?.environment || currentSelectedEnvironment(form) || "local").trim() || "local",
       reasoningEffort: normalizeReasoningEffort(session.reasoningEffort || existingSession?.reasoningEffort || fallbackReasoningEffort, route?.reasoningEfforts || []),
       systemPrompt: String(session.systemPrompt || existingSession?.systemPrompt || defaultSystemPrompt(form) || "").trim(),
       draft: String(session.draft || "").trim(),
@@ -989,6 +1080,7 @@
     title: t("新会话", "New chat"),
     customTitle: false,
     publicName: currentSelectedModel(form),
+    environment: currentSelectedEnvironment(form),
     reasoningEffort: currentSelectedReasoningEffort(form),
     systemPrompt: defaultSystemPrompt(form),
     draft: "",
@@ -1011,6 +1103,7 @@
       title: existingSession?.title || "",
       customTitle: existingSession?.customTitle || false,
       publicName: currentSelectedModel(form),
+      environment: currentSelectedEnvironment(form),
       reasoningEffort: currentSelectedReasoningEffort(form),
       systemPrompt: String((form.querySelector("textarea[name=\"chat_system_prompt\"]")?.value || defaultSystemPrompt(form) || "")).trim(),
       draft: draftField instanceof HTMLTextAreaElement ? draftField.value : "",
@@ -1411,6 +1504,7 @@
     form.classList.remove("is-streaming");
     writeClientSessionID(form, session.id);
     setSelectedModel(form, session.publicName);
+    setSelectedEnvironment(form, session.environment);
     syncReasoningEffortControl(form, routes.get(session.publicName) || null, session.reasoningEffort);
     updateStageHeader(root, session, routes);
 
@@ -1966,6 +2060,96 @@
     }
   };
 
+  const ensureChatEnvironment = async (form) => {
+    const root = currentRoot();
+    const field = environmentField(form);
+    const ensureURL = environmentEnsureURL(form);
+    if (!root || !(field instanceof HTMLInputElement || field instanceof HTMLSelectElement) || ensureURL === "") {
+      return null;
+    }
+    const environment = currentSelectedEnvironment(form);
+    if (environment !== "local" && readClientSessionID(form) === "") {
+      writeClientSessionID(form, makeID("chat"));
+    }
+    const payload = new FormData();
+    if (readClientSessionID(form) !== "") {
+      payload.set("chat_client_session_id", readClientSessionID(form));
+    }
+    payload.set("chat_environment", environment);
+    payload.set("chat_public_name", currentSelectedModel(form));
+    payload.set("chat_reasoning_effort", currentSelectedReasoningEffort(form));
+    const previousDisabled = field.disabled;
+    field.disabled = true;
+    setEnvironmentPickerBusy(form, true);
+    setAttachmentStatus(root, environment === "local"
+      ? t("正在切回本地环境…", "Switching back to local chat…")
+      : t("正在启动 Cloud Agent…", "Starting cloud agent…"), false);
+    try {
+      const response = await fetch(ensureURL, {
+        method: "POST",
+        body: payload,
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      const raw = await response.text();
+      const parsed = safeParseJSON(raw, null);
+      if (!response.ok || !parsed || typeof parsed !== "object") {
+        throw new Error(String(parsed?.error || t("环境准备失败。", "Failed to prepare the selected environment.")));
+      }
+      if (typeof parsed.environment === "string" && parsed.environment.trim() !== "") {
+        setSelectedEnvironment(form, parsed.environment.trim());
+      }
+      if (typeof parsed.sessionId === "string" && parsed.sessionId.trim() !== "") {
+        writeClientSessionID(form, parsed.sessionId.trim());
+      }
+      setAttachmentStatus(root, "", false);
+      setInlineFlash(root, String(parsed.notice || "").trim(), false);
+      queuePersist();
+      return parsed;
+    } catch (error) {
+      setAttachmentStatus(root, "", false);
+      setInlineFlash(root, String(error?.message || t("环境准备失败。", "Failed to prepare the selected environment.")), true);
+      throw error;
+    } finally {
+      field.disabled = previousDisabled;
+      setEnvironmentPickerBusy(form, false);
+      updateComposerControls(form);
+    }
+  };
+
+  const openChatShell = async (form) => {
+    const root = currentRoot();
+    const baseURL = shellPageURL(form);
+    if (!root || baseURL === "") {
+      return;
+    }
+    if (currentSelectedEnvironment(form) === "local") {
+      setInlineFlash(root, t("先选择 Cloud Agent 环境，再打开 shell。", "Select a Cloud Agent environment before opening the shell."), true);
+      return;
+    }
+    if (currentSelectedModel(form) === "") {
+      setInlineFlash(root, t("先选择一个模型，再打开 shell。", "Choose a model before opening the shell."), true);
+      return;
+    }
+    let ensured = null;
+    try {
+      ensured = await ensureChatEnvironment(form);
+    } catch (_error) {
+      return;
+    }
+    const sessionID = String(ensured?.sessionId || readClientSessionID(form)).trim();
+    if (sessionID === "") {
+      setInlineFlash(root, t("Shell 会话未生成，请重试。", "The shell session could not be created. Please retry."), true);
+      return;
+    }
+    const nextURL = new URL(baseURL, window.location.href);
+    nextURL.searchParams.set("session", sessionID);
+    const opened = window.open(nextURL.toString(), "_blank", "noopener");
+    if (!opened) {
+      window.location.assign(nextURL.toString());
+    }
+  };
+
   const streamConsoleChat = async (form, options = {}) => {
     if (form.dataset.streaming === "true") {
       return;
@@ -1993,6 +2177,14 @@
       reasoning: "",
       attachments: [],
     };
+
+    if (currentSelectedEnvironment(form) !== "local") {
+      try {
+        await ensureChatEnvironment(form);
+      } catch (_error) {
+        return;
+      }
+    }
 
     persistCurrentSession(false);
 
@@ -2262,6 +2454,11 @@
         }
         return;
       }
+      case "open-shell": {
+        event.preventDefault();
+        void openChatShell(form);
+        return;
+      }
       case "pick-attachments": {
         event.preventDefault();
         const input = root.querySelector("#chat-attachment-input");
@@ -2334,6 +2531,21 @@
       }
       queuePersist();
       updateComposerControls(form);
+      return;
+    }
+    if (target instanceof HTMLInputElement && target.matches("[data-chat-environment-option]")) {
+      setSelectedEnvironment(form, target.value);
+      const picker = target.closest(".chat-environment-picker");
+      if (picker instanceof HTMLDetailsElement) {
+        picker.open = false;
+      }
+      queuePersist();
+      void ensureChatEnvironment(form).catch(() => {});
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.name === "chat_environment") {
+      queuePersist();
+      void ensureChatEnvironment(form).catch(() => {});
       return;
     }
     if (target instanceof HTMLInputElement && target.matches("[data-chat-reasoning-option]")) {

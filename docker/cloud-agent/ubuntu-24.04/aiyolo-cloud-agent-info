@@ -6,6 +6,9 @@ printf '\n--- manifest ---\n'
 cat /etc/aiyolo/cloud-agent-base.json
 printf '\n--- toolchain ---\n'
 git --version
+node --version
+npm --version
+claude --version
 python3 --version
 jq --version
 docker --version
