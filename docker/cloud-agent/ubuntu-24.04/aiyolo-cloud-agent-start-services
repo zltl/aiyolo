@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+enable_display="${AIYOLO_CLOUD_AGENT_ENABLE_DISPLAY:-1}"
+enable_dockerd="${AIYOLO_CLOUD_AGENT_ENABLE_DOCKERD:-1}"
+auto_start_chrome="${AIYOLO_CLOUD_AGENT_AUTO_START_CHROME:-1}"
+chrome_url="${AIYOLO_CLOUD_AGENT_CHROME_URL:-about:blank}"
+display="${AIYOLO_DISPLAY:-:99}"
+
+declare -a pids=()
+
+if [[ "$enable_dockerd" == "1" ]]; then
+  /usr/local/bin/aiyolo-cloud-agent-start-docker >/tmp/aiyolo-dockerd.log 2>&1 &
+  pids+=("$!")
+fi
+
+if [[ "$enable_display" == "1" ]]; then
+  /usr/local/bin/aiyolo-cloud-agent-start-display >/tmp/aiyolo-display.log 2>&1 &
+  pids+=("$!")
+fi
+
+if [[ "$enable_display" == "1" && "$auto_start_chrome" == "1" ]]; then
+  for _ in $(seq 1 30); do
+    if nc -z 127.0.0.1 "${AIYOLO_VNC_PORT:-5900}" >/dev/null 2>&1 || [[ -S "/tmp/.X11-unix/X${display#:}" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  /usr/local/bin/aiyolo-cloud-agent-open-chrome "$chrome_url" >/tmp/aiyolo-chrome.log 2>&1 &
+fi
+
+if [[ ${#pids[@]} -eq 0 ]]; then
+  exec sleep infinity
+fi
+
+cleanup() {
+  local pid
+  for pid in "${pids[@]}"; do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+}
+
+trap cleanup EXIT INT TERM
+
+wait -n "${pids[@]}"

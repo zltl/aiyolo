@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+install -d -m 0755 /workspace "${XDG_RUNTIME_DIR:-/tmp/runtime-root}" /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix
+
+if [[ $# -eq 0 ]]; then
+  set -- /usr/local/bin/aiyolo-cloud-agent-start-services
+fi
+
+exec "$@"

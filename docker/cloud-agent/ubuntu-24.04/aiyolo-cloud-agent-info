@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat /etc/os-release
+printf '\n--- manifest ---\n'
+cat /etc/aiyolo/cloud-agent-base.json
+printf '\n--- toolchain ---\n'
+git --version
+python3 --version
+jq --version
+docker --version
+dockerd --version
+google-chrome-stable --version
+dpkg-query -W -f='xvfb ${Version}\n' xvfb 2>/dev/null || true
+dpkg-query -W -f='fluxbox ${Version}\n' fluxbox 2>/dev/null || true
+dpkg-query -W -f='x11vnc ${Version}\n' x11vnc 2>/dev/null || true
+printf '\n--- services ---\n'
+ps -ef | grep -E 'Xvfb|fluxbox|x11vnc|dockerd|google-chrome' | grep -v grep || true
+if docker info >/tmp/aiyolo-docker-info.log 2>&1; then
+  cat /tmp/aiyolo-docker-info.log
+else
+  cat /tmp/aiyolo-docker-info.log
+fi
+printf '\n--- workspace ---\n'
+pwd
+ls -la /workspace | sed -n '1,80p'

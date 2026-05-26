@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+display="${AIYOLO_DISPLAY:-:99}"
+remote_debug_port="${AIYOLO_CHROME_REMOTE_DEBUGGING_PORT:-9222}"
+if [[ $# -eq 0 ]]; then
+  set -- about:blank
+fi
+
+extra_flags=()
+if [[ -n "${AIYOLO_CHROME_EXTRA_FLAGS:-}" ]]; then
+  read -r -a extra_flags <<<"${AIYOLO_CHROME_EXTRA_FLAGS}"
+fi
+
+export DISPLAY="$display"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
+
+exec google-chrome-stable \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --disable-gpu \
+  --no-first-run \
+  --no-default-browser-check \
+  --user-data-dir=/tmp/aiyolo-chrome-profile \
+  --remote-debugging-address=0.0.0.0 \
+  --remote-debugging-port="$remote_debug_port" \
+  "${extra_flags[@]}" \
+  "$@"
