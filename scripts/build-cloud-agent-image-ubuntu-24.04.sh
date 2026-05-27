@@ -23,7 +23,7 @@ mirror="${AIYOLO_CLOUD_AGENT_UBUNTU_MIRROR:-https://mirrors.aliyun.com/ubuntu}"
 chrome_deb_url="${AIYOLO_CLOUD_AGENT_CHROME_DEB_URL:-https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb}"
 rootfs_index_url="${AIYOLO_CLOUD_AGENT_ROOTFS_INDEX_URL:-https://mirrors.aliyun.com/ubuntu-cdimage/ubuntu-base/releases/${series}/release}"
 rootfs_url="${AIYOLO_CLOUD_AGENT_ROOTFS_URL:-}"
-image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-24.04}"
+image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-24.04-v2}"
 skip_proxy_env="${AIYOLO_CLOUD_AGENT_SKIP_PROXY_ENV:-0}"
 buildkit="${DOCKER_BUILDKIT:-1}"
 

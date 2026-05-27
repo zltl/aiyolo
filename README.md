@@ -27,7 +27,7 @@ sudo -E make build-cloud-agent-image
 sudo -E CLOUD_AGENT_USER='i@quant67.com' make run-cloud-agent-local
 ```
 
-默认镜像标签是 `aiyolo/local-cloud-agent:ubuntu-24.04`。镜像里预装了 `git`、`python3`、`jq`、`xvfb`、`fluxbox`、`x11vnc`、`dbus-x11` 和一组常见浏览器运行时依赖，作为后续 `computer-use` / `browser-use` 的基础层。
+默认镜像标签是 `aiyolo/local-cloud-agent:ubuntu-24.04-v2`。镜像里预装了 `git`、`python3`、`jq`、`xvfb`、`fluxbox`、`x11vnc`、`dbus-x11` 和一组常见浏览器运行时依赖，作为后续 `computer-use` / `browser-use` 的基础层；Claude Code 会以容器内的非 root `aiyolo` 用户运行，这样 cloud-agent chat 可以直接启用完整的工具调用。
 
 现在的构建方式已经改成真正的 `docker build`：先从阿里云 `ubuntu-base` 目录下载 Ubuntu 24.04 rootfs，再在构建过程中把 apt 源切到阿里云镜像 `https://mirrors.aliyun.com/ubuntu`，并把以下能力一起装进基础镜像：
 
@@ -64,6 +64,7 @@ sudo -E AIYOLO_CLOUD_AGENT_CHROME_DEB_URL='https://<你的镜像>/google-chrome-
 - 入口路径是 `/console/chat`。
 - 使用控制台内置的服务端渲染 chat 页面和流式接口。
 - 复用现有 provider、模型路由、代理和 usage 链路。
+- 选择 Cloud Agent 环境后，chat 消息会直接接到对应 worker 容器里的 Claude Code；Claude Code 再通过 AIYolo gateway 的 Anthropic 兼容接口调用当前选中的 public model（例如 `deepseek-v4-pro`）。
 - 本地会话历史保存在浏览器里，支持重命名、删除和多标签页同步。
 - 支持附件上传；多模态请求会按当前路由协议自动组装 content parts。
 - 当前保留的对话接口是 `POST /console/chat` 和 `POST /console/chat/stream`。

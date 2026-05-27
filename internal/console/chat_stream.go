@@ -330,76 +330,108 @@ func (handler *Handler) streamChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, errorMessage := handler.resolveConsoleChatTarget(r.Context(), r, state.Form.PublicName)
-	if errorMessage != "" {
-		state.Error = errorMessage
-		handler.streamChatReplace(w, r, state)
-		return
-	}
-
-	handler.startChatEventStream(w)
-	executionCtx, executionCancel := context.WithCancel(context.WithoutCancel(r.Context()))
-	defer executionCancel()
-	streamCtx, streamCancel := context.WithCancel(r.Context())
-	defer streamCancel()
 	requestID := requestID(r)
-	consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
-	started := time.Now()
-	executionProtocol := handler.consoleChatExecutionProtocol(target.Route, target.Provider, state.Messages, state.Form.Attachments)
-	log.Printf("console chat stream start request_id=%s user_id=%s model=%s provider=%s protocol=%s proxy_profile=%s attachments=%d prompt_chars=%d provider_timeout_s=%d stream_idle_timeout_s=%d", requestID, consoleUserID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, len(state.Form.Attachments), len(strings.TrimSpace(state.Form.Draft)), domain.EffectiveProviderTimeoutSeconds(target.Provider), consoleChatStreamIdleTimeoutSeconds(target.Provider, target.Profile))
-	streamWriter := newConsoleChatEventStreamWriter(handler, w)
+	history := state.Messages
+	userMessage := buildConsoleChatMessageWithAttachments(locale, "user", state.Form.Draft, state.Form.Attachments)
+	var streamWriter *consoleChatEventStreamWriter
+	var execution consoleChatExecution
+	var executionErr error
+	var localTarget consoleChatTarget
+	var hasLocalTarget bool
 	var clientDisconnected atomic.Bool
-	heartbeatErrCh := make(chan error, 1)
-	heartbeatDone := streamWriter.StartHeartbeat(streamCtx, consoleChatHeartbeatInterval, func(err error) {
-		log.Printf("console chat stream heartbeat_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, err)
-		clientDisconnected.Store(true)
+	if state.Form.Environment != consoleChatEnvironmentLocal {
+		worker, key, account, cloudSession, targetErr := handler.resolveConsoleChatCloudAgentTarget(r.Context(), r, state.Form.ClientSessionID)
+		if targetErr != nil {
+			state.Error = targetErr.Error()
+			_ = handler.streamChatReplace(w, r, state)
+			return
+		}
+		run, started, startErr := handler.startConsoleCloudAgentRun(r, state, worker, key, account, cloudSession, history, userMessage, requestID)
+		if startErr != nil {
+			state.Error = fmt.Sprintf(handler.requestText(r, "对话失败：%s", "Chat failed: %s"), startErr.Error())
+			_ = handler.streamChatReplace(w, r, state)
+			return
+		}
+		handler.streamConsoleCloudAgentRun(w, r, state.Form.ClientSessionID, run, func() {
+			if started {
+				run.start()
+			}
+		})
+		return
+	} else {
+		handler.startChatEventStream(w)
+		streamWriter = newConsoleChatEventStreamWriter(handler, w)
+		target, errorMessage := handler.resolveConsoleChatTarget(r.Context(), r, state.Form.PublicName)
+		if errorMessage != "" {
+			state.Error = errorMessage
+			handler.streamChatReplace(w, r, state)
+			return
+		}
+		localTarget = target
+		hasLocalTarget = true
+		executionCtx, executionCancel := context.WithCancel(context.WithoutCancel(r.Context()))
+		defer executionCancel()
+		streamCtx, streamCancel := context.WithCancel(r.Context())
+		defer streamCancel()
+		consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+		started := time.Now()
+		executionProtocol := handler.consoleChatExecutionProtocol(target.Route, target.Provider, history, state.Form.Attachments)
+		log.Printf("console chat stream start request_id=%s user_id=%s model=%s provider=%s protocol=%s proxy_profile=%s attachments=%d prompt_chars=%d provider_timeout_s=%d stream_idle_timeout_s=%d", requestID, consoleUserID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, len(state.Form.Attachments), len(strings.TrimSpace(state.Form.Draft)), domain.EffectiveProviderTimeoutSeconds(target.Provider), consoleChatStreamIdleTimeoutSeconds(target.Provider, target.Profile))
+		heartbeatErrCh := make(chan error, 1)
+		heartbeatDone := streamWriter.StartHeartbeat(streamCtx, consoleChatHeartbeatInterval, func(err error) {
+			log.Printf("console chat stream heartbeat_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, err)
+			clientDisconnected.Store(true)
+			select {
+			case heartbeatErrCh <- err:
+			default:
+			}
+			streamCancel()
+		})
+		execution, executionErr = handler.runConsoleChatTurnWithContinuation(executionCtx, executionProtocol, target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Form.ReasoningEffort, history, state.Form.Draft, state.Form.Attachments, true, func(delta string) error {
+			if clientDisconnected.Load() {
+				return nil
+			}
+			if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "delta", Delta: delta}); writeErr != nil {
+				clientDisconnected.Store(true)
+				streamCancel()
+			}
+			return nil
+		}, func(reasoning string) error {
+			if clientDisconnected.Load() {
+				return nil
+			}
+			if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning}); writeErr != nil {
+				clientDisconnected.Store(true)
+				streamCancel()
+			}
+			return nil
+		})
+		executionCancel()
+		streamCancel()
+		<-heartbeatDone
+		if r.Context().Err() != nil {
+			clientDisconnected.Store(true)
+		}
 		select {
-		case heartbeatErrCh <- err:
+		case heartbeatErr := <-heartbeatErrCh:
+			if heartbeatErr != nil && !clientDisconnected.Load() && (executionErr == nil || errors.Is(executionErr, context.Canceled)) {
+				executionErr = heartbeatErr
+			}
 		default:
 		}
-		streamCancel()
-	})
-	state.Messages = append(state.Messages, buildConsoleChatMessageWithAttachments(locale, "user", state.Form.Draft, state.Form.Attachments))
-	execution, err := handler.runConsoleChatTurnWithContinuation(executionCtx, executionProtocol, target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Form.ReasoningEffort, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments, true, func(delta string) error {
-		if clientDisconnected.Load() {
-			return nil
+		if executionErr != nil {
+			log.Printf("console chat stream interrupted request_id=%s user_id=%s model=%s provider=%s protocol=%s proxy_profile=%s reason_code=%s status=%d finish_reason=%q duration_ms=%d output_chars=%d reasoning_chars=%d total_tokens=%d err=%v", requestID, consoleUserID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, consoleChatErrorCode(executionErr), execution.StatusCode, execution.Result.FinishReason, execution.Result.DurationMS, len(strings.TrimSpace(execution.Result.Output)), len(strings.TrimSpace(execution.Result.Reasoning)), execution.Result.TotalTokens, executionErr)
+		} else {
+			log.Printf("console chat stream completed request_id=%s user_id=%s model=%s provider=%s protocol=%s proxy_profile=%s status=%d finish_reason=%q duration_ms=%d output_chars=%d reasoning_chars=%d total_tokens=%d", requestID, consoleUserID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, execution.StatusCode, execution.Result.FinishReason, execution.Result.DurationMS, len(strings.TrimSpace(execution.Result.Output)), len(strings.TrimSpace(execution.Result.Reasoning)), execution.Result.TotalTokens)
 		}
-		if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "delta", Delta: delta}); writeErr != nil {
-			clientDisconnected.Store(true)
-			streamCancel()
-		}
-		return nil
-	}, func(reasoning string) error {
-		if clientDisconnected.Load() {
-			return nil
-		}
-		if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning}); writeErr != nil {
-			clientDisconnected.Store(true)
-			streamCancel()
-		}
-		return nil
-	})
-	executionCancel()
-	streamCancel()
-	<-heartbeatDone
-	if r.Context().Err() != nil {
-		clientDisconnected.Store(true)
+		persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, executionProtocol, target.Route, target.Provider, target.PricingRule, started, execution)
 	}
-	select {
-	case heartbeatErr := <-heartbeatErrCh:
-		if heartbeatErr != nil && !clientDisconnected.Load() && (err == nil || errors.Is(err, context.Canceled)) {
-			err = heartbeatErr
+	state.Messages = append(history, userMessage)
+	if executionErr != nil {
+		failureDetail := executionErr.Error()
+		if hasLocalTarget {
+			failureDetail = handler.consoleChatStreamFailureDetail(r, executionErr, localTarget.Provider, localTarget.Profile)
 		}
-	default:
-	}
-	if err != nil {
-		log.Printf("console chat stream interrupted request_id=%s user_id=%s model=%s provider=%s protocol=%s proxy_profile=%s reason_code=%s status=%d finish_reason=%q duration_ms=%d output_chars=%d reasoning_chars=%d total_tokens=%d err=%v", requestID, consoleUserID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, consoleChatErrorCode(err), execution.StatusCode, execution.Result.FinishReason, execution.Result.DurationMS, len(strings.TrimSpace(execution.Result.Output)), len(strings.TrimSpace(execution.Result.Reasoning)), execution.Result.TotalTokens, err)
-	} else {
-		log.Printf("console chat stream completed request_id=%s user_id=%s model=%s provider=%s protocol=%s proxy_profile=%s status=%d finish_reason=%q duration_ms=%d output_chars=%d reasoning_chars=%d total_tokens=%d", requestID, consoleUserID, target.Route.PublicName, target.Provider.ID, executionProtocol, target.Profile.ID, execution.StatusCode, execution.Result.FinishReason, execution.Result.DurationMS, len(strings.TrimSpace(execution.Result.Output)), len(strings.TrimSpace(execution.Result.Reasoning)), execution.Result.TotalTokens)
-	}
-	persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, executionProtocol, target.Route, target.Provider, target.PricingRule, started, execution)
-	if err != nil {
-		failureDetail := handler.consoleChatStreamFailureDetail(r, err, target.Provider, target.Profile)
 		state.Error = fmt.Sprintf(handler.requestText(r, "对话失败：%s", "Chat failed: %s"), failureDetail)
 		state.Messages = consoleChatAppendResultMessage(locale, state.Messages, execution.Result)
 		handler.syncConsoleChatPageSession(context.WithoutCancel(r.Context()), r, &state, state.Messages, consoleChatSessionStatusForError(execution.Result), requestID, execution.Result.ResponseID, failureDetail)
@@ -407,10 +439,18 @@ func (handler *Handler) streamChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "error", Error: state.Error, Message: consoleChatStreamMessage(locale, execution.Result), Result: consoleChatStreamResult(locale, execution.Result)}); writeErr != nil {
-			log.Printf("console chat stream error_event_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, target.Protocol, target.Profile.ID, writeErr)
+			if hasLocalTarget {
+				log.Printf("console chat stream error_event_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, localTarget.Route.PublicName, localTarget.Provider.ID, localTarget.Protocol, localTarget.Profile.ID, writeErr)
+			} else {
+				log.Printf("console cloud agent stream error_event_write_failed request_id=%s worker=%s err=%v", requestID, execution.Result.ProviderID, writeErr)
+			}
 		}
 		if replaceErr := handler.streamChatReplace(w, r, state); replaceErr != nil {
-			log.Printf("console chat stream replace_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, target.Protocol, target.Profile.ID, replaceErr)
+			if hasLocalTarget {
+				log.Printf("console chat stream replace_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, localTarget.Route.PublicName, localTarget.Provider.ID, localTarget.Protocol, localTarget.Profile.ID, replaceErr)
+			} else {
+				log.Printf("console cloud agent stream replace_write_failed request_id=%s worker=%s err=%v", requestID, execution.Result.ProviderID, replaceErr)
+			}
 		}
 		return
 	}
@@ -423,11 +463,19 @@ func (handler *Handler) streamChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if writeErr := streamWriter.Write(consoleChatStreamEvent{Type: "done", Message: consoleChatStreamMessage(locale, execution.Result), Result: consoleChatStreamResult(locale, execution.Result)}); writeErr != nil {
-		log.Printf("console chat stream done_event_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, target.Protocol, target.Profile.ID, writeErr)
+		if hasLocalTarget {
+			log.Printf("console chat stream done_event_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, localTarget.Route.PublicName, localTarget.Provider.ID, localTarget.Protocol, localTarget.Profile.ID, writeErr)
+		} else {
+			log.Printf("console cloud agent stream done_event_write_failed request_id=%s worker=%s err=%v", requestID, execution.Result.ProviderID, writeErr)
+		}
 	}
 	state.Result = &execution.Result
 	if replaceErr := handler.streamChatReplace(w, r, state); replaceErr != nil {
-		log.Printf("console chat stream replace_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, target.Route.PublicName, target.Provider.ID, target.Protocol, target.Profile.ID, replaceErr)
+		if hasLocalTarget {
+			log.Printf("console chat stream replace_write_failed request_id=%s model=%s provider=%s protocol=%s proxy_profile=%s err=%v", requestID, localTarget.Route.PublicName, localTarget.Provider.ID, localTarget.Protocol, localTarget.Profile.ID, replaceErr)
+		} else {
+			log.Printf("console cloud agent stream replace_write_failed request_id=%s worker=%s err=%v", requestID, execution.Result.ProviderID, replaceErr)
+		}
 	}
 }
 

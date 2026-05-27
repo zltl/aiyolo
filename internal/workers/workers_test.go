@@ -113,3 +113,37 @@ func TestCloudAgentContainerEnvSkipsCustomModelOptionForClaudeModel(t *testing.T
 		t.Fatalf("did not expect custom model option for claude model: %+v", env)
 	}
 }
+
+func TestBuildCloudAgentClaudeCodeRemoteScriptIncludesSessionRecoveryAndFlags(t *testing.T) {
+	script := buildCloudAgentClaudeCodeRemoteScript("aiyolo-cloud-agent-user", "/workspace", CloudAgentClaudeCodeOptions{
+		SessionID:     "550e8400-e29b-41d4-a716-446655440000",
+		Prompt:        "continue from the current state",
+		InitialPrompt: "reconstruct the chat transcript first",
+		Model:         "deepseek-v4-pro",
+		Stream:        true,
+	})
+	if !strings.Contains(script, `session_args=(--resume "$session_id")`) {
+		t.Fatalf("script should resume an existing claude session: %s", script)
+	}
+	if !strings.Contains(script, `session_args=(--session-id "$session_id")`) {
+		t.Fatalf("script should bootstrap a new claude session when missing: %s", script)
+	}
+	if !strings.Contains(script, `cmd+=(--output-format stream-json --verbose --include-partial-messages)`) {
+		t.Fatalf("script should enable stream-json partial output: %s", script)
+	}
+	if !strings.Contains(script, `-u 'aiyolo'`) || !strings.Contains(script, `-e HOME='/home/aiyolo'`) {
+		t.Fatalf("script should run claude as the non-root cloud-agent user: %s", script)
+	}
+	if !strings.Contains(script, `cmd+=(--model "$model")`) {
+		t.Fatalf("script should forward the selected model: %s", script)
+	}
+	if strings.Contains(script, `--append-system-prompt`) || strings.Contains(script, `system_prompt=`) {
+		t.Fatalf("script should not inject a system prompt into claude code: %s", script)
+	}
+	if !strings.Contains(script, `cmd=(claude -p "$prompt_to_send" --dangerously-skip-permissions)`) {
+		t.Fatalf("script should keep claude permission bypass enabled for agent tool use: %s", script)
+	}
+	if !strings.Contains(script, `re.sub(r'[^0-9A-Za-z]', '-', os.getcwd())`) {
+		t.Fatalf("script should derive the claude project key from cwd: %s", script)
+	}
+}

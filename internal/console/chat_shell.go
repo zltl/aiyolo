@@ -56,8 +56,8 @@ func (state consoleChatShellPageState) data() map[string]any {
 	}
 }
 
-func (handler *Handler) resolveConsoleChatShellTarget(ctx context.Context, r *http.Request) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
-	chatSessionID := strings.TrimSpace(r.URL.Query().Get("session"))
+func (handler *Handler) resolveConsoleChatCloudAgentTarget(ctx context.Context, r *http.Request, chatSessionID string) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
+	chatSessionID = strings.TrimSpace(chatSessionID)
 	if chatSessionID == "" {
 		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "缺少 chat session，无法打开 shell。", "Missing chat session; unable to open the shell."))
 	}
@@ -96,6 +96,10 @@ func (handler *Handler) resolveConsoleChatShellTarget(ctx context.Context, r *ht
 	return worker, key, account, cloudSession, nil
 }
 
+func (handler *Handler) resolveConsoleChatShellTarget(ctx context.Context, r *http.Request) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
+	return handler.resolveConsoleChatCloudAgentTarget(ctx, r, r.URL.Query().Get("session"))
+}
+
 func (handler *Handler) chatShellPageState(ctx context.Context, r *http.Request) (consoleChatShellPageState, error) {
 	worker, _, account, cloudSession, err := handler.resolveConsoleChatShellTarget(ctx, r)
 	if err != nil {
@@ -110,7 +114,7 @@ func (handler *Handler) chatShellPageState(ctx context.Context, r *http.Request)
 		SocketURL:     consoleChatShellSocketPath + "?session=" + url.QueryEscape(chatSessionID),
 		ChatURL:       consoleChatEndpoint + "?session=" + url.QueryEscape(chatSessionID),
 	}, nil
-	}
+}
 
 func (handler *Handler) chatShellPage(w http.ResponseWriter, r *http.Request) {
 	state, err := handler.chatShellPageState(r.Context(), r)
@@ -171,10 +175,12 @@ func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request
 	case finalErr = <-clientDone:
 	}
 	_ = shell.Close()
+	closedMessage := handler.requestText(r, "Shell 已断开", "Shell disconnected")
 	if finalErr != nil && !consoleChatShellIgnorableError(finalErr) {
 		_ = send(consoleChatShellSocketEvent{Type: "error", Message: finalErr.Error()})
+		closedMessage = finalErr.Error()
 	}
-	_ = send(consoleChatShellSocketEvent{Type: "closed", Message: handler.requestText(r, "Shell 已断开", "Shell disconnected")})
+	_ = send(consoleChatShellSocketEvent{Type: "closed", Message: closedMessage})
 }
 
 func streamConsoleChatShellOutput(shell workerops.InteractiveShell, send func(consoleChatShellSocketEvent) error) error {

@@ -14,6 +14,8 @@ ENV LC_ALL=C.UTF-8
 ENV DISPLAY=:99
 ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
+ENV AIYOLO_CLAUDE_USER=aiyolo
+ENV AIYOLO_CLAUDE_HOME=/home/aiyolo
 
 RUN set -eux; \
     mirror="${APT_MIRROR%/}"; \
@@ -36,7 +38,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libu2f-udev libxss1 libxtst6 mesa-utils netcat-openbsd procps psmisc python3 python3-dev python3-pip \
     python3-venv rsync sudo tini tzdata uidmap unzip wget x11vnc xauth xdg-utils xterm xvfb zip \
     docker.io fuse-overlayfs \
- && install -d -m 0755 /workspace /etc/aiyolo /usr/local/bin /tmp/runtime-root /opt \
+ && groupadd --gid 1000 "${AIYOLO_CLAUDE_USER}" \
+ && useradd --uid 1000 --gid 1000 --create-home --home-dir "${AIYOLO_CLAUDE_HOME}" --shell /bin/bash "${AIYOLO_CLAUDE_USER}" \
+ && install -d -o "${AIYOLO_CLAUDE_USER}" -g "${AIYOLO_CLAUDE_USER}" -m 0755 /workspace "${AIYOLO_CLAUDE_HOME}/.claude" \
+ && install -d -m 0755 /etc/aiyolo /usr/local/bin /tmp/runtime-root /opt \
  && wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
  && apt-get install -y /tmp/google-chrome.deb \
  && rm -f /tmp/google-chrome.deb \

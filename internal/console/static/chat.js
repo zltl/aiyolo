@@ -640,7 +640,19 @@
   const composerPrimaryStopGlyph = (form = currentForm()) => composerPrimaryButton(form)?.querySelector("[data-chat-primary-stop]") || null;
   const composerQueueIndicator = (form = currentForm()) => form?.querySelector("[data-chat-queue-indicator]") || null;
   const shellLaunchButton = (form = currentForm()) => form?.querySelector("[data-chat-action=\"open-shell\"]") || null;
-  const shellPageURL = (form = currentForm()) => String(form?.dataset.chatShellUrl || "").trim();
+  const shellSocketBaseURL = (form = currentForm()) => String(form?.dataset.chatShellSocketUrl || "").trim();
+  const shellDock = (form = currentForm()) => form?.querySelector("[data-chat-shell-dock]") || null;
+  const shellTerminalHost = (form = currentForm()) => form?.querySelector("[data-chat-shell-terminal]") || null;
+  const shellStatusNode = (form = currentForm()) => form?.querySelector("[data-chat-shell-status]") || null;
+  const shellMetaNode = (form, key) => form?.querySelector(`[data-chat-shell-${key}]`) || null;
+  const shellHeightPreferenceKey = "aiyolo.console.chat.shellHeight";
+  const shellDefaultHeight = 360;
+  const shellMinHeight = 240;
+  let activeShellController = null;
+  let activeShellForm = null;
+  let activeShellSocketURL = "";
+  let activeShellSessionID = "";
+  let shellResizeState = null;
 
   const syncDraftFieldHeight = (field) => {
     if (!(field instanceof HTMLTextAreaElement)) {
@@ -658,6 +670,145 @@
     if (draftField instanceof HTMLTextAreaElement) {
       syncDraftFieldHeight(draftField);
     }
+  };
+
+  const readShellHeightPreference = () => {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return shellDefaultHeight;
+    }
+    try {
+      const parsed = Number.parseInt(window.localStorage.getItem(shellHeightPreferenceKey) || "", 10);
+      return Number.isFinite(parsed) ? parsed : shellDefaultHeight;
+    } catch (_error) {
+      return shellDefaultHeight;
+    }
+  };
+
+  const writeShellHeightPreference = (height) => {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(shellHeightPreferenceKey, String(height));
+    } catch (_error) {
+      // Ignore storage failures and keep the in-memory size.
+    }
+  };
+
+  const normalizeShellHeight = (value) => {
+    const numeric = Number.parseInt(String(value || ""), 10);
+    const fallback = readShellHeightPreference();
+    const candidate = Number.isFinite(numeric) ? numeric : fallback;
+    const viewportCap = window.innerHeight > 0
+      ? Math.max(shellMinHeight, Math.floor(window.innerHeight * 0.72))
+      : shellDefaultHeight;
+    return Math.min(viewportCap, Math.max(shellMinHeight, candidate));
+  };
+
+  const preferredShellOpenHeight = () => {
+    const viewportDefault = window.innerHeight > 0 ? Math.floor(window.innerHeight * 0.38) : shellDefaultHeight;
+    return normalizeShellHeight(Math.max(shellDefaultHeight, viewportDefault, readShellHeightPreference()));
+  };
+
+  const applyShellHeight = (form, height, persist = false) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const nextHeight = normalizeShellHeight(height);
+    form.style.setProperty("--chat-shell-height", `${nextHeight}px`);
+    const dock = shellDock(form);
+    if (dock instanceof HTMLElement) {
+      dock.style.height = `${nextHeight}px`;
+    }
+    if (persist) {
+      writeShellHeightPreference(nextHeight);
+    }
+  };
+
+  const setShellMetaValue = (node, value) => {
+    if (!(node instanceof HTMLElement)) {
+      return;
+    }
+    node.textContent = String(value || "").trim() || t("未连接", "Not connected");
+    node.title = node.textContent;
+  };
+
+  const renderShellMeta = (form, meta = {}) => {
+    setShellMetaValue(shellMetaNode(form, "session"), meta.sessionID || activeShellSessionID);
+    setShellMetaValue(shellMetaNode(form, "worker"), meta.workerID);
+    setShellMetaValue(shellMetaNode(form, "container"), meta.containerName);
+    setShellMetaValue(shellMetaNode(form, "workspace"), meta.workspacePath);
+  };
+
+  const setShellDockVisible = (form, visible) => {
+    const dock = shellDock(form);
+    if (!(dock instanceof HTMLElement) || !(form instanceof HTMLFormElement)) {
+      return;
+    }
+    dock.hidden = !visible;
+    form.classList.toggle("is-shell-open", visible);
+    if (!visible) {
+      return;
+    }
+    applyShellHeight(form, preferredShellOpenHeight());
+    window.requestAnimationFrame(() => {
+      activeShellController?.refresh?.();
+      activeShellController?.focus?.();
+    });
+  };
+
+  const disposeShellController = () => {
+    activeShellController?.dispose?.();
+    activeShellController = null;
+    activeShellForm = null;
+  };
+
+  const ensureShellController = (form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return null;
+    }
+    const terminalHost = shellTerminalHost(form);
+    const status = shellStatusNode(form);
+    if (!(terminalHost instanceof HTMLElement) || !(status instanceof HTMLElement)) {
+      return null;
+    }
+    if (activeShellController && activeShellForm === form && document.contains(terminalHost)) {
+      return activeShellController;
+    }
+    disposeShellController();
+    if (!window.AIYoloChatShell || typeof window.AIYoloChatShell.createController !== "function") {
+      setInlineFlash(currentRoot(), t("Shell 依赖加载失败。", "Shell dependencies failed to load."), true);
+      return null;
+    }
+    activeShellController = window.AIYoloChatShell.createController({
+      terminalHost,
+      statusNode: status,
+      getSocketPath: () => activeShellSocketURL,
+      autoConnect: false,
+    });
+    activeShellForm = activeShellController ? form : null;
+    return activeShellController;
+  };
+
+  const closeChatShellDock = (form, options = {}) => {
+    activeShellController?.close?.();
+    if (options.resetSession !== false) {
+      activeShellSocketURL = "";
+      activeShellSessionID = "";
+    }
+    renderShellMeta(form, {});
+    setShellDockVisible(form, false);
+  };
+
+  const syncChatShellSession = (form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    applyShellHeight(form, preferredShellOpenHeight());
+    if (activeShellSessionID === "" || activeShellSessionID === readClientSessionID(form)) {
+      return;
+    }
+    closeChatShellDock(form);
   };
 
   const readDraftPayload = (form, options = {}) => {
@@ -721,9 +872,9 @@
       indicator.textContent = queuedCount > 0 ? t(`已排队 ${queuedCount} 条`, `Queued ${queuedCount}`) : "";
     }
     if (shellButton instanceof HTMLButtonElement) {
-      const hasShellRoute = shellPageURL(form) !== "";
-      const canOpenShell = hasShellRoute && currentSelectedEnvironment(form) !== "local" && currentSelectedModel(form) !== "";
-      shellButton.hidden = !hasShellRoute;
+      const hasShellSocket = shellSocketBaseURL(form) !== "";
+      const canOpenShell = hasShellSocket && currentSelectedEnvironment(form) !== "local" && currentSelectedModel(form) !== "";
+      shellButton.hidden = !hasShellSocket;
       shellButton.disabled = !canOpenShell;
       shellButton.title = canOpenShell
         ? t("打开 Claude Agent 容器 Shell", "Open the Claude Agent container shell")
@@ -870,6 +1021,8 @@
       draft: String(session.draft || "").trim(),
       draftAttachments,
       messages,
+      status: String(session.status || existingSession?.status || "").trim(),
+      lastError: String(session.lastError || existingSession?.lastError || "").trim(),
       createdAt,
       updatedAt: String(session.updatedAt || existingSession?.updatedAt || createdAt || nowISO()),
     };
@@ -903,6 +1056,10 @@
 
   const isPersistedSession = (session) => Boolean(session)
     && (sessionHasMessages(session) || sessionHasDraft(session));
+
+  const isCloudAgentEnvironment = (value) => String(value || "").trim().startsWith("cloud-agent:");
+
+  const sessionIsStreaming = (session) => String(session?.status || "").trim() === "streaming";
 
   const sessionSortTime = (value) => {
     const timestamp = Date.parse(String(value || "").trim());
@@ -991,6 +1148,8 @@
       ...existing,
       title: String(serverSession.title || existing.title || "").trim(),
       customTitle: Boolean(serverSession.customTitle || existing.customTitle),
+      status: String(serverSession.status || existing.status || "").trim(),
+      lastError: String(serverSession.lastError || existing.lastError || "").trim(),
       updatedAt: String(serverSession.updatedAt || existing.updatedAt || "").trim() || existing.updatedAt,
     };
     store = upsertSession(store, merged);
@@ -1536,6 +1695,7 @@
     syncSessionURL(session);
     scrollThread(root.querySelector("[data-chat-scroll]"));
     updateComposerControls(form);
+    syncChatShellSession(form);
   };
 
   const renderSessionList = (root, store) => {
@@ -1753,6 +1913,24 @@
     return { store, session, routes };
   };
 
+  const updateCurrentSessionMetadata = (updates = {}, broadcast = false) => {
+    const root = currentRoot();
+    const form = currentForm();
+    if (!root || !form) {
+      return null;
+    }
+    const routes = routeMap(form);
+    let store = normalizeStore(loadStore(), form, routes);
+    const session = captureSessionFromDOM(form, store, routes);
+    const nextSession = normalizeSession({ ...session, ...updates }, form, routes, session);
+    store = upsertSession(store, nextSession);
+    store.activeSessionId = nextSession.id;
+    saveStore(store, broadcast);
+    renderSessionList(root, store);
+    void saveSessionToServer(nextSession);
+    return nextSession;
+  };
+
   const queuePersist = () => {
     window.clearTimeout(persistTimer);
     persistTimer = window.setTimeout(() => {
@@ -1766,6 +1944,8 @@
     if (!root || !form) {
       return;
     }
+    applyShellHeight(form, readShellHeightPreference());
+    renderShellMeta(form, {});
     setSidebarCollapsed(form, false);
     const routes = routeMap(form);
     let store = normalizeStore(loadStore(), form, routes);
@@ -2010,6 +2190,9 @@
     if (!root) {
       return;
     }
+    disposeShellController();
+    activeShellSocketURL = "";
+    activeShellSessionID = "";
     root.outerHTML = html;
     hydrateWorkspace(true);
     scrollThread(currentRoot()?.querySelector("[data-chat-scroll]"));
@@ -2119,8 +2302,8 @@
 
   const openChatShell = async (form) => {
     const root = currentRoot();
-    const baseURL = shellPageURL(form);
-    if (!root || baseURL === "") {
+    const baseSocketURL = shellSocketBaseURL(form);
+    if (!root || baseSocketURL === "") {
       return;
     }
     if (currentSelectedEnvironment(form) === "local") {
@@ -2142,13 +2325,57 @@
       setInlineFlash(root, t("Shell 会话未生成，请重试。", "The shell session could not be created. Please retry."), true);
       return;
     }
-    const nextURL = new URL(baseURL, window.location.href);
+    const nextURL = new URL(baseSocketURL, window.location.href);
     nextURL.searchParams.set("session", sessionID);
-    const opened = window.open(nextURL.toString(), "_blank", "noopener");
-    if (!opened) {
-      window.location.assign(nextURL.toString());
+    const nextSocketURL = nextURL.toString();
+    if (activeShellSessionID === sessionID && activeShellSocketURL === nextSocketURL && activeShellController?.isConnected?.()) {
+      setShellDockVisible(form, true);
+      activeShellController.focus?.();
+      return;
     }
+    activeShellSocketURL = nextSocketURL;
+    activeShellSessionID = sessionID;
+    renderShellMeta(form, {
+      sessionID,
+      workerID: ensured?.workerId,
+      containerName: ensured?.containerName,
+      workspacePath: ensured?.workspacePath,
+    });
+    setShellDockVisible(form, true);
+    const controller = ensureShellController(form);
+    if (!controller) {
+      activeShellSocketURL = "";
+      activeShellSessionID = "";
+      renderShellMeta(form, {});
+      setShellDockVisible(form, false);
+      return;
+    }
+    controller.connect({ resetTerminal: true });
+    window.setTimeout(() => {
+      controller.refresh?.();
+      controller.focus?.();
+    }, 0);
   };
+
+  const delayWithAbort = (signal, timeoutMs) => new Promise((resolve, reject) => {
+    const delay = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0;
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      resolve();
+    }, delay);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 
   const streamConsoleChat = async (form, options = {}) => {
     if (form.dataset.streaming === "true") {
@@ -2191,6 +2418,8 @@
     const root = currentRoot();
     const thread = form.querySelector("[data-chat-scroll]");
     const streamURL = form.dataset.chatStreamUrl;
+    const resumeURL = form.dataset.chatStreamResumeUrl;
+    const allowReconnect = isCloudAgentEnvironment(currentSelectedEnvironment(form)) && String(resumeURL || "").trim() !== "";
     if (!thread || !streamURL) {
       restoreDraftAndSubmit(form, promptValue, attachments);
       return;
@@ -2235,6 +2464,8 @@
     updateComposerControls(form);
 
     const syncCurrentHistory = () => syncStreamHistory(form, baseMessages, userHistoryMessage, assistantHistoryMessage);
+    syncCurrentHistory();
+    updateCurrentSessionMetadata({ status: "streaming", lastError: "" });
     const restartStream = (nextPrompt, nextVisibleText, nextAttachments = []) => {
       const nextDraftField = form.querySelector("#chat-draft");
       if (!(nextDraftField instanceof HTMLTextAreaElement)) {
@@ -2257,6 +2488,10 @@
       const hasPartial = Boolean(String(assistantHistoryMessage.content || "").trim() || String(assistantHistoryMessage.reasoning || "").trim());
       syncCurrentHistory();
       queuePersist();
+      updateCurrentSessionMetadata({
+        status: hasPartial ? "interrupted" : "failed",
+        lastError: String(messageText || "").trim(),
+      });
       assistantMessage.setStreamingStatus(String(options.statusText || t("输出已中断", "Interrupted")), String(options.statusTone || "error"));
       assistantMessage.setActions(Array.isArray(options.actions)
         ? options.actions
@@ -2286,107 +2521,149 @@
     let streamErrored = false;
     let streamInterrupted = false;
     let streamOpened = false;
-    try {
-      const response = await fetch(streamURL, {
-        method: "POST",
-        body: formData,
-        signal: abortController.signal,
-        credentials: "same-origin",
-        headers: { Accept: "application/x-ndjson" },
-      });
-
+    let reconnectAttempt = 0;
+    const hasStreamProgress = () => Boolean(streamOpened || sawStreamEvent || String(assistantHistoryMessage.content || "").trim() !== "" || String(assistantHistoryMessage.reasoning || "").trim() !== "");
+    const waitForReconnect = async () => {
+      reconnectAttempt += 1;
+      assistantMessage.setStreamingStatus(t("连接已断开，正在重连…", "Connection lost, reconnecting..."), "heartbeat");
+      assistantMessage.setActions([]);
+      scrollThread(thread);
+      await delayWithAbort(abortController.signal, Math.min(4000, 400 * reconnectAttempt));
+    };
+    const handleStreamEvent = (event) => {
+      sawStreamEvent = true;
+      if (event.type === "sync") {
+        applyStreamMessage(event.message);
+        updateCurrentSessionMetadata({ status: "streaming", lastError: "" });
+        assistantMessage.setStreamingStatus(t("已重新连接，继续等待输出…", "Reconnected, waiting for more output..."), "heartbeat");
+        assistantMessage.setActions([]);
+        scrollThread(thread);
+        return;
+      }
+      if (event.type === "delta") {
+        assistantHistoryMessage.content += String(event.delta || "");
+        assistantMessage.setContent(assistantHistoryMessage.content);
+        assistantMessage.setStreamingStatus(form.dataset.chatStreamingLabel || "Streaming", "streaming");
+        assistantMessage.setActions([]);
+        scrollThread(thread);
+        return;
+      }
+      if (event.type === "reasoning") {
+        assistantHistoryMessage.reasoning += String(event.reasoning || "");
+        assistantMessage.setReasoning(assistantHistoryMessage.reasoning, true);
+        assistantMessage.setStreamingStatus(t("正在思考", "Reasoning"), "reasoning");
+        assistantMessage.setActions([]);
+        scrollThread(thread);
+        return;
+      }
+      if (event.type === "heartbeat") {
+        assistantMessage.setStreamingStatus(t("连接保持中，等待更多输出…", "Connection alive, waiting for more output..."), "heartbeat");
+        scrollThread(thread);
+        return;
+      }
+      if (event.type === "done") {
+        streamCompleted = true;
+        applyStreamMessage(event.message);
+        syncCurrentHistory();
+        queuePersist();
+        updateCurrentSessionMetadata({ status: "completed", lastError: "" });
+        if (String(event?.result?.finishReason || "").trim().toLowerCase() === "length") {
+          preserveLocalTranscript = true;
+          assistantMessage.setStreamingStatus(t("已达到输出上限", "Reached output limit"), "warning");
+          assistantMessage.setActions([{ label: t("继续生成", "Continue"), onClick: continueStream, kind: "primary" }]);
+        } else {
+          assistantMessage.setStreamingStatus(t("已完成", "Completed"), "done");
+          assistantMessage.setActions([]);
+          setInlineFlash(currentRoot(), "", false);
+        }
+        scrollThread(thread);
+        return;
+      }
+      if (event.type === "error") {
+        streamErrored = true;
+        applyStreamMessage(event.message);
+        finalizeInterruptedStream(String(event.error || t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished.")).trim());
+        return;
+      }
+      if (event.type === "replace") {
+        if (streamErrored || preserveLocalTranscript) {
+          return;
+        }
+        replaced = true;
+        replaceChatContent(event.html || "");
+      }
+    };
+    const openNDJSONResponse = async (response) => {
       if (response.redirected && response.url) {
         window.location.href = response.url;
-        return;
+        return false;
       }
       if (!response.ok || !response.body) {
-        restoreDraftAndSubmit(form, promptValue, attachments);
-        return;
+        throw new Error("stream_unavailable");
       }
-
       const contentType = response.headers.get("content-type") || "";
       if (!contentType.includes("application/x-ndjson")) {
-        restoreDraftAndSubmit(form, promptValue, attachments);
-        return;
+        throw new Error("stream_unavailable");
       }
-
       streamOpened = true;
-
-      await decodeStreamEvents(response, (event) => {
-        sawStreamEvent = true;
-        if (event.type === "delta") {
-          assistantHistoryMessage.content += String(event.delta || "");
-          assistantMessage.setContent(assistantHistoryMessage.content);
-          assistantMessage.setStreamingStatus(form.dataset.chatStreamingLabel || "Streaming", "streaming");
-          assistantMessage.setActions([]);
-          scrollThread(thread);
-          return;
-        }
-        if (event.type === "reasoning") {
-          assistantHistoryMessage.reasoning += String(event.reasoning || "");
-          assistantMessage.setReasoning(assistantHistoryMessage.reasoning, true);
-          assistantMessage.setStreamingStatus(t("正在思考", "Reasoning"), "reasoning");
-          assistantMessage.setActions([]);
-          scrollThread(thread);
-          return;
-        }
-        if (event.type === "heartbeat") {
-          assistantMessage.setStreamingStatus(t("连接保持中，等待更多输出…", "Connection alive, waiting for more output..."), "heartbeat");
-          scrollThread(thread);
-          return;
-        }
-        if (event.type === "done") {
-          streamCompleted = true;
-          applyStreamMessage(event.message);
-          syncCurrentHistory();
-          queuePersist();
-          if (String(event?.result?.finishReason || "").trim().toLowerCase() === "length") {
-            preserveLocalTranscript = true;
-            assistantMessage.setStreamingStatus(t("已达到输出上限", "Reached output limit"), "warning");
-            assistantMessage.setActions([{ label: t("继续生成", "Continue"), onClick: continueStream, kind: "primary" }]);
-          } else {
-            assistantMessage.setStreamingStatus(t("已完成", "Completed"), "done");
-            assistantMessage.setActions([]);
-            setInlineFlash(currentRoot(), "", false);
+      reconnectAttempt = 0;
+      await decodeStreamEvents(response, handleStreamEvent);
+      return true;
+    };
+    try {
+      while (true) {
+        try {
+          const response = await fetch(allowReconnect && reconnectAttempt > 0
+            ? `${resumeURL}?session=${encodeURIComponent(readClientSessionID(form))}`
+            : streamURL, allowReconnect && reconnectAttempt > 0
+            ? {
+              method: "GET",
+              signal: abortController.signal,
+              credentials: "same-origin",
+              headers: { Accept: "application/x-ndjson" },
+            }
+            : {
+              method: "POST",
+              body: formData,
+              signal: abortController.signal,
+              credentials: "same-origin",
+              headers: { Accept: "application/x-ndjson" },
+            });
+          const handled = await openNDJSONResponse(response);
+          if (handled === false || streamCompleted || streamErrored || replaced) {
+            break;
           }
-          scrollThread(thread);
-          return;
-        }
-        if (event.type === "error") {
-          streamErrored = true;
-          applyStreamMessage(event.message);
-          finalizeInterruptedStream(String(event.error || t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished.")).trim());
-          return;
-        }
-        if (event.type === "replace") {
-          if (streamErrored || preserveLocalTranscript) {
+          if (!allowReconnect) {
+            break;
+          }
+          await waitForReconnect();
+        } catch (error) {
+          if (activeStreamStopRequested || error?.name === "AbortError") {
+            finalizeInterruptedStream(t("已终止当前回复。", "Stopped current reply."), {
+              statusText: t("已终止", "Stopped"),
+              statusTone: "warning",
+              actions: [],
+              isError: false,
+            });
             return;
           }
-          replaced = true;
-          replaceChatContent(event.html || "");
+          if (allowReconnect && !streamCompleted && !streamErrored && !replaced && hasStreamProgress()) {
+            await waitForReconnect();
+            continue;
+          }
+          if (!streamCompleted && !streamErrored && hasStreamProgress()) {
+            finalizeInterruptedStream(t("连接异常，回复在完成前中断了。", "The connection dropped before the answer finished."));
+            return;
+          }
+          restoreDraftAndSubmit(form, promptValue, attachments);
+          return;
         }
-      });
-    } catch (error) {
-      if (activeStreamStopRequested || error?.name === "AbortError") {
-        finalizeInterruptedStream(t("已终止当前回复。", "Stopped current reply."), {
-          statusText: t("已终止", "Stopped"),
-          statusTone: "warning",
-          actions: [],
-          isError: false,
-        });
-        return;
       }
-      if (!streamCompleted && !streamErrored && (streamOpened || sawStreamEvent || String(assistantHistoryMessage.content || "").trim() !== "" || String(assistantHistoryMessage.reasoning || "").trim() !== "")) {
-        finalizeInterruptedStream(t("连接异常，回复在完成前中断了。", "The connection dropped before the answer finished."));
-        return;
-      }
-      restoreDraftAndSubmit(form, promptValue, attachments);
-      return;
     } finally {
       const stoppedByUser = activeStreamStopRequested;
       activeStreamController = null;
       activeStreamStopRequested = false;
-      if (streamOpened && !replaced && !streamCompleted && !streamErrored && !stoppedByUser) {
+      if (streamOpened && !replaced && !streamCompleted && !streamErrored && !stoppedByUser && !allowReconnect) {
         finalizeInterruptedStream(t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished."));
       }
       if (!replaced) {
@@ -2423,6 +2700,31 @@
       closeSessionMenus(sessionMenu);
     } else {
       closeSessionMenus();
+    }
+
+    const shellActionTarget = event.target.closest("[data-chat-shell-action]");
+    if (shellActionTarget instanceof HTMLElement && form.contains(shellActionTarget)) {
+      switch (shellActionTarget.dataset.chatShellAction) {
+        case "clear":
+          event.preventDefault();
+          ensureShellController(form)?.clear?.();
+          return;
+        case "reconnect":
+          event.preventDefault();
+          if (activeShellSocketURL === "") {
+            void openChatShell(form);
+            return;
+          }
+          setShellDockVisible(form, true);
+          ensureShellController(form)?.connect?.({ resetTerminal: true });
+          return;
+        case "close":
+          event.preventDefault();
+          closeChatShellDock(form);
+          return;
+        default:
+          break;
+      }
     }
 
     const actionTarget = event.target.closest("[data-chat-action]");
@@ -2539,11 +2841,17 @@
       if (picker instanceof HTMLDetailsElement) {
         picker.open = false;
       }
+      if (activeShellSessionID !== "") {
+        closeChatShellDock(form);
+      }
       queuePersist();
       void ensureChatEnvironment(form).catch(() => {});
       return;
     }
     if (target instanceof HTMLSelectElement && target.name === "chat_environment") {
+      if (activeShellSessionID !== "") {
+        closeChatShellDock(form);
+      }
       queuePersist();
       void ensureChatEnvironment(form).catch(() => {});
       return;
@@ -2638,8 +2946,55 @@
     void streamConsoleChat(target);
   });
 
+  document.addEventListener("pointerdown", (event) => {
+    const form = currentForm();
+    const handle = event.target.closest("[data-chat-shell-resize-handle]");
+    const dock = shellDock(form);
+    if (!(form instanceof HTMLFormElement) || !(handle instanceof HTMLElement) || !(dock instanceof HTMLElement) || dock.hidden) {
+      return;
+    }
+    event.preventDefault();
+    shellResizeState = {
+      startY: event.clientY,
+      startHeight: dock.getBoundingClientRect().height,
+      previousUserSelect: document.body.style.userSelect,
+    };
+    form.classList.add("is-shell-resizing");
+    document.body.style.userSelect = "none";
+  });
+
+  document.addEventListener("pointermove", (event) => {
+    const form = currentForm();
+    if (!(form instanceof HTMLFormElement) || !shellResizeState) {
+      return;
+    }
+    applyShellHeight(form, shellResizeState.startHeight + (shellResizeState.startY - event.clientY));
+    activeShellController?.refresh?.();
+  });
+
+  const finishShellResize = () => {
+    const form = currentForm();
+    if (!shellResizeState) {
+      return;
+    }
+    document.body.style.userSelect = shellResizeState.previousUserSelect;
+    if (form instanceof HTMLFormElement) {
+      form.classList.remove("is-shell-resizing");
+      const dock = shellDock(form);
+      if (dock instanceof HTMLElement) {
+        writeShellHeightPreference(dock.getBoundingClientRect().height);
+      }
+      activeShellController?.refresh?.();
+    }
+    shellResizeState = null;
+  };
+
+  document.addEventListener("pointerup", finishShellResize);
+  document.addEventListener("pointercancel", finishShellResize);
+
   window.addEventListener("resize", () => {
     syncCurrentDraftHeight();
+    activeShellController?.refresh?.();
   });
 
   hydrateWorkspace(false);

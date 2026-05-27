@@ -24,7 +24,7 @@ user_id="${AIYOLO_CLOUD_AGENT_USER_ID:-local-user}"
 safe_user="${user_id//@/-}"
 safe_user="${safe_user//[^A-Za-z0-9_-]/-}"
 container_name="${AIYOLO_CLOUD_AGENT_CONTAINER_NAME:-aiyolo-cloud-agent-${safe_user}}"
-image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-24.04}"
+image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-24.04-v2}"
 workspace_root="${AIYOLO_CLOUD_AGENT_WORKSPACE_ROOT:-/var/lib/aiyolo-agent/cloud-agents/${user_id}/workspace}"
 repo_snapshot_dir="${workspace_root}/aiyolo"
 docker_data_root="${AIYOLO_CLOUD_AGENT_DOCKER_DATA_ROOT:-/var/lib/aiyolo-agent/cloud-agents/${user_id}/docker}"
@@ -73,6 +73,7 @@ docker_run_args=(
   --name "$container_name" \
   --hostname "$container_name" \
   --restart unless-stopped \
+  --add-host host.docker.internal:host-gateway \
   --privileged \
   --shm-size "${AIYOLO_CLOUD_AGENT_SHM_SIZE:-2g}" \
   --label aiyolo.user_id="$user_id" \

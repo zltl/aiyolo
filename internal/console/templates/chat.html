@@ -5,7 +5,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260526c">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260527b">
+  <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body class="chat-workspace-body">
   {{template "chat-content" .}}
@@ -15,7 +16,7 @@
 
 {{define "chat-content"}}
 <div id="chat-content" class="chat-workspace-page">
-  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
+  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
     <aside class="chat-sidebar">
       <div class="chat-sidebar-surface">
         <div class="chat-sidebar-top">
@@ -109,6 +110,53 @@
       <input type="hidden" name="chat_message_role" value="{{.Role}}">
       <input type="hidden" name="chat_message_content" value="{{.Content}}">
       {{end}}
+
+      <section class="chat-shell-dock" data-chat-shell-dock hidden>
+        <div class="chat-shell-resize-handle" data-chat-shell-resize-handle role="separator" aria-orientation="horizontal" aria-label="{{msg .Locale "调整 Shell 高度" "Resize shell height"}}"></div>
+        <div class="chat-shell-panel">
+          <div class="chat-shell-panel-bar">
+            <div class="chat-shell-panel-tabs" role="tablist" aria-label="{{msg .Locale "底部面板" "Bottom panel"}}">
+              <button class="chat-shell-panel-tab is-active" type="button" role="tab" aria-selected="true">
+                {{msg .Locale "终端" "Terminal"}}
+              </button>
+            </div>
+            <div class="chat-shell-panel-actions">
+              <button class="ghost-button" type="button" data-chat-shell-action="clear">{{msg .Locale "清屏" "Clear"}}</button>
+              <button class="ghost-button" type="button" data-chat-shell-action="reconnect">{{msg .Locale "重连" "Reconnect"}}</button>
+              <button class="ghost-button" type="button" data-chat-shell-action="close">{{msg .Locale "关闭" "Close"}}</button>
+            </div>
+          </div>
+          <div class="chat-shell-panel-toolbar">
+            <div class="chat-shell-panel-copy">
+              <div class="chat-shell-panel-title">
+                <strong>{{msg .Locale "Claude Agent Shell" "Claude Agent Shell"}}</strong>
+                <span class="chat-terminal-status" data-chat-shell-status>{{msg .Locale "未连接" "Not connected"}}</span>
+              </div>
+              <div class="chat-shell-panel-meta">
+                <span class="chat-shell-panel-chip">
+                  <span class="chat-shell-panel-chip-label">Session</span>
+                  <strong data-chat-shell-session>{{msg .Locale "未连接" "Not connected"}}</strong>
+                </span>
+                <span class="chat-shell-panel-chip">
+                  <span class="chat-shell-panel-chip-label">Worker</span>
+                  <strong data-chat-shell-worker>{{msg .Locale "未连接" "Not connected"}}</strong>
+                </span>
+                <span class="chat-shell-panel-chip">
+                  <span class="chat-shell-panel-chip-label">Container</span>
+                  <strong data-chat-shell-container>{{msg .Locale "未连接" "Not connected"}}</strong>
+                </span>
+                <span class="chat-shell-panel-chip">
+                  <span class="chat-shell-panel-chip-label">Workspace</span>
+                  <strong data-chat-shell-workspace>{{msg .Locale "未连接" "Not connected"}}</strong>
+                </span>
+              </div>
+            </div>
+          </div>
+          <div class="chat-shell-panel-surface">
+            <div class="chat-terminal-canvas" data-chat-shell-terminal></div>
+          </div>
+        </div>
+      </section>
 
       <div class="chat-footer">
         <div class="chat-composer">
@@ -218,6 +266,9 @@
     </section>
   </form>
   <script src="https://unpkg.com/lucide@1.16.0/dist/umd/lucide.min.js"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260526b"></script>
+  <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+  <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+  <script src="/console/static/chat-shell.js?v=chat-shell-20260527b"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260527b"></script>
 </div>
 {{end}}

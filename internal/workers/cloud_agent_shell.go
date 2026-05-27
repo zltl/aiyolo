@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
@@ -42,37 +41,13 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		return nil, ctx.Err()
 	default:
 	}
-
-	worker, err := domain.NormalizeWorkerServer(worker)
+	target, err := resolveCloudAgentTarget(worker, key, account, cloudSession)
 	if err != nil {
 		return nil, err
 	}
-	key, err = domain.NormalizeWorkerSSHKey(key)
-	if err != nil {
-		return nil, err
-	}
-	account, err = domain.NormalizeCloudAgentAccount(account)
-	if err != nil {
-		return nil, err
-	}
-	cloudSession, err = domain.NormalizeCloudAgentSession(cloudSession)
-	if err != nil {
-		return nil, err
-	}
-	if account.ID != cloudSession.AccountID {
-		return nil, fmt.Errorf("cloud agent account %s does not match session %s", account.ID, cloudSession.ID)
-	}
-	if account.WorkerID != cloudSession.WorkerID {
-		return nil, fmt.Errorf("cloud agent account %s does not belong to worker %s", account.ID, cloudSession.WorkerID)
-	}
-	containerName := strings.TrimSpace(account.ContainerName)
-	if containerName == "" {
-		return nil, fmt.Errorf("cloud agent container name is required")
-	}
-	workspacePath := firstNonEmpty(cloudSession.WorkspacePath, account.WorkspacePath, domain.DefaultCloudAgentWorkspacePath)
 	cols, rows = normalizeCloudAgentShellSize(cols, rows)
 
-	client, err := dialSSH(worker, key)
+	client, err := dialSSH(target.worker, target.key)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +79,7 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		client.Close()
 		return nil, fmt.Errorf("open stdin pipe: %w", err)
 	}
-	if err := session.Start(buildCloudAgentShellCommand(containerName, workspacePath)); err != nil {
+	if err := session.Start(buildCloudAgentShellCommand(target.containerName, target.workspacePath)); err != nil {
 		stdin.Close()
 		stdoutReader.Close()
 		stdoutWriter.Close()

@@ -46,6 +46,7 @@ type Handler struct {
 	cfg                        Config
 	store                      storage.Store
 	tmpl                       *template.Template
+	cloudAgentRuns             *consoleCloudAgentRunRegistry
 	newChatAttachmentPublisher func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error)
 	newChatAttachmentReader    func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error)
 	probeWorker                func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (workerops.ProbeResult, error)
@@ -54,6 +55,7 @@ type Handler struct {
 	verifyWorkerBootstrap      func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error)
 	ensureCloudAgent           func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error)
 	openCloudAgentShell        func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error)
+	runCloudAgentChat          func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error)
 }
 
 func NewHandler(cfg Config, store storage.Store) *Handler {
@@ -66,11 +68,11 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 	if strings.TrimSpace(cfg.ChatAttachments.ProxyBasePath) == "" {
 		cfg.ChatAttachments.ProxyBasePath = "/console/chat/attachments/files"
 	}
-	return &Handler{cfg: cfg, store: store, tmpl: template.Must(template.New("console").Funcs(templateFuncs()).ParseFS(consoleAssets, "templates/*.html")), newChatAttachmentPublisher: func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error) {
+	return &Handler{cfg: cfg, store: store, tmpl: template.Must(template.New("console").Funcs(templateFuncs()).ParseFS(consoleAssets, "templates/*.html")), cloudAgentRuns: newConsoleCloudAgentRunRegistry(), newChatAttachmentPublisher: func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error) {
 		return artifacts.NewPublisher(cfg)
 	}, newChatAttachmentReader: func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error) {
 		return artifacts.NewObjectReader(cfg)
-	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell}
+	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentChat: runConsoleCloudAgentChat}
 }
 
 func (handler *Handler) Routes() http.Handler {
@@ -94,6 +96,7 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Post("/chat/session", handler.saveChatSession)
 		protected.Delete("/chat/session/{sessionID}", handler.deleteChatSession)
 		protected.Post("/chat/stream", handler.streamChat)
+		protected.Get("/chat/stream/resume", handler.resumeCloudAgentChatStream)
 		protected.Post("/chat/attachments", handler.uploadChatAttachments)
 		protected.Get(strings.TrimPrefix(handler.cfg.ChatAttachments.NormalizedProxyBasePath(), "/console")+"/*", handler.chatAttachmentFile)
 		protected.Post("/logout", handler.logout)

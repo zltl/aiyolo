@@ -7,7 +7,7 @@ BUILD_DIR ?= bin
 CONFIG ?= aiyolo.private.yaml
 VERSION ?= dev
 CLOUD_AGENT_USER ?= local-user
-CLOUD_AGENT_IMAGE ?= aiyolo/local-cloud-agent:ubuntu-24.04
+CLOUD_AGENT_IMAGE ?= aiyolo/local-cloud-agent:ubuntu-24.04-v2
 
 .PHONY: help fmt tidy test build build-aiyolo-windows build-release-artifacts publish-release-artifacts bootstrap-local-worker build-cloud-agent-image run-cloud-agent-local run clean
 

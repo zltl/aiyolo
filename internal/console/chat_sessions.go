@@ -435,11 +435,16 @@ func consoleChatSessionHasMessageActivity(locale string, existingJSON string, ne
 
 func (handler *Handler) persistConsoleChatSession(ctx context.Context, r *http.Request, sessionID string, publicName string, systemPrompt string, draft string, draftAttachments []consoleChatAttachmentView, messages []consoleChatMessageView, status string, requestID string, responseID string, lastError string) (domain.ConsoleChatSession, error) {
 	locale := resolveConsoleLocale(r)
+	userID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+	return handler.persistConsoleChatSessionForUser(ctx, locale, userID, sessionID, publicName, systemPrompt, draft, draftAttachments, messages, status, requestID, responseID, lastError)
+}
+
+func (handler *Handler) persistConsoleChatSessionForUser(ctx context.Context, locale string, userID string, sessionID string, publicName string, systemPrompt string, draft string, draftAttachments []consoleChatAttachmentView, messages []consoleChatMessageView, status string, requestID string, responseID string, lastError string) (domain.ConsoleChatSession, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		sessionID = newConsoleID("chat")
 	}
-	userID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+	userID = strings.TrimSpace(userID)
 	normalizedDraftAttachments := normalizeConsoleChatSessionAttachments(handler.cfg.ChatAttachments, cloneConsoleChatAttachments(draftAttachments))
 	normalizedMessages := normalizeConsoleChatSessionMessages(locale, cloneConsoleChatMessages(messages), handler.cfg.ChatAttachments)
 	existing, err := handler.store.GetConsoleChatSession(ctx, userID, sessionID)

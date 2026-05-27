@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -112,6 +113,42 @@ func consoleChatCloudAgentAccountID(workerID string) string {
 
 func consoleChatCloudAgentSessionID(chatSessionID string) string {
 	return "chat-env-" + consoleChatEnvironmentToken(chatSessionID)
+}
+
+func consoleChatHostIsLoopback(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	parsed := net.ParseIP(host)
+	return parsed != nil && (parsed.IsLoopback() || parsed.IsUnspecified())
+}
+
+func consoleChatCloudAgentBaseURL(baseURL string, worker domain.WorkerServer) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return baseURL
+	}
+	if !consoleChatHostIsLoopback(parsed.Hostname()) {
+		return baseURL
+	}
+	reachableHost := strings.TrimSpace(worker.SSHHost)
+	if consoleChatHostIsLoopback(reachableHost) || reachableHost == "" {
+		reachableHost = "host.docker.internal"
+	}
+	if port := parsed.Port(); port != "" {
+		parsed.Host = net.JoinHostPort(reachableHost, port)
+	} else {
+		parsed.Host = reachableHost
+	}
+	return strings.TrimRight(parsed.String(), "/")
 }
 
 func (handler *Handler) chatEnvironmentOptions(ctx context.Context, r *http.Request) ([]consoleChatEnvironmentOption, error) {
@@ -222,16 +259,16 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	if strings.TrimSpace(state.Form.ClientSessionID) == "" {
 		state.Form.ClientSessionID = newConsoleID("chat")
 	}
-	baseURL := handler.codexPublicBaseURL(r)
-	if strings.TrimSpace(baseURL) == "" {
-		return consoleChatEnvironmentEnsureResponse{}, errors.New(handler.requestText(r, "无法解析当前 AIYolo 访问地址", "Unable to resolve the current AIYolo public URL"))
-	}
 	worker, proxy, key, err := handler.workerExecutionInputs(ctx, workerID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return consoleChatEnvironmentEnsureResponse{}, errors.New(handler.requestText(r, "选中的 Worker 不存在或缺少 SSH 配置", "The selected worker is missing or does not have a usable SSH configuration"))
 		}
 		return consoleChatEnvironmentEnsureResponse{}, err
+	}
+	baseURL := consoleChatCloudAgentBaseURL(handler.codexPublicBaseURL(r), worker)
+	if strings.TrimSpace(baseURL) == "" {
+		return consoleChatEnvironmentEnsureResponse{}, errors.New(handler.requestText(r, "无法解析当前 AIYolo 访问地址", "Unable to resolve the current AIYolo public URL"))
 	}
 	allowedModels := consoleChatRoutePublicNames(state.Routes)
 	accountID := consoleChatCloudAgentAccountID(workerID)

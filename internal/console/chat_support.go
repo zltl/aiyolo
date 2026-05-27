@@ -162,6 +162,7 @@ func (state consoleChatPageState) data() map[string]any {
 		"ChatEnvironmentOptions":      state.EnvironmentOptions,
 		"ChatRoutes":                  state.Routes,
 		"ChatShellPageURL":            consoleChatShellPagePath,
+		"ChatShellSocketURL":          consoleChatShellSocketPath,
 		"ChatMessages":                state.Messages,
 		"ChatPresets":                 state.Presets,
 		"SelectedChatRoute":           state.SelectedRoute,
@@ -677,24 +678,42 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, errorMessage := handler.resolveConsoleChatTarget(r.Context(), r, state.Form.PublicName)
-	if errorMessage != "" {
-		state.Error = errorMessage
-		handler.renderChat(w, r, state)
-		return
-	}
-
 	requestID := requestID(r)
-	consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
-	started := time.Now()
-	state.Messages = append(state.Messages, buildConsoleChatMessageWithAttachments(locale, openai.ChatMessageRoleUser, state.Form.Draft, state.Form.Attachments))
-	executionProtocol := handler.consoleChatExecutionProtocol(target.Route, target.Provider, state.Messages[:len(state.Messages)-1], state.Form.Attachments)
-	execution, err := handler.runConsoleChatTurn(r.Context(), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Form.ReasoningEffort, state.Messages[:len(state.Messages)-1], state.Form.Draft, state.Form.Attachments)
-	persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, executionProtocol, target.Route, target.Provider, target.PricingRule, started, execution)
-	if err != nil {
+	history := state.Messages
+	userMessage := buildConsoleChatMessageWithAttachments(locale, openai.ChatMessageRoleUser, state.Form.Draft, state.Form.Attachments)
+	var execution consoleChatExecution
+	var executionErr error
+	if state.Form.Environment != consoleChatEnvironmentLocal {
+		worker, key, account, cloudSession, targetErr := handler.resolveConsoleChatCloudAgentTarget(r.Context(), r, state.Form.ClientSessionID)
+		if targetErr != nil {
+			state.Error = targetErr.Error()
+			handler.renderChat(w, r, state)
+			return
+		}
+		execution, executionErr = handler.runCloudAgentChat(r.Context(), worker, key, account, cloudSession, consoleCloudAgentChatRequest{
+			PublicName:  state.Form.PublicName,
+			History:     history,
+			UserInput:   state.Form.Draft,
+			Attachments: state.Form.Attachments,
+		})
+	} else {
+		target, errorMessage := handler.resolveConsoleChatTarget(r.Context(), r, state.Form.PublicName)
+		if errorMessage != "" {
+			state.Error = errorMessage
+			handler.renderChat(w, r, state)
+			return
+		}
+		consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+		started := time.Now()
+		executionProtocol := handler.consoleChatExecutionProtocol(target.Route, target.Provider, history, state.Form.Attachments)
+		execution, executionErr = handler.runConsoleChatTurn(r.Context(), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Form.ReasoningEffort, history, state.Form.Draft, state.Form.Attachments)
+		persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, executionProtocol, target.Route, target.Provider, target.PricingRule, started, execution)
+	}
+	state.Messages = append(history, userMessage)
+	if executionErr != nil {
 		state.Messages = consoleChatAppendResultMessage(locale, state.Messages, execution.Result)
-		handler.syncConsoleChatPageSession(context.WithoutCancel(r.Context()), r, &state, state.Messages, consoleChatSessionStatusForError(execution.Result), requestID, execution.Result.ResponseID, err.Error())
-		state.Error = fmt.Sprintf(handler.requestText(r, "对话失败：%s", "Chat failed: %s"), err.Error())
+		handler.syncConsoleChatPageSession(context.WithoutCancel(r.Context()), r, &state, state.Messages, consoleChatSessionStatusForError(execution.Result), requestID, execution.Result.ResponseID, executionErr.Error())
+		state.Error = fmt.Sprintf(handler.requestText(r, "对话失败：%s", "Chat failed: %s"), executionErr.Error())
 		handler.renderChat(w, r, state)
 		return
 	}

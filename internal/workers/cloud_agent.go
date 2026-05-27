@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultCloudAgentImage               = "aiyolo/local-cloud-agent:ubuntu-24.04"
+	defaultCloudAgentImage               = "aiyolo/local-cloud-agent:ubuntu-24.04-v2"
 	defaultCloudAgentWorkspaceSubdir     = "cloud-agents"
 	defaultCloudAgentUbuntuRelease       = "noble"
 	defaultCloudAgentUbuntuSeries        = "24.04"
@@ -29,6 +29,8 @@ const (
 	defaultCloudAgentDisplay             = ":99"
 	defaultCloudAgentSHMSize             = "2g"
 	defaultCloudAgentDockerStorageDriver = "vfs"
+	defaultCloudAgentClaudeUser          = "aiyolo"
+	defaultCloudAgentClaudeHome          = "/home/" + defaultCloudAgentClaudeUser
 )
 
 type CloudAgentStartOptions struct {
@@ -543,6 +545,44 @@ def container_summary(inspected):
     return summary
 
 
+def env_map(inspected):
+    env = {}
+    for entry in inspected.get("Config", {}).get("Env") or []:
+        if "=" not in entry:
+            continue
+        key, value = entry.split("=", 1)
+        env[key] = value
+    return env
+
+
+def mount_source(inspected, destination):
+    for mount in inspected.get("Mounts") or []:
+        if mount.get("Destination") == destination:
+            return mount.get("Source", "")
+    return ""
+
+
+def container_matches(inspected):
+    labels = inspected.get("Config", {}).get("Labels") or {}
+    if labels.get("aiyolo.user_id") != payload["user_id"]:
+        return False
+    if labels.get("aiyolo.agent_type") != payload["agent_type"]:
+        return False
+    if labels.get("aiyolo.workspace_path") != payload["workspace_path"]:
+        return False
+    if inspected.get("Config", {}).get("Image") != payload["image"]:
+        return False
+    if mount_source(inspected, payload["workspace_path"]) != payload["workspace_root"]:
+        return False
+    if mount_source(inspected, "/var/lib/docker") != payload["docker_data_root"]:
+        return False
+    current_env = env_map(inspected)
+    for key, expected in (payload.get("container_env") or {}).items():
+        if current_env.get(key) != expected:
+            return False
+    return True
+
+
 def wait_for(command, timeout_seconds):
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
@@ -559,8 +599,7 @@ def ensure_container():
     existing_id = existing.stdout.strip()
     if existing_id:
         inspected = inspect_container()
-        labels = inspected.get("Config", {}).get("Labels") or {}
-        if inspected.get("State", {}).get("Running") and inspected.get("Config", {}).get("Image") == payload["image"] and labels.get("aiyolo.user_id") == payload["user_id"]:
+        if inspected.get("State", {}).get("Running") and container_matches(inspected):
             return container_summary(inspected)
         run(["docker", "rm", "-f", payload["container_name"]])
     args = [
@@ -568,6 +607,7 @@ def ensure_container():
         "--name", payload["container_name"],
         "--hostname", payload["container_name"],
         "--restart", "unless-stopped",
+        "--add-host", "host.docker.internal:host-gateway",
         "--privileged",
         "--shm-size", payload["shm_size"],
         "--label", f"aiyolo.user_id={payload['user_id']}",
@@ -629,6 +669,8 @@ ENV LC_ALL=C.UTF-8
 ENV DISPLAY=:99
 ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
+ENV AIYOLO_CLAUDE_USER=aiyolo
+ENV AIYOLO_CLAUDE_HOME=/home/aiyolo
 
 RUN set -eux; \
     mirror="${APT_MIRROR%/}"; \
@@ -651,7 +693,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libu2f-udev libxss1 libxtst6 mesa-utils netcat-openbsd procps psmisc python3 python3-dev python3-pip \
     python3-venv rsync sudo tini tzdata uidmap unzip wget x11vnc xauth xdg-utils xterm xvfb zip \
     docker.io fuse-overlayfs \
- && install -d -m 0755 /workspace /etc/aiyolo /usr/local/bin /tmp/runtime-root /opt \
+ && groupadd --gid 1000 "${AIYOLO_CLAUDE_USER}" \
+ && useradd --uid 1000 --gid 1000 --create-home --home-dir "${AIYOLO_CLAUDE_HOME}" --shell /bin/bash "${AIYOLO_CLAUDE_USER}" \
+ && install -d -o "${AIYOLO_CLAUDE_USER}" -g "${AIYOLO_CLAUDE_USER}" -m 0755 /workspace "${AIYOLO_CLAUDE_HOME}/.claude" \
+ && install -d -m 0755 /etc/aiyolo /usr/local/bin /tmp/runtime-root /opt \
  && wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
  && apt-get install -y /tmp/google-chrome.deb \
  && rm -f /tmp/google-chrome.deb \
@@ -716,7 +761,12 @@ const cloudAgentBaseJSON = `{
 const cloudAgentEntrypointScript = `#!/usr/bin/env bash
 set -euo pipefail
 
-install -d -m 0755 /workspace "${XDG_RUNTIME_DIR:-/tmp/runtime-root}" /tmp/.X11-unix
+claude_user="${AIYOLO_CLAUDE_USER:-aiyolo}"
+claude_home="${AIYOLO_CLAUDE_HOME:-/home/${claude_user}}"
+
+install -d -m 0755 "${XDG_RUNTIME_DIR:-/tmp/runtime-root}" /tmp/.X11-unix
+install -d -o "$claude_user" -g "$claude_user" -m 0755 /workspace "$claude_home" "$claude_home/.claude"
+chown -R "$claude_user:$claude_user" /workspace "$claude_home/.claude"
 chmod 1777 /tmp/.X11-unix
 
 if [[ $# -eq 0 ]]; then
