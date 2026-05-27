@@ -451,7 +451,7 @@ func (store *PostgresStore) LookupModelRoute(ctx context.Context, publicName str
 
 func (store *PostgresStore) UpsertPricingRule(ctx context.Context, rule domain.PricingRule) error {
 	if strings.TrimSpace(rule.Currency) == "" {
-		rule.Currency = "USD"
+		rule.Currency = domain.DefaultBillingCurrency
 	}
 	if rule.EffectiveFrom.IsZero() {
 		rule.EffectiveFrom = time.Now().UTC()

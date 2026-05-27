@@ -22,6 +22,8 @@ import (
 	workerops "github.com/zltl/aiyolo/internal/workers"
 )
 
+const consoleSessionTTL = 90 * 24 * time.Hour
+
 type Config struct {
 	SecretKey                 string
 	AdminEmail                string
@@ -55,6 +57,7 @@ type Handler struct {
 	verifyWorkerBootstrap      func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error)
 	ensureCloudAgent           func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error)
 	openCloudAgentShell        func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error)
+	runCloudAgentCommand      func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, script string) (string, error)
 	runCloudAgentChat          func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error)
 }
 
@@ -72,7 +75,7 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 		return artifacts.NewPublisher(cfg)
 	}, newChatAttachmentReader: func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error) {
 		return artifacts.NewObjectReader(cfg)
-	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentChat: runConsoleCloudAgentChat}
+	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentCommand: workerops.RunCloudAgentCommand, runCloudAgentChat: runConsoleCloudAgentChat}
 }
 
 func (handler *Handler) Routes() http.Handler {
@@ -80,6 +83,7 @@ func (handler *Handler) Routes() http.Handler {
 	router.Get("/static/console.css", handler.styles)
 	router.Get("/static/chat.js", handler.chatScript)
 	router.Get("/static/chat-shell.js", handler.chatShellScript)
+	router.Get("/static/chat-workspace.js", handler.chatWorkspaceScript)
 	router.Get("/locale", handler.setLocale)
 	router.Get("/login", handler.loginPage)
 	router.Post("/login", handler.login)
@@ -90,8 +94,12 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Get("/", handler.dashboard)
 		protected.Get("/chat", handler.chat)
 		protected.Post("/chat", handler.sendChat)
+		protected.Get("/chat/shell/ready", handler.chatShellReady)
 		protected.Get("/chat/shell", handler.chatShellPage)
 		protected.Handle("/chat/shell/ws", http.HandlerFunc(handler.chatShellSocket))
+		protected.Get("/chat/workspace/tree", handler.chatWorkspaceTree)
+		protected.Get("/chat/workspace/file", handler.chatWorkspaceFile)
+		protected.Post("/chat/workspace/file", handler.saveChatWorkspaceFile)
 		protected.Post("/chat/environment/ensure", handler.chatEnvironmentEnsure)
 		protected.Post("/chat/session", handler.saveChatSession)
 		protected.Delete("/chat/session/{sessionID}", handler.deleteChatSession)
@@ -158,7 +166,7 @@ func (handler *Handler) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (handler *Handler) logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: consoleSessionCookieName, Value: "", Path: "/console", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: consoleSessionCookieName, Value: "", Path: "/console", MaxAge: -1, Expires: time.Unix(0, 0), HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	clearOAuthStateCookie(w)
 	http.Redirect(w, r, "/console/login", http.StatusSeeOther)
 }
@@ -174,6 +182,12 @@ func (handler *Handler) requireSession(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/console/login", http.StatusSeeOther)
 			return
 		}
+		subject := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+		if subject == "" {
+			http.Redirect(w, r, "/console/login", http.StatusSeeOther)
+			return
+		}
+		setSessionCookie(w, subject, handler.cfg.SecretKey)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -405,7 +419,12 @@ func (handler *Handler) upsertCompatibleProviderAndSync(w http.ResponseWriter, r
 		http.Error(w, fmt.Errorf("upsert provider: %w", err).Error(), http.StatusInternalServerError)
 		return
 	}
-	summary, err := syncCompatibleModelRoutes(r.Context(), handler.store, provider)
+	usdToCNYExchangeRate, err := handler.consoleUSDCNYExchangeRate(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	summary, err := syncCompatibleModelRoutesWithRate(r.Context(), handler.store, provider, usdToCNYExchangeRate)
 	if err != nil {
 		http.Error(w, fmt.Errorf("sync models: %w", err).Error(), http.StatusInternalServerError)
 		return
@@ -447,7 +466,12 @@ func (handler *Handler) syncProviderModels(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	summary, err := syncCompatibleModelRoutes(r.Context(), handler.store, provider)
+	usdToCNYExchangeRate, err := handler.consoleUSDCNYExchangeRate(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	summary, err := syncCompatibleModelRoutesWithRate(r.Context(), handler.store, provider, usdToCNYExchangeRate)
 	if err != nil {
 		http.Error(w, fmt.Errorf("sync models: %w", err).Error(), http.StatusInternalServerError)
 		return
@@ -693,6 +717,17 @@ func (handler *Handler) chatScript(w http.ResponseWriter, r *http.Request) {
 
 func (handler *Handler) chatShellScript(w http.ResponseWriter, r *http.Request) {
 	script, err := consoleAssets.ReadFile("static/chat-shell.js")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(script)
+}
+
+func (handler *Handler) chatWorkspaceScript(w http.ResponseWriter, r *http.Request) {
+	script, err := consoleAssets.ReadFile("static/chat-workspace.js")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -982,10 +1017,11 @@ func clientIP(r *http.Request) string {
 }
 
 func setSessionCookie(w http.ResponseWriter, email, secret string) {
-	expires := time.Now().Add(12 * time.Hour).Unix()
+	expiresAt := time.Now().Add(consoleSessionTTL).UTC()
+	expires := expiresAt.Unix()
 	value := email + ":" + strconv.FormatInt(expires, 10)
 	signature := auth.Sign(value, secret)
-	http.SetCookie(w, &http.Cookie{Name: consoleSessionCookieName, Value: value + ":" + signature, Path: "/console", Expires: time.Unix(expires, 0), HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: consoleSessionCookieName, Value: value + ":" + signature, Path: "/console", Expires: expiresAt, MaxAge: int(consoleSessionTTL / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
 }
 
 func verifySessionCookie(value, secret string) bool {
@@ -1033,25 +1069,30 @@ func newConsoleID(prefix string) string {
 
 func money(microCents int64, currency ...string) string {
 	amount := strconv.FormatFloat(float64(microCents)/100000000, 'f', 4, 64)
-	code := "USD"
+	code := domain.DefaultBillingCurrency
 	if len(currency) > 0 {
 		if trimmed := strings.ToUpper(strings.TrimSpace(currency[0])); trimmed != "" {
 			code = trimmed
 		}
 	}
 	switch code {
-	case "CNY":
+	case domain.CurrencyCNY:
 		return "¥" + amount
-	case "USD":
+	case domain.CurrencyUSD:
 		return "$" + amount
 	default:
 		return code + " " + amount
 	}
 }
 
+func centsMoney(cents int64, currency ...string) string {
+	return money(cents*1000000, currency...)
+}
+
 func templateFuncs() template.FuncMap {
 	return template.FuncMap{
 		"displayTitle":                          pageTitleLocalized,
+		"centsMoney":                            centsMoney,
 		"effectiveModelProxy":                   effectiveModelProxy,
 		"modelProxySelectLabel":                 modelProxySelectLabel,
 		"msg":                                   consoleText,

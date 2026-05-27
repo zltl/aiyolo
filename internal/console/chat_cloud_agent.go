@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
-
 	"github.com/zltl/aiyolo/internal/domain"
 	workerops "github.com/zltl/aiyolo/internal/workers"
 )
@@ -34,7 +32,7 @@ type consoleCloudAgentStreamParser struct {
 
 func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error) {
 	publicName := firstNonEmpty(strings.TrimSpace(request.PublicName), strings.TrimSpace(account.ModelPublicName))
-	sessionID := consoleCloudAgentClaudeSessionID(account.UserID, cloudSession.ChatSessionID)
+	sessionID := domain.CloudAgentClaudeSessionID(account.UserID, cloudSession.ChatSessionID)
 	parser := &consoleCloudAgentStreamParser{}
 	output, err := workerops.RunCloudAgentClaudeCode(ctx, worker, key, account, cloudSession, workerops.CloudAgentClaudeCodeOptions{
 		SessionID:     sessionID,
@@ -69,7 +67,7 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 			DurationMS:    parser.durationMS,
 		},
 		Usage: domain.UsageRecord{
-			Currency: "USD",
+			Currency: domain.DefaultBillingCurrency,
 			Stream:   request.Stream,
 		},
 	}
@@ -93,11 +91,6 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 	result.StatusCode = 200
 	result.Usage.StatusCode = 200
 	return result, nil
-}
-
-func consoleCloudAgentClaudeSessionID(userID string, chatSessionID string) string {
-	token := strings.TrimSpace(userID) + ":" + strings.TrimSpace(chatSessionID)
-	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("aiyolo-console-cloud-agent:"+token)).String()
 }
 
 func consoleCloudAgentCurrentPrompt(userInput string, attachments []consoleChatAttachmentView) string {

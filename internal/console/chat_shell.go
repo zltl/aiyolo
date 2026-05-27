@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -48,9 +49,20 @@ type consoleChatShellSocketEvent struct {
 	Message string `json:"message,omitempty"`
 }
 
+type consoleChatShellReadyResponse struct {
+	Status        string `json:"status"`
+	SessionID     string `json:"sessionId,omitempty"`
+	Environment   string `json:"environment,omitempty"`
+	WorkerID      string `json:"workerId,omitempty"`
+	ContainerName string `json:"containerName,omitempty"`
+	WorkspacePath string `json:"workspacePath,omitempty"`
+	SocketURL     string `json:"socketUrl,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
 func (state consoleChatShellPageState) data() map[string]any {
 	return map[string]any{
-		"Title":          "Shell",
+		"Title":          "Claude Code",
 		"ChatShell":      state,
 		"ChatShellError": state.Error,
 	}
@@ -100,12 +112,12 @@ func (handler *Handler) resolveConsoleChatShellTarget(ctx context.Context, r *ht
 	return handler.resolveConsoleChatCloudAgentTarget(ctx, r, r.URL.Query().Get("session"))
 }
 
-func (handler *Handler) chatShellPageState(ctx context.Context, r *http.Request) (consoleChatShellPageState, error) {
-	worker, _, account, cloudSession, err := handler.resolveConsoleChatShellTarget(ctx, r)
+func (handler *Handler) chatShellPageStateForSession(ctx context.Context, r *http.Request, chatSessionID string) (consoleChatShellPageState, error) {
+	worker, _, account, cloudSession, err := handler.resolveConsoleChatCloudAgentTarget(ctx, r, chatSessionID)
 	if err != nil {
 		return consoleChatShellPageState{}, err
 	}
-	chatSessionID := firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(r.URL.Query().Get("session")))
+	chatSessionID = firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(chatSessionID))
 	return consoleChatShellPageState{
 		SessionID:     chatSessionID,
 		WorkerID:      worker.ID,
@@ -114,6 +126,10 @@ func (handler *Handler) chatShellPageState(ctx context.Context, r *http.Request)
 		SocketURL:     consoleChatShellSocketPath + "?session=" + url.QueryEscape(chatSessionID),
 		ChatURL:       consoleChatEndpoint + "?session=" + url.QueryEscape(chatSessionID),
 	}, nil
+}
+
+func (handler *Handler) chatShellPageState(ctx context.Context, r *http.Request) (consoleChatShellPageState, error) {
+	return handler.chatShellPageStateForSession(ctx, r, r.URL.Query().Get("session"))
 }
 
 func (handler *Handler) chatShellPage(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +141,30 @@ func (handler *Handler) chatShellPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	handler.render(w, r, "chat-shell", state.data())
+}
+
+func (handler *Handler) chatShellReady(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session"))
+	state, err := handler.chatShellPageStateForSession(r.Context(), r, sessionID)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(consoleChatShellErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatShellReadyResponse{
+			Status:    "error",
+			SessionID: sessionID,
+			Error:     err.Error(),
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(consoleChatShellReadyResponse{
+		Status:        "ready",
+		SessionID:     state.SessionID,
+		Environment:   consoleChatEnvironmentValue(state.WorkerID),
+		WorkerID:      state.WorkerID,
+		ContainerName: state.ContainerName,
+		WorkspacePath: state.WorkspacePath,
+		SocketURL:     state.SocketURL,
+	})
 }
 
 func (handler *Handler) chatShellSocket(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +197,7 @@ func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request
 		defer sendMu.Unlock()
 		return websocket.JSON.Send(ws, event)
 	}
-	_ = send(consoleChatShellSocketEvent{Type: "ready", Message: handler.requestText(r, "Shell 已连接", "Shell connected")})
+	_ = send(consoleChatShellSocketEvent{Type: "ready", Message: handler.requestText(r, "Claude Code 已连接", "Claude Code connected")})
 
 	shellDone := make(chan error, 1)
 	go func() {
@@ -175,7 +215,7 @@ func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request
 	case finalErr = <-clientDone:
 	}
 	_ = shell.Close()
-	closedMessage := handler.requestText(r, "Shell 已断开", "Shell disconnected")
+	closedMessage := handler.requestText(r, "Claude Code 已断开", "Claude Code disconnected")
 	if finalErr != nil && !consoleChatShellIgnorableError(finalErr) {
 		_ = send(consoleChatShellSocketEvent{Type: "error", Message: finalErr.Error()})
 		closedMessage = finalErr.Error()

@@ -15,7 +15,7 @@ ENV DISPLAY=:99
 ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
 ENV AIYOLO_CLAUDE_USER=aiyolo
-ENV AIYOLO_CLAUDE_HOME=/home/aiyolo
+ENV AIYOLO_CLAUDE_HOME=/workspace
 
 RUN set -eux; \
     mirror="${APT_MIRROR%/}"; \

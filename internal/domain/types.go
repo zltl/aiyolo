@@ -14,6 +14,11 @@ const (
 	ProtocolOpenAI    = "openai"
 	ProtocolAnthropic = "anthropic"
 
+	CurrencyUSD               = "USD"
+	CurrencyCNY               = "CNY"
+	DefaultBillingCurrency    = CurrencyCNY
+	DefaultUSDCNYExchangeRate = "8"
+
 	StatusEnabled  = "enabled"
 	StatusDisabled = "disabled"
 	StatusActive   = "active"
@@ -923,6 +928,7 @@ type ConsoleAuthSettings struct {
 	LocalPasswordEnabled bool
 	AllowedEmails        []string
 	AllowedDomains       []string
+	USDCNYExchangeRate   string
 	Providers            []OAuthProviderSettings
 	UpdatedAt            time.Time
 }

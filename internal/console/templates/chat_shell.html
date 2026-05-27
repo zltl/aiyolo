@@ -5,16 +5,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo Shell</title>
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260527b">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260527h">
   <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body class="chat-terminal-body">
   <div class="chat-terminal-page" data-chat-shell-page {{if .ChatShell.SocketURL}}data-chat-shell-socket-url="{{.ChatShell.SocketURL}}"{{end}}>
     <header class="chat-terminal-header">
       <div class="chat-terminal-heading">
-        <p class="chat-terminal-kicker">{{msg .Locale "Claude Agent Shell" "Claude Agent Shell"}}</p>
+        <p class="chat-terminal-kicker">{{msg .Locale "Claude Code Terminal" "Claude Code Terminal"}}</p>
         <h1>{{if .ChatShell.WorkerID}}{{.ChatShell.WorkerID}}{{else}}AIYolo{{end}}</h1>
-        <p class="chat-terminal-copy">{{msg .Locale "直接连接当前 chat 绑定的 claude-agent container，可像真实终端一样输入命令。" "Directly connect to the claude-agent container attached to this chat session and type commands like a real shell."}}</p>
+        <p class="chat-terminal-copy">{{msg .Locale "直接进入当前 chat 绑定的 Claude Code 会话，用户可以在这个终端里直接和 Claude 对话。" "Directly attach to the Claude Code session bound to this chat so the user can talk to Claude inside the terminal."}}</p>
       </div>
       <div class="chat-terminal-actions">
         {{if .ChatShell.ChatURL}}
@@ -46,7 +46,7 @@
     {{else}}
     <section class="chat-terminal-stage">
       <div class="chat-terminal-toolbar">
-        <span class="chat-terminal-status" data-chat-shell-status>{{msg .Locale "正在连接 shell…" "Connecting shell…"}}</span>
+        <span class="chat-terminal-status" data-chat-shell-status>{{msg .Locale "正在连接 Claude Code…" "Connecting Claude Code…"}}</span>
       </div>
       <div class="chat-terminal-surface">
         <div class="chat-terminal-canvas" data-chat-shell-terminal></div>
@@ -57,7 +57,7 @@
 
   <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
   <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
-  <script src="/console/static/chat-shell.js?v=chat-shell-20260527b"></script>
+  <script src="/console/static/chat-shell.js?v=chat-shell-20260527c"></script>
 </body>
 </html>
 {{end}}

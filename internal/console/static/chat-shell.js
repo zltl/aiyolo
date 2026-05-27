@@ -156,7 +156,7 @@
           case "ready":
             lastErrorMessage = "";
             lastCloseMessage = "";
-            setStatus(String(payload.message || t("Shell 已连接", "Shell connected")), false);
+            setStatus(String(payload.message || t("Claude Code 已连接", "Claude Code connected")), false);
             break;
           case "output":
             if (payload.data) {

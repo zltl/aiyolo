@@ -346,7 +346,7 @@ func (store *MemoryStore) UpsertPricingRule(_ context.Context, rule domain.Prici
 		rule.EffectiveFrom = time.Now().UTC()
 	}
 	if strings.TrimSpace(rule.Currency) == "" {
-		rule.Currency = "USD"
+		rule.Currency = domain.DefaultBillingCurrency
 	}
 	store.pricingRules[rule.ID] = rule
 	return nil

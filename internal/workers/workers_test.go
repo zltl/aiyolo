@@ -1,6 +1,7 @@
 package workers
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -131,7 +132,7 @@ func TestBuildCloudAgentClaudeCodeRemoteScriptIncludesSessionRecoveryAndFlags(t 
 	if !strings.Contains(script, `cmd+=(--output-format stream-json --verbose --include-partial-messages)`) {
 		t.Fatalf("script should enable stream-json partial output: %s", script)
 	}
-	if !strings.Contains(script, `-u 'aiyolo'`) || !strings.Contains(script, `-e HOME='/home/aiyolo'`) {
+	if !strings.Contains(script, `-u 'aiyolo'`) || !strings.Contains(script, `-e HOME='/workspace'`) {
 		t.Fatalf("script should run claude as the non-root cloud-agent user: %s", script)
 	}
 	if !strings.Contains(script, `cmd+=(--model "$model")`) {
@@ -145,5 +146,31 @@ func TestBuildCloudAgentClaudeCodeRemoteScriptIncludesSessionRecoveryAndFlags(t 
 	}
 	if !strings.Contains(script, `re.sub(r'[^0-9A-Za-z]', '-', os.getcwd())`) {
 		t.Fatalf("script should derive the claude project key from cwd: %s", script)
+	}
+}
+
+func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
+	script := buildCloudAgentShellCommand("aiyolo-cloud-agent-user", "/workspace", "claude-session-1", "gpt-5.4")
+
+	if !regexp.MustCompile(`(?m)-u .*aiyolo`).MatchString(script) {
+		t.Fatalf("shell command should exec as the non-root cloud-agent user: %s", script)
+	}
+	if regexp.MustCompile(`(?m)-u .*root`).MatchString(script) {
+		t.Fatalf("shell command should not exec as root: %s", script)
+	}
+	if !regexp.MustCompile(`(?m)-e HOME=.*?/workspace`).MatchString(script) || !regexp.MustCompile(`(?m)-e USER=.*?aiyolo`).MatchString(script) {
+		t.Fatalf("shell command should export the non-root user environment: %s", script)
+	}
+	if !strings.Contains(script, `-w "$workspace_path"`) {
+		t.Fatalf("shell command should preserve the workspace directory: %s", script)
+	}
+	if !strings.Contains(script, `cmd=(claude --dangerously-skip-permissions)`) {
+		t.Fatalf("shell command should launch interactive claude code instead of a plain bash login shell: %s", script)
+	}
+	if !strings.Contains(script, `cmd+=(--resume "$session_id")`) || !strings.Contains(script, `cmd+=(--session-id "$session_id")`) {
+		t.Fatalf("shell command should resume the existing claude session or create it on first launch: %s", script)
+	}
+	if !strings.Contains(script, `cmd+=(--model "$model")`) {
+		t.Fatalf("shell command should reuse the selected model when opening claude code: %s", script)
 	}
 }

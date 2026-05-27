@@ -69,7 +69,7 @@ type consoleChatPromptView struct {
 	Prompt string
 }
 
-var consoleChatAllowedExactModels = []string{"deepseek-v4-pro", "gpt-5.4"}
+var consoleChatAllowedExactModels = []string{"deepseek-v4-pro", "gpt-5.4", "claude-opus-4.7", "claude-sonnet-4.6", "gpt-5.5"}
 var consoleChatDeepSeekReasoningEfforts = []string{"high", "max"}
 
 func consoleChatCompletionTokens(route domain.ModelRoute) int {
@@ -163,6 +163,8 @@ func (state consoleChatPageState) data() map[string]any {
 		"ChatRoutes":                  state.Routes,
 		"ChatShellPageURL":            consoleChatShellPagePath,
 		"ChatShellSocketURL":          consoleChatShellSocketPath,
+		"ChatWorkspaceTreeURL":       consoleChatWorkspaceTreePath,
+		"ChatWorkspaceFileURL":       consoleChatWorkspaceFilePath,
 		"ChatMessages":                state.Messages,
 		"ChatPresets":                 state.Presets,
 		"SelectedChatRoute":           state.SelectedRoute,
@@ -729,7 +731,7 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 func runConsoleChatTurn(ctx context.Context, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) (consoleChatExecution, error) {
 	protocol := consoleChatRouteProtocol(route, provider)
 	if protocol == "" {
-		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest}}, &consoleUpstreamError{StatusCode: http.StatusBadRequest, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
+		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusBadRequest}}, &consoleUpstreamError{StatusCode: http.StatusBadRequest, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
 	}
 	return runConsoleChatTurnWithContinuation(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, history, userInput, attachments, false, nil, nil)
 }
@@ -757,7 +759,7 @@ func buildConsoleChatUsageRecord(requestID, userID, protocol string, route domai
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
 	}
 	if usage.Currency == "" {
-		usage.Currency = firstNonEmpty(pricingRule.Currency, "USD")
+		usage.Currency = firstNonEmpty(pricingRule.Currency, domain.DefaultBillingCurrency)
 	}
 	if usage.CostMicroCents == 0 && usage.StatusCode < 400 {
 		usage.CostMicroCents = calculateModelTestUsageCost(pricingRule, usage)

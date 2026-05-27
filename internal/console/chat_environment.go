@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
 	workerops "github.com/zltl/aiyolo/internal/workers"
@@ -216,6 +217,80 @@ func consoleChatRoutePublicNames(routes []consoleChatRouteView) []string {
 	return result
 }
 
+func consoleChatStringSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		set[trimmed] = struct{}{}
+	}
+	return set
+}
+
+func consoleChatSameStringSet(left, right []string) bool {
+	leftSet := consoleChatStringSet(left)
+	rightSet := consoleChatStringSet(right)
+	if len(leftSet) != len(rightSet) {
+		return false
+	}
+	for value := range leftSet {
+		if _, ok := rightSet[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func consoleChatCloudAgentAllowedProtocols() []string {
+	return []string{domain.ProtocolOpenAI, domain.ProtocolAnthropic}
+}
+
+func (handler *Handler) ensureConsoleChatEnvironmentAPIKey(ctx context.Context, userID, workerID string, account domain.CloudAgentAccount, allowedModels []string, now time.Time) (domain.CloudAgentAccount, error) {
+	desiredProtocols := consoleChatCloudAgentAllowedProtocols()
+	var existingKey domain.APIKey
+	if credential := strings.TrimSpace(account.Credential); credential != "" {
+		apiKey, err := handler.store.FindAPIKeyByHash(ctx, auth.HashAPIKey(credential))
+		switch {
+		case err == nil:
+			if auth.APIKeyActive(apiKey, now) && consoleChatSameStringSet(apiKey.AllowedProtocols, desiredProtocols) && consoleChatSameStringSet(apiKey.AllowedModels, allowedModels) {
+				return account, nil
+			}
+			existingKey = apiKey
+		case errors.Is(err, storage.ErrNotFound):
+		default:
+			return domain.CloudAgentAccount{}, err
+		}
+	}
+	clearKey, apiKey, err := newConsoleAPIKey(apiKeySpec{
+		ID:                 strings.TrimSpace(existingKey.ID),
+		Name:               firstNonEmpty(strings.TrimSpace(existingKey.Name), fmt.Sprintf("Cloud Agent %s %s", workerID, now.Format("2006-01-02 15:04:05"))),
+		Kind:               "live",
+		UserID:             firstNonEmpty(strings.TrimSpace(existingKey.UserID), userID),
+		OrganizationID:     strings.TrimSpace(existingKey.OrganizationID),
+		ProjectID:          strings.TrimSpace(existingKey.ProjectID),
+		Status:             domain.StatusActive,
+		AllowedProtocols:   desiredProtocols,
+		AllowedModels:      allowedModels,
+		RPMLimit:           existingKey.RPMLimit,
+		TPMLimit:           existingKey.TPMLimit,
+		ConcurrentLimit:    existingKey.ConcurrentLimit,
+		DailyBudgetCents:   existingKey.DailyBudgetCents,
+		MonthlyBudgetCents: existingKey.MonthlyBudgetCents,
+		ExpiresAt:          existingKey.ExpiresAt,
+		CreatedAt:          existingKey.CreatedAt,
+	})
+	if err != nil {
+		return domain.CloudAgentAccount{}, err
+	}
+	if err := handler.store.CreateAPIKey(ctx, apiKey); err != nil {
+		return domain.CloudAgentAccount{}, err
+	}
+	account.Credential = clearKey
+	return account, nil
+}
+
 func (handler *Handler) closeConsoleChatEnvironmentSession(ctx context.Context, userID string, chatSessionID string) error {
 	chatSessionID = strings.TrimSpace(chatSessionID)
 	if chatSessionID == "" {
@@ -275,33 +350,22 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	now := time.Now().UTC()
 	account, err := handler.store.GetCloudAgentAccount(ctx, userID, accountID)
 	if errors.Is(err, storage.ErrNotFound) {
-		clearKey, apiKey, keyErr := newConsoleAPIKey(apiKeySpec{
-			Name:             fmt.Sprintf("Cloud Agent %s %s", workerID, now.Format("2006-01-02 15:04:05")),
-			Kind:             "live",
-			UserID:           userID,
-			AllowedProtocols: []string{domain.ProtocolOpenAI, domain.ProtocolAnthropic},
-			AllowedModels:    allowedModels,
-			CreatedAt:        now,
-		})
-		if keyErr != nil {
-			return consoleChatEnvironmentEnsureResponse{}, keyErr
-		}
-		if keyErr := handler.store.CreateAPIKey(ctx, apiKey); keyErr != nil {
-			return consoleChatEnvironmentEnsureResponse{}, keyErr
-		}
 		account = domain.CloudAgentAccount{
 			ID:            accountID,
 			UserID:        userID,
 			WorkerID:      workerID,
 			AgentType:     domain.CloudAgentTypeClaudeCode,
 			WorkspacePath: domain.DefaultCloudAgentWorkspacePath,
-			Credential:    clearKey,
 			CreatedAt:     now,
 		}
 	} else if err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
 	account.WorkerID = workerID
+	account, err = handler.ensureConsoleChatEnvironmentAPIKey(ctx, userID, workerID, account, allowedModels, now)
+	if err != nil {
+		return consoleChatEnvironmentEnsureResponse{}, err
+	}
 	account.AgentType = firstNonEmpty(strings.TrimSpace(account.AgentType), domain.CloudAgentTypeClaudeCode)
 	account.ModelPublicName = firstNonEmpty(strings.TrimSpace(state.Form.PublicName), strings.TrimSpace(account.ModelPublicName))
 	account.WorkspacePath = firstNonEmpty(strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)

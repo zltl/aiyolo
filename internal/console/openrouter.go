@@ -66,28 +66,28 @@ type compatibleProviderManualPricing struct {
 
 var deepSeekCompatibleModelPricing = map[string]compatibleProviderManualPricing{
 	"deepseek-v4-flash": {
-		Currency:             "CNY",
+		Currency:             domain.CurrencyCNY,
 		InputPerMillion:      "1",
 		OutputPerMillion:     "2",
 		CacheReadPerMillion:  "0.02",
 		CacheWritePerMillion: "1",
 	},
 	"deepseek-v4-pro": {
-		Currency:             "CNY",
+		Currency:             domain.CurrencyCNY,
 		InputPerMillion:      "3",
 		OutputPerMillion:     "6",
 		CacheReadPerMillion:  "0.025",
 		CacheWritePerMillion: "3",
 	},
 	"deepseek-chat": {
-		Currency:             "CNY",
+		Currency:             domain.CurrencyCNY,
 		InputPerMillion:      "1",
 		OutputPerMillion:     "2",
 		CacheReadPerMillion:  "0.02",
 		CacheWritePerMillion: "1",
 	},
 	"deepseek-reasoner": {
-		Currency:             "CNY",
+		Currency:             domain.CurrencyCNY,
 		InputPerMillion:      "1",
 		OutputPerMillion:     "2",
 		CacheReadPerMillion:  "0.02",
@@ -112,29 +112,29 @@ func (metadata openRouterModelMetadata) resolvedContextLength() int {
 	return 0
 }
 
-func (metadata openRouterModelMetadata) pricingRule(providerID string) domain.PricingRule {
+func (metadata openRouterModelMetadata) pricingRule(providerID string, usdToCNYExchangeRate string) domain.PricingRule {
 	modelID := strings.TrimSpace(metadata.ID)
 	ruleID := openRouterPricingRuleID(providerID, modelID)
 	return domain.PricingRule{
 		ID:                              ruleID,
 		ModelAlias:                      modelID,
 		ProviderID:                      providerID,
-		Currency:                        "USD",
-		InputPricePerMillionTokens:      openRouterPriceToMicroCentsPerMillion(metadata.Pricing.Prompt),
-		OutputPricePerMillionTokens:     openRouterPriceToMicroCentsPerMillion(metadata.Pricing.Completion),
-		CacheReadPricePerMillionTokens:  openRouterPriceToMicroCentsPerMillion(metadata.Pricing.InputCacheRead),
-		CacheWritePricePerMillionTokens: openRouterPriceToMicroCentsPerMillion(metadata.Pricing.InputCacheWrite),
+		Currency:                        domain.CurrencyCNY,
+		InputPricePerMillionTokens:      openRouterPriceToMicroCentsPerMillion(metadata.Pricing.Prompt, usdToCNYExchangeRate),
+		OutputPricePerMillionTokens:     openRouterPriceToMicroCentsPerMillion(metadata.Pricing.Completion, usdToCNYExchangeRate),
+		CacheReadPricePerMillionTokens:  openRouterPriceToMicroCentsPerMillion(metadata.Pricing.InputCacheRead, usdToCNYExchangeRate),
+		CacheWritePricePerMillionTokens: openRouterPriceToMicroCentsPerMillion(metadata.Pricing.InputCacheWrite, usdToCNYExchangeRate),
 	}
 }
 
-func compatibleProviderPricingRule(provider domain.Provider, providerID string, metadata openRouterModelMetadata) (domain.PricingRule, bool) {
+func compatibleProviderPricingRule(provider domain.Provider, providerID string, metadata openRouterModelMetadata, usdToCNYExchangeRate string) (domain.PricingRule, bool) {
 	if isDeepSeekProvider(provider) {
 		if rule, ok := deepSeekPricingRule(providerID, metadata.ID); ok {
 			return rule, true
 		}
 	}
 	if metadata.hasPricing() {
-		return metadata.pricingRule(providerID), true
+		return metadata.pricingRule(providerID, usdToCNYExchangeRate), true
 	}
 	return domain.PricingRule{}, false
 }
@@ -173,6 +173,10 @@ func compatibleModelsBaseURL(provider domain.Provider) string {
 }
 
 func fetchCompatibleModels(ctx context.Context, provider domain.Provider) ([]openRouterImportedModel, error) {
+	return fetchCompatibleModelsWithRate(ctx, provider, domain.DefaultUSDCNYExchangeRate)
+}
+
+func fetchCompatibleModelsWithRate(ctx context.Context, provider domain.Provider, usdToCNYExchangeRate string) ([]openRouterImportedModel, error) {
 	trimmedBaseURL := compatibleModelsBaseURL(provider)
 	if trimmedBaseURL == "" {
 		return nil, fmt.Errorf("provider %s is missing base URL", provider.ID)
@@ -212,6 +216,7 @@ func fetchCompatibleModels(ctx context.Context, provider domain.Provider) ([]ope
 	providerID := firstNonEmpty(strings.TrimSpace(provider.ID), "openrouter")
 	primaryProtocol := domain.ProviderPrimaryProtocol(provider)
 	allowedProtocols := domain.ProviderSupportedProtocols(provider)
+	usdToCNYExchangeRate = normalizeUSDCNYExchangeRate(usdToCNYExchangeRate)
 	for _, metadata := range payload.Data {
 		modelID := strings.TrimSpace(metadata.ID)
 		if modelID == "" {
@@ -230,7 +235,7 @@ func fetchCompatibleModels(ctx context.Context, provider domain.Provider) ([]ope
 				ContextTokens:    metadata.resolvedContextLength(),
 			},
 		}
-		if rule, ok := compatibleProviderPricingRule(provider, providerID, metadata); ok {
+		if rule, ok := compatibleProviderPricingRule(provider, providerID, metadata, usdToCNYExchangeRate); ok {
 			imported.Route.PriceRuleID = rule.ID
 			imported.PricingRule = rule
 		}
@@ -245,6 +250,10 @@ func fetchOpenRouterModels(ctx context.Context, provider domain.Provider) ([]ope
 }
 
 func syncCompatibleModelRoutes(ctx context.Context, store storage.Store, provider domain.Provider) (openRouterSyncSummary, error) {
+	return syncCompatibleModelRoutesWithRate(ctx, store, provider, domain.DefaultUSDCNYExchangeRate)
+}
+
+func syncCompatibleModelRoutesWithRate(ctx context.Context, store storage.Store, provider domain.Provider, usdToCNYExchangeRate string) (openRouterSyncSummary, error) {
 	if domain.ProviderPrimaryProtocol(provider) != domain.ProtocolOpenAI {
 		return openRouterSyncSummary{}, fmt.Errorf("provider %s is not OpenAI-compatible", provider.ID)
 	}
@@ -252,7 +261,7 @@ func syncCompatibleModelRoutes(ctx context.Context, store storage.Store, provide
 		return openRouterSyncSummary{}, fmt.Errorf("provider %s is missing master key", provider.ID)
 	}
 
-	imports, err := fetchCompatibleModels(ctx, provider)
+	imports, err := fetchCompatibleModelsWithRate(ctx, provider, usdToCNYExchangeRate)
 	if err != nil {
 		return openRouterSyncSummary{}, err
 	}
@@ -312,8 +321,41 @@ func pricePerMillionToMicroCents(value string) int64 {
 	return decimalStringToScaledInt64(value, 100000000)
 }
 
-func openRouterPriceToMicroCentsPerMillion(value string) int64 {
-	return decimalStringToScaledInt64(value, 100000000000000)
+func openRouterPriceToMicroCentsPerMillion(value string, usdToCNYExchangeRate string) int64 {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0
+	}
+	priceRatio, ok := new(big.Rat).SetString(trimmed)
+	if !ok {
+		return 0
+	}
+	rateRatio, ok := new(big.Rat).SetString(normalizeUSDCNYExchangeRate(usdToCNYExchangeRate))
+	if !ok {
+		return 0
+	}
+	scaled := new(big.Rat).Mul(priceRatio, rateRatio)
+	scaled.Mul(scaled, big.NewRat(100000000000000, 1))
+	quotient, remainder := new(big.Int).QuoRem(new(big.Int).Set(scaled.Num()), scaled.Denom(), new(big.Int))
+	if new(big.Int).Lsh(remainder, 1).Cmp(scaled.Denom()) >= 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	if !quotient.IsInt64() {
+		return 0
+	}
+	return quotient.Int64()
+}
+
+func normalizeUSDCNYExchangeRate(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return domain.DefaultUSDCNYExchangeRate
+	}
+	ratio, ok := new(big.Rat).SetString(trimmed)
+	if !ok || ratio.Sign() <= 0 {
+		return domain.DefaultUSDCNYExchangeRate
+	}
+	return trimmed
 }
 
 func decimalStringToScaledInt64(value string, scale int64) int64 {

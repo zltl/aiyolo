@@ -14,7 +14,14 @@
       </div>
       <p class="stat-copy">{{msg .Locale "进入兼容 API 的总调用量。" "Total requests that reached the compatible APIs."}}</p>
       <div class="sparkline" aria-hidden="true">
-        <svg viewBox="0 0 120 40" preserveAspectRatio="none"><path d="{{usageSparkline .ChartUsage "requests" 12}}"/></svg>
+        <svg viewBox="0 0 120 40" preserveAspectRatio="none">
+          <path class="sparkline-area" d="{{usageArea .ChartUsage "requests" 12}}"></path>
+          <path class="sparkline-line" d="{{usageSparkline .ChartUsage "requests" 12}}"></path>
+        </svg>
+        <div class="sparkline-foot">
+          <span>{{msg .Locale "24h 前" "24h ago"}}</span>
+          <span>{{msg .Locale "现在" "Now"}}</span>
+        </div>
       </div>
     </article>
     <article class="stat-card tone-error">
@@ -29,7 +36,14 @@
       </div>
       <p class="stat-copy">{{msg .Locale "预算拦截、上游失败与非 2xx。" "Budget blocks, upstream failures, and non-2xx responses."}}</p>
       <div class="sparkline" aria-hidden="true">
-        <svg viewBox="0 0 120 40" preserveAspectRatio="none"><path d="{{usageSparkline .ChartUsage "errors" 12}}"/></svg>
+        <svg viewBox="0 0 120 40" preserveAspectRatio="none">
+          <path class="sparkline-area" d="{{usageArea .ChartUsage "errors" 12}}"></path>
+          <path class="sparkline-line" d="{{usageSparkline .ChartUsage "errors" 12}}"></path>
+        </svg>
+        <div class="sparkline-foot">
+          <span>{{msg .Locale "24h 前" "24h ago"}}</span>
+          <span>{{msg .Locale "现在" "Now"}}</span>
+        </div>
       </div>
     </article>
     <article class="stat-card tone-revenue">
@@ -44,7 +58,14 @@
       </div>
       <p class="stat-copy">{{msg .Locale "从用量账本聚合的近 24 小时费用。" "Spend aggregated from the usage ledger over the last 24 hours."}}</p>
       <div class="sparkline" aria-hidden="true">
-        <svg viewBox="0 0 120 40" preserveAspectRatio="none"><path d="{{usageSparkline .ChartUsage "spend" 12}}"/></svg>
+        <svg viewBox="0 0 120 40" preserveAspectRatio="none">
+          <path class="sparkline-area" d="{{usageArea .ChartUsage "spend" 12}}"></path>
+          <path class="sparkline-line" d="{{usageSparkline .ChartUsage "spend" 12}}"></path>
+        </svg>
+        <div class="sparkline-foot">
+          <span>{{msg .Locale "24h 前" "24h ago"}}</span>
+          <span>{{msg .Locale "现在" "Now"}}</span>
+        </div>
       </div>
     </article>
   </div>

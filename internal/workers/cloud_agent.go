@@ -30,7 +30,7 @@ const (
 	defaultCloudAgentSHMSize             = "2g"
 	defaultCloudAgentDockerStorageDriver = "vfs"
 	defaultCloudAgentClaudeUser          = "aiyolo"
-	defaultCloudAgentClaudeHome          = "/home/" + defaultCloudAgentClaudeUser
+	defaultCloudAgentClaudeHome          = "/workspace"
 )
 
 type CloudAgentStartOptions struct {
@@ -670,7 +670,7 @@ ENV DISPLAY=:99
 ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
 ENV AIYOLO_CLAUDE_USER=aiyolo
-ENV AIYOLO_CLAUDE_HOME=/home/aiyolo
+ENV AIYOLO_CLAUDE_HOME=/workspace
 
 RUN set -eux; \
     mirror="${APT_MIRROR%/}"; \
@@ -762,7 +762,7 @@ const cloudAgentEntrypointScript = `#!/usr/bin/env bash
 set -euo pipefail
 
 claude_user="${AIYOLO_CLAUDE_USER:-aiyolo}"
-claude_home="${AIYOLO_CLAUDE_HOME:-/home/${claude_user}}"
+claude_home="${AIYOLO_CLAUDE_HOME:-/workspace}"
 
 install -d -m 0755 "${XDG_RUNTIME_DIR:-/tmp/runtime-root}" /tmp/.X11-unix
 install -d -o "$claude_user" -g "$claude_user" -m 0755 /workspace "$claude_home" "$claude_home/.claude"

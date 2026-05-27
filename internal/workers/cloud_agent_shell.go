@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
@@ -66,6 +67,7 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		client.Close()
 		return nil, fmt.Errorf("request pty: %w", err)
 	}
+	claudeSessionID := domain.CloudAgentClaudeSessionID(account.UserID, firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(cloudSession.ID)))
 
 	stdoutReader, stdoutWriter := io.Pipe()
 	stdoutSink := &synchronizedPipeWriter{writer: stdoutWriter}
@@ -79,7 +81,7 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		client.Close()
 		return nil, fmt.Errorf("open stdin pipe: %w", err)
 	}
-	if err := session.Start(buildCloudAgentShellCommand(target.containerName, target.workspacePath)); err != nil {
+	if err := session.Start(buildCloudAgentShellCommand(target.containerName, target.workspacePath, claudeSessionID, account.ModelPublicName)); err != nil {
 		stdin.Close()
 		stdoutReader.Close()
 		stdoutWriter.Close()
@@ -119,7 +121,35 @@ func normalizeCloudAgentShellSize(cols, rows int) (int, int) {
 	return cols, rows
 }
 
-func buildCloudAgentShellCommand(containerName, workspacePath string) string {
+func buildCloudAgentShellCommand(containerName, workspacePath, claudeSessionID, model string) string {
+	innerScript := fmt.Sprintf(`set -euo pipefail
+
+if ! command -v claude >/dev/null 2>&1; then
+	printf 'claude is not installed in this container\n' >&2
+	exit 127
+fi
+
+session_id=%s
+model=%s
+project_key="$(python3 - <<'PY'
+import os
+import re
+
+print(re.sub(r'[^0-9A-Za-z]', '-', os.getcwd()))
+PY
+)"
+session_file="$HOME/.claude/projects/$project_key/${session_id}.jsonl"
+cmd=(claude --dangerously-skip-permissions)
+if [[ -n "$model" ]]; then
+	cmd+=(--model "$model")
+fi
+if [[ -f "$session_file" ]]; then
+	cmd+=(--resume "$session_id")
+else
+	cmd+=(--session-id "$session_id")
+fi
+exec "${cmd[@]}"
+`, shellQuote(strings.TrimSpace(claudeSessionID)), shellQuote(strings.TrimSpace(model)))
 	script := fmt.Sprintf(`container_name=%s
 workspace_path=%s
 if ! command -v docker >/dev/null 2>&1; then
@@ -131,15 +161,18 @@ if ! docker inspect --type container "$container_name" >/dev/null 2>&1; then
   exit 1
 fi
 exec docker exec -it \
+	-u %s \
   -w "$workspace_path" \
+	-e HOME=%s \
+	-e USER=%s \
   -e TERM=xterm-256color \
   -e COLORTERM=truecolor \
   -e SHELL=/bin/bash \
   -e LANG=C.UTF-8 \
   -e LC_ALL=C.UTF-8 \
   "$container_name" \
-  bash --login
-`, shellQuote(containerName), shellQuote(workspacePath))
+	bash -lc %s
+`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(defaultCloudAgentClaudeUser), shellQuote(defaultCloudAgentClaudeHome), shellQuote(defaultCloudAgentClaudeUser), shellQuote(innerScript))
 	return bashCommand(script)
 }
 

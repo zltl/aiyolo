@@ -292,7 +292,7 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 					usage.Currency = entry.Currency
 				}
 				if usage.Currency == "" {
-					usage.Currency = "USD"
+					usage.Currency = domain.DefaultBillingCurrency
 				}
 				if err := handler.store.InsertUsage(context.WithoutCancel(r.Context()), usage); err != nil {
 					log.Printf("insert cached usage request_id=%s err=%v", requestID, err)
@@ -402,7 +402,7 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 	}
 	metadata := buildRouterMetadata(request, candidates, selectedCandidate, attempts)
 	if response == nil {
-		usage := domain.UsageRecord{RequestID: requestID, UserID: subject.UserID, APIKeyID: subject.APIKeyID, ProviderID: selectedCandidate.Provider.ID, ModelAlias: selectedCandidate.Route.PublicName, UpstreamModel: selectedCandidate.Route.UpstreamModel, Protocol: protocol, Endpoint: endpoint, Currency: "USD", Stream: request.Stream, StatusCode: http.StatusBadGateway, LatencyMS: time.Since(started).Milliseconds(), CreatedAt: time.Now().UTC()}
+		usage := domain.UsageRecord{RequestID: requestID, UserID: subject.UserID, APIKeyID: subject.APIKeyID, ProviderID: selectedCandidate.Provider.ID, ModelAlias: selectedCandidate.Route.PublicName, UpstreamModel: selectedCandidate.Route.UpstreamModel, Protocol: protocol, Endpoint: endpoint, Currency: domain.DefaultBillingCurrency, Stream: request.Stream, StatusCode: http.StatusBadGateway, LatencyMS: time.Since(started).Milliseconds(), CreatedAt: time.Now().UTC()}
 		if settleErr := handler.store.SettleQuota(context.WithoutCancel(r.Context()), reservation, usage); settleErr != nil {
 			log.Printf("settle quota request_id=%s err=%v", requestID, settleErr)
 		}
@@ -480,14 +480,14 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 		if selectedCandidate.Pricing.Currency != "" {
 			usage.Currency = selectedCandidate.Pricing.Currency
 		} else {
-			usage.Currency = "USD"
+			usage.Currency = domain.DefaultBillingCurrency
 		}
 	}
 	if endpointBillsUsage(endpoint) && usage.CostMicroCents == 0 {
 		usage.CostMicroCents = calculateUsageCost(selectedCandidate.Pricing, usage)
 	}
 	if usage.Currency == "" {
-		usage.Currency = "USD"
+		usage.Currency = domain.DefaultBillingCurrency
 	}
 	if usage.TotalTokens == 0 {
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
@@ -1202,7 +1202,7 @@ func estimateRequestTokens(body []byte) int {
 
 func estimateRequestUsage(body []byte) domain.UsageRecord {
 	estimated := len(body) / 4
-	usage := domain.UsageRecord{Currency: "USD", InputTokens: estimated}
+	usage := domain.UsageRecord{Currency: domain.DefaultBillingCurrency, InputTokens: estimated}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err == nil {
 		usage.OutputTokens = intNumber(payload["max_tokens"])
@@ -1572,7 +1572,7 @@ func parseUsageFromJSON(body []byte, protocol string) domain.UsageRecord {
 			}
 		}
 		if usagePayload == nil && payload["input_tokens"] != nil {
-			usage := domain.UsageRecord{Currency: "USD", InputTokens: intNumber(payload["input_tokens"])}
+			usage := domain.UsageRecord{Currency: domain.DefaultBillingCurrency, InputTokens: intNumber(payload["input_tokens"])}
 			usage.TotalTokens = usage.InputTokens
 			return usage
 		}
@@ -1580,7 +1580,7 @@ func parseUsageFromJSON(body []byte, protocol string) domain.UsageRecord {
 	if usagePayload == nil {
 		return domain.UsageRecord{}
 	}
-	usage := domain.UsageRecord{Currency: "USD"}
+	usage := domain.UsageRecord{Currency: domain.DefaultBillingCurrency}
 	if protocol == domain.ProtocolAnthropic {
 		usage.InputTokens = intNumber(usagePayload["input_tokens"])
 		usage.OutputTokens = intNumber(usagePayload["output_tokens"])

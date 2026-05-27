@@ -12,6 +12,19 @@
   const currentRoot = () => document.getElementById("chat-content");
   const currentForm = () => currentRoot()?.querySelector(".chat-shell[data-chat-stream-url]") || null;
   const t = (zh, _en) => zh;
+  const emitChatState = (detail = {}) => {
+    if (typeof window === "undefined" || typeof window.dispatchEvent !== "function" || typeof window.CustomEvent !== "function") {
+      return;
+    }
+    const form = currentForm();
+    window.dispatchEvent(new CustomEvent("aiyolo:chat-state", {
+      detail: {
+        sessionId: readClientSessionID(form),
+        environment: currentSelectedEnvironment(form),
+        ...detail,
+      },
+    }));
+  };
   const syncLucideIcons = () => {
     if (!window.lucide || typeof window.lucide.createIcons !== "function") {
       return;
@@ -640,19 +653,19 @@
   const composerPrimaryStopGlyph = (form = currentForm()) => composerPrimaryButton(form)?.querySelector("[data-chat-primary-stop]") || null;
   const composerQueueIndicator = (form = currentForm()) => form?.querySelector("[data-chat-queue-indicator]") || null;
   const shellLaunchButton = (form = currentForm()) => form?.querySelector("[data-chat-action=\"open-shell\"]") || null;
+  const shellPageBaseURL = (form = currentForm()) => String(form?.dataset.chatShellUrl || "").trim();
   const shellSocketBaseURL = (form = currentForm()) => String(form?.dataset.chatShellSocketUrl || "").trim();
   const shellDock = (form = currentForm()) => form?.querySelector("[data-chat-shell-dock]") || null;
-  const shellTerminalHost = (form = currentForm()) => form?.querySelector("[data-chat-shell-terminal]") || null;
-  const shellStatusNode = (form = currentForm()) => form?.querySelector("[data-chat-shell-status]") || null;
-  const shellMetaNode = (form, key) => form?.querySelector(`[data-chat-shell-${key}]`) || null;
+  const shellPanelBar = (form = currentForm()) => form?.querySelector(".chat-shell-panel-bar") || null;
+  const shellTabsHost = (form = currentForm()) => form?.querySelector("[data-chat-shell-tabs]") || null;
+  const shellPanelsHost = (form = currentForm()) => form?.querySelector("[data-chat-shell-panels]") || null;
   const shellHeightPreferenceKey = "aiyolo.console.chat.shellHeight";
   const shellDefaultHeight = 360;
   const shellMinHeight = 240;
-  let activeShellController = null;
-  let activeShellForm = null;
-  let activeShellSocketURL = "";
-  let activeShellSessionID = "";
+  let shellInstances = [];
+  let activeShellInstanceID = "";
   let shellResizeState = null;
+  let shellInstanceCounter = 0;
 
   const syncDraftFieldHeight = (field) => {
     if (!(field instanceof HTMLTextAreaElement)) {
@@ -733,11 +746,164 @@
     node.title = node.textContent;
   };
 
-  const renderShellMeta = (form, meta = {}) => {
-    setShellMetaValue(shellMetaNode(form, "session"), meta.sessionID || activeShellSessionID);
-    setShellMetaValue(shellMetaNode(form, "worker"), meta.workerID);
-    setShellMetaValue(shellMetaNode(form, "container"), meta.containerName);
-    setShellMetaValue(shellMetaNode(form, "workspace"), meta.workspacePath);
+  const shellInstanceByID = (instanceID) => shellInstances.find((instance) => instance.id === instanceID) || null;
+
+  const activeShellInstance = () => shellInstanceByID(activeShellInstanceID);
+
+  const nextShellLabel = () => {
+    shellInstanceCounter += 1;
+    return t(`终端 ${shellInstanceCounter}`, `Terminal ${shellInstanceCounter}`);
+  };
+
+  const shellTabMetaText = (instance) => truncateText(
+    instance?.statusError && String(instance?.statusMessage || "").trim() !== ""
+      ? instance.statusMessage
+      : instance?.meta?.containerName
+        || instance?.meta?.workerID
+        || instance?.meta?.sessionID
+        || t("未连接", "Not connected"),
+    44,
+  );
+
+  const renderShellMeta = (instance) => {
+    if (!instance || typeof instance !== "object") {
+      return;
+    }
+    setShellMetaValue(instance.metaNodes?.session, instance.meta?.sessionID);
+    setShellMetaValue(instance.metaNodes?.worker, instance.meta?.workerID);
+    setShellMetaValue(instance.metaNodes?.container, instance.meta?.containerName);
+    setShellMetaValue(instance.metaNodes?.workspace, instance.meta?.workspacePath);
+  };
+
+  const createShellInstance = (meta) => ({
+    id: makeID("shell"),
+    label: nextShellLabel(),
+    sessionID: String(meta?.sessionID || "").trim(),
+    socketURL: String(meta?.socketURL || "").trim(),
+    meta: {
+      sessionID: String(meta?.sessionID || "").trim(),
+      workerID: String(meta?.workerID || "").trim(),
+      containerName: String(meta?.containerName || "").trim(),
+      workspacePath: String(meta?.workspacePath || "").trim(),
+    },
+    statusMessage: t("未连接", "Not connected"),
+    statusError: false,
+    controller: null,
+    panel: null,
+    terminalHost: null,
+    statusNode: null,
+    metaNodes: null,
+  });
+
+  const ensureActiveShellInstance = () => {
+    if (shellInstanceByID(activeShellInstanceID)) {
+      return activeShellInstance();
+    }
+    activeShellInstanceID = shellInstances.length > 0 ? shellInstances[shellInstances.length - 1].id : "";
+    return activeShellInstance();
+  };
+
+  const ensureShellPane = (form, instance) => {
+    if (!(form instanceof HTMLFormElement) || !instance || typeof instance !== "object") {
+      return null;
+    }
+    if (instance.panel instanceof HTMLElement && instance.terminalHost instanceof HTMLElement && document.contains(instance.panel)) {
+      return instance.panel;
+    }
+
+    const pane = document.createElement("section");
+    pane.className = "chat-shell-pane";
+    pane.dataset.chatShellPaneId = instance.id;
+    pane.id = `chat-shell-pane-${instance.id}`;
+    pane.setAttribute("role", "tabpanel");
+
+    const surface = document.createElement("div");
+    surface.className = "chat-shell-panel-surface";
+
+    const terminalHost = document.createElement("div");
+    terminalHost.className = "chat-terminal-canvas";
+    surface.appendChild(terminalHost);
+
+    pane.appendChild(surface);
+
+    instance.panel = pane;
+    instance.terminalHost = terminalHost;
+    instance.statusNode = null;
+    instance.metaNodes = null;
+    return pane;
+  };
+
+  const renderShellDockContents = (form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const tabsHost = shellTabsHost(form);
+    const panelsHost = shellPanelsHost(form);
+    if (!(tabsHost instanceof HTMLElement) || !(panelsHost instanceof HTMLElement)) {
+      return;
+    }
+
+    const activeInstance = ensureActiveShellInstance();
+    const tabs = document.createDocumentFragment();
+    const panels = [];
+
+    shellInstances.forEach((instance) => {
+      const selected = activeInstance ? activeInstance.id === instance.id : false;
+      const pane = ensureShellPane(form, instance);
+      if (pane instanceof HTMLElement) {
+        pane.hidden = !selected;
+        pane.classList.toggle("is-active", selected);
+        pane.setAttribute("aria-labelledby", `chat-shell-tab-${instance.id}`);
+        panels.push(pane);
+      }
+
+      const tabItem = document.createElement("div");
+      tabItem.className = "chat-shell-panel-tab-item";
+
+      const tab = document.createElement("button");
+      tab.className = "chat-shell-panel-tab";
+      tab.type = "button";
+      tab.dataset.chatShellTabId = instance.id;
+      tab.id = `chat-shell-tab-${instance.id}`;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", `chat-shell-pane-${instance.id}`);
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+      tab.tabIndex = selected ? 0 : -1;
+      tab.classList.toggle("is-active", selected);
+      tab.classList.toggle("is-error", instance.statusError);
+      tab.title = instance.label;
+
+      const tabCopy = document.createElement("span");
+      tabCopy.className = "chat-shell-panel-tab-copy";
+
+      const tabTitle = document.createElement("strong");
+      tabTitle.className = "chat-shell-panel-tab-title";
+      tabTitle.textContent = instance.label;
+
+      tabCopy.appendChild(tabTitle);
+      tab.appendChild(tabCopy);
+
+      const close = document.createElement("button");
+      close.className = "chat-shell-panel-tab-close";
+      close.type = "button";
+      close.dataset.chatShellTabClose = instance.id;
+      close.setAttribute("aria-label", `${t("关闭", "Close")} ${instance.label}`);
+      close.textContent = "×";
+
+      tabItem.appendChild(tab);
+      tabItem.appendChild(close);
+      tabs.appendChild(tabItem);
+    });
+
+    panelsHost.replaceChildren(...panels);
+
+    tabsHost.replaceChildren(tabs);
+  };
+
+  const refreshActiveShellController = () => {
+    const instance = activeShellInstance();
+    instance?.controller?.refresh?.();
+    instance?.controller?.focus?.();
   };
 
   const setShellDockVisible = (form, visible) => {
@@ -745,59 +911,105 @@
     if (!(dock instanceof HTMLElement) || !(form instanceof HTMLFormElement)) {
       return;
     }
-    dock.hidden = !visible;
-    form.classList.toggle("is-shell-open", visible);
-    if (!visible) {
+    const shouldShow = visible && shellInstances.length > 0;
+    dock.hidden = !shouldShow;
+    form.classList.toggle("is-shell-open", shouldShow);
+    if (!shouldShow) {
       return;
     }
     applyShellHeight(form, preferredShellOpenHeight());
     window.requestAnimationFrame(() => {
-      activeShellController?.refresh?.();
-      activeShellController?.focus?.();
+      refreshActiveShellController();
     });
   };
 
-  const disposeShellController = () => {
-    activeShellController?.dispose?.();
-    activeShellController = null;
-    activeShellForm = null;
+  const disposeShellController = (instance) => {
+    if (!instance || typeof instance !== "object") {
+      return;
+    }
+    instance.controller?.dispose?.();
+    instance.controller = null;
+    instance.panel?.remove?.();
+    instance.panel = null;
+    instance.terminalHost = null;
+    instance.statusNode = null;
+    instance.metaNodes = null;
   };
 
-  const ensureShellController = (form) => {
-    if (!(form instanceof HTMLFormElement)) {
+  const disposeAllShellControllers = () => {
+    shellInstances.forEach((instance) => {
+      disposeShellController(instance);
+    });
+    shellInstances = [];
+    activeShellInstanceID = "";
+  };
+
+  const ensureShellController = (form, instance) => {
+    if (!(form instanceof HTMLFormElement) || !instance || typeof instance !== "object") {
       return null;
     }
-    const terminalHost = shellTerminalHost(form);
-    const status = shellStatusNode(form);
-    if (!(terminalHost instanceof HTMLElement) || !(status instanceof HTMLElement)) {
+    const pane = ensureShellPane(form, instance);
+    if (!(pane instanceof HTMLElement) || !(instance.terminalHost instanceof HTMLElement)) {
       return null;
     }
-    if (activeShellController && activeShellForm === form && document.contains(terminalHost)) {
-      return activeShellController;
+    if (instance.controller && document.contains(instance.terminalHost)) {
+      return instance.controller;
     }
-    disposeShellController();
     if (!window.AIYoloChatShell || typeof window.AIYoloChatShell.createController !== "function") {
       setInlineFlash(currentRoot(), t("Shell 依赖加载失败。", "Shell dependencies failed to load."), true);
       return null;
     }
-    activeShellController = window.AIYoloChatShell.createController({
-      terminalHost,
-      statusNode: status,
-      getSocketPath: () => activeShellSocketURL,
+    instance.controller = window.AIYoloChatShell.createController({
+      terminalHost: instance.terminalHost,
+      statusNode: instance.statusNode,
+      getSocketPath: () => instance.socketURL,
       autoConnect: false,
+      onStatusChange: ({ message, isError }) => {
+        instance.statusMessage = String(message || "").trim() || t("未连接", "Not connected");
+        instance.statusError = Boolean(isError);
+        renderShellDockContents(form);
+      },
     });
-    activeShellForm = activeShellController ? form : null;
-    return activeShellController;
+    return instance.controller;
   };
 
-  const closeChatShellDock = (form, options = {}) => {
-    activeShellController?.close?.();
-    if (options.resetSession !== false) {
-      activeShellSocketURL = "";
-      activeShellSessionID = "";
+  const selectShellInstance = (form, instanceID) => {
+    if (!(form instanceof HTMLFormElement) || !shellInstanceByID(instanceID)) {
+      return;
     }
-    renderShellMeta(form, {});
+    activeShellInstanceID = instanceID;
+    renderShellDockContents(form);
+    setShellDockVisible(form, true);
+  };
+
+  const closeShellInstance = (form, instanceID) => {
+    const index = shellInstances.findIndex((instance) => instance.id === instanceID);
+    if (index < 0) {
+      return;
+    }
+    const [instance] = shellInstances.splice(index, 1);
+    disposeShellController(instance);
+    if (activeShellInstanceID === instanceID) {
+      const fallback = shellInstances[Math.max(0, index - 1)] || shellInstances[index] || null;
+      activeShellInstanceID = fallback ? fallback.id : "";
+    }
+    renderShellDockContents(form);
+    setShellDockVisible(form, shellInstances.length > 0);
+  };
+
+  const closeAllChatShells = (form) => {
+    disposeAllShellControllers();
+    renderShellDockContents(form);
     setShellDockVisible(form, false);
+  };
+
+  const closeChatShellDock = (form) => {
+    const instance = activeShellInstance();
+    if (!instance) {
+      setShellDockVisible(form, false);
+      return;
+    }
+    closeShellInstance(form, instance.id);
   };
 
   const syncChatShellSession = (form) => {
@@ -805,10 +1017,11 @@
       return;
     }
     applyShellHeight(form, preferredShellOpenHeight());
-    if (activeShellSessionID === "" || activeShellSessionID === readClientSessionID(form)) {
+    const instance = activeShellInstance();
+    if (!instance || instance.sessionID === "" || instance.sessionID === readClientSessionID(form)) {
       return;
     }
-    closeChatShellDock(form);
+    closeAllChatShells(form);
   };
 
   const readDraftPayload = (form, options = {}) => {
@@ -877,8 +1090,8 @@
       shellButton.hidden = !hasShellSocket;
       shellButton.disabled = !canOpenShell;
       shellButton.title = canOpenShell
-        ? t("打开 Claude Agent 容器 Shell", "Open the Claude Agent container shell")
-        : t("切换到 Cloud Agent 环境后即可打开 shell", "Switch to a Cloud Agent environment to open the shell");
+        ? t("打开 Claude Code 终端", "Open the Claude Code terminal")
+        : t("切换到 Cloud Agent 环境后即可打开 Claude Code 终端", "Switch to a Cloud Agent environment to open the Claude Code terminal");
     }
   };
 
@@ -1696,6 +1909,7 @@
     scrollThread(root.querySelector("[data-chat-scroll]"));
     updateComposerControls(form);
     syncChatShellSession(form);
+    emitChatState({ source: "apply-session", session });
   };
 
   const renderSessionList = (root, store) => {
@@ -2190,9 +2404,7 @@
     if (!root) {
       return;
     }
-    disposeShellController();
-    activeShellSocketURL = "";
-    activeShellSessionID = "";
+    disposeAllShellControllers();
     root.outerHTML = html;
     hydrateWorkspace(true);
     scrollThread(currentRoot()?.querySelector("[data-chat-scroll]"));
@@ -2288,6 +2500,7 @@
       setAttachmentStatus(root, "", false);
       setInlineFlash(root, String(parsed.notice || "").trim(), false);
       queuePersist();
+      emitChatState({ source: "ensure-environment", ensured: parsed });
       return parsed;
     } catch (error) {
       setAttachmentStatus(root, "", false);
@@ -2300,6 +2513,38 @@
     }
   };
 
+  const probeReadyChatShell = async (form) => {
+    const sessionID = readClientSessionID(form);
+    const environment = currentSelectedEnvironment(form);
+    const shellPageURL = shellPageBaseURL(form);
+    if (!(form instanceof HTMLFormElement) || sessionID === "" || shellPageURL === "" || !isCloudAgentEnvironment(environment)) {
+      return null;
+    }
+    try {
+      const readyURL = new URL(`${shellPageURL.replace(/\/$/, "")}/ready`, window.location.href);
+      readyURL.searchParams.set("session", sessionID);
+      const response = await fetch(readyURL.toString(), {
+        method: "GET",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const raw = await response.text();
+      const parsed = safeParseJSON(raw, null);
+      if (!parsed || typeof parsed !== "object" || String(parsed.status || "").trim() !== "ready") {
+        return null;
+      }
+      if (String(parsed.environment || "").trim() !== environment) {
+        return null;
+      }
+      return parsed;
+    } catch (_error) {
+      return null;
+    }
+  };
+
   const openChatShell = async (form) => {
     const root = currentRoot();
     const baseSocketURL = shellSocketBaseURL(form);
@@ -2307,47 +2552,49 @@
       return;
     }
     if (currentSelectedEnvironment(form) === "local") {
-      setInlineFlash(root, t("先选择 Cloud Agent 环境，再打开 shell。", "Select a Cloud Agent environment before opening the shell."), true);
+      setInlineFlash(root, t("先选择 Cloud Agent 环境，再打开 Claude Code 终端。", "Select a Cloud Agent environment before opening the Claude Code terminal."), true);
       return;
     }
     if (currentSelectedModel(form) === "") {
-      setInlineFlash(root, t("先选择一个模型，再打开 shell。", "Choose a model before opening the shell."), true);
+      setInlineFlash(root, t("先选择一个模型，再打开 Claude Code 终端。", "Choose a model before opening the Claude Code terminal."), true);
       return;
     }
+    let shellState = await probeReadyChatShell(form);
     let ensured = null;
-    try {
-      ensured = await ensureChatEnvironment(form);
-    } catch (_error) {
-      return;
-    }
-    const sessionID = String(ensured?.sessionId || readClientSessionID(form)).trim();
+    if (!shellState) {
+	    try {
+	      ensured = await ensureChatEnvironment(form);
+	    } catch (_error) {
+	      return;
+	    }
+	  }
+    const sessionID = String(shellState?.sessionId || ensured?.sessionId || readClientSessionID(form)).trim();
     if (sessionID === "") {
       setInlineFlash(root, t("Shell 会话未生成，请重试。", "The shell session could not be created. Please retry."), true);
       return;
     }
-    const nextURL = new URL(baseSocketURL, window.location.href);
-    nextURL.searchParams.set("session", sessionID);
-    const nextSocketURL = nextURL.toString();
-    if (activeShellSessionID === sessionID && activeShellSocketURL === nextSocketURL && activeShellController?.isConnected?.()) {
-      setShellDockVisible(form, true);
-      activeShellController.focus?.();
-      return;
-    }
-    activeShellSocketURL = nextSocketURL;
-    activeShellSessionID = sessionID;
-    renderShellMeta(form, {
+    let nextSocketURL = String(shellState?.socketUrl || "").trim();
+    if (nextSocketURL === "") {
+	    const nextURL = new URL(baseSocketURL, window.location.href);
+	    nextURL.searchParams.set("session", sessionID);
+	    nextSocketURL = nextURL.toString();
+	  }
+    const instance = createShellInstance({
       sessionID,
-      workerID: ensured?.workerId,
-      containerName: ensured?.containerName,
-      workspacePath: ensured?.workspacePath,
+	    workerID: shellState?.workerId || ensured?.workerId,
+	    containerName: shellState?.containerName || ensured?.containerName,
+	    workspacePath: shellState?.workspacePath || ensured?.workspacePath,
+      socketURL: nextSocketURL,
     });
+
+    shellInstances = [...shellInstances, instance];
+    activeShellInstanceID = instance.id;
+    renderShellDockContents(form);
     setShellDockVisible(form, true);
-    const controller = ensureShellController(form);
+    renderShellMeta(instance);
+    const controller = ensureShellController(form, instance);
     if (!controller) {
-      activeShellSocketURL = "";
-      activeShellSessionID = "";
-      renderShellMeta(form, {});
-      setShellDockVisible(form, false);
+      closeShellInstance(form, instance.id);
       return;
     }
     controller.connect({ resetTerminal: true });
@@ -2355,6 +2602,21 @@
       controller.refresh?.();
       controller.focus?.();
     }, 0);
+  };
+
+  const autoOpenCloudAgentShell = (form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || currentSelectedModel(form) === "" || shellSocketBaseURL(form) === "") {
+      return;
+    }
+    if (shellInstances.length > 0) {
+      setShellDockVisible(form, true);
+      refreshActiveShellController();
+      return;
+    }
+    void openChatShell(form);
   };
 
   const delayWithAbort = (signal, timeoutMs) => new Promise((resolve, reject) => {
@@ -2702,21 +2964,39 @@
       closeSessionMenus();
     }
 
+    const shellTabCloseTarget = event.target.closest("[data-chat-shell-tab-close]");
+    if (shellTabCloseTarget instanceof HTMLElement && form.contains(shellTabCloseTarget)) {
+      event.preventDefault();
+      closeShellInstance(form, String(shellTabCloseTarget.dataset.chatShellTabClose || "").trim());
+      return;
+    }
+
+    const shellTabTarget = event.target.closest("[data-chat-shell-tab-id]");
+    if (shellTabTarget instanceof HTMLElement && form.contains(shellTabTarget)) {
+      event.preventDefault();
+      selectShellInstance(form, String(shellTabTarget.dataset.chatShellTabId || "").trim());
+      return;
+    }
+
     const shellActionTarget = event.target.closest("[data-chat-shell-action]");
     if (shellActionTarget instanceof HTMLElement && form.contains(shellActionTarget)) {
       switch (shellActionTarget.dataset.chatShellAction) {
+        case "new":
+          event.preventDefault();
+          void openChatShell(form);
+          return;
         case "clear":
           event.preventDefault();
-          ensureShellController(form)?.clear?.();
+          activeShellInstance()?.controller?.clear?.();
           return;
         case "reconnect":
           event.preventDefault();
-          if (activeShellSocketURL === "") {
+          if (!activeShellInstance()) {
             void openChatShell(form);
             return;
           }
           setShellDockVisible(form, true);
-          ensureShellController(form)?.connect?.({ resetTerminal: true });
+          ensureShellController(form, activeShellInstance())?.connect?.({ resetTerminal: true });
           return;
         case "close":
           event.preventDefault();
@@ -2841,19 +3121,27 @@
       if (picker instanceof HTMLDetailsElement) {
         picker.open = false;
       }
-      if (activeShellSessionID !== "") {
-        closeChatShellDock(form);
+      if (shellInstances.length > 0) {
+        closeAllChatShells(form);
       }
       queuePersist();
-      void ensureChatEnvironment(form).catch(() => {});
+      void ensureChatEnvironment(form)
+        .then(() => {
+          autoOpenCloudAgentShell(form);
+        })
+        .catch(() => {});
       return;
     }
     if (target instanceof HTMLSelectElement && target.name === "chat_environment") {
-      if (activeShellSessionID !== "") {
-        closeChatShellDock(form);
+      if (shellInstances.length > 0) {
+        closeAllChatShells(form);
       }
       queuePersist();
-      void ensureChatEnvironment(form).catch(() => {});
+      void ensureChatEnvironment(form)
+        .then(() => {
+          autoOpenCloudAgentShell(form);
+        })
+        .catch(() => {});
       return;
     }
     if (target instanceof HTMLInputElement && target.matches("[data-chat-reasoning-option]")) {
@@ -2969,7 +3257,7 @@
       return;
     }
     applyShellHeight(form, shellResizeState.startHeight + (shellResizeState.startY - event.clientY));
-    activeShellController?.refresh?.();
+    activeShellInstance()?.controller?.refresh?.();
   });
 
   const finishShellResize = () => {
@@ -2984,7 +3272,7 @@
       if (dock instanceof HTMLElement) {
         writeShellHeightPreference(dock.getBoundingClientRect().height);
       }
-      activeShellController?.refresh?.();
+      activeShellInstance()?.controller?.refresh?.();
     }
     shellResizeState = null;
   };
@@ -2994,9 +3282,10 @@
 
   window.addEventListener("resize", () => {
     syncCurrentDraftHeight();
-    activeShellController?.refresh?.();
+    activeShellInstance()?.controller?.refresh?.();
   });
 
   hydrateWorkspace(false);
+  autoOpenCloudAgentShell(currentForm());
   syncLucideIcons();
 })();

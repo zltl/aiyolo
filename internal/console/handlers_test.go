@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/zltl/aiyolo/internal/app"
 	"github.com/zltl/aiyolo/internal/artifacts"
+	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
 )
@@ -84,6 +86,96 @@ func TestConsoleLoginAndCreateAPIKey(t *testing.T) {
 	}
 	if len(keys) != 1 || keys[0].Name != "dev key" || keys[0].KeyHash == "" {
 		t.Fatalf("unexpected keys: %+v", keys)
+	}
+}
+
+func TestConsoleLoginSessionCookieExpiresInThreeMonths(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	loginForm := url.Values{"email": {"admin@example.com"}, "password": {"password"}}
+	response, err := client.PostForm(server.URL+"/console/login", loginForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("login status=%d", response.StatusCode)
+	}
+
+	var session *http.Cookie
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "aiyolo_console" {
+			session = cookie
+			break
+		}
+	}
+	if session == nil {
+		t.Fatal("session cookie missing")
+	}
+	if session.Expires.IsZero() {
+		t.Fatal("session cookie expiry missing")
+	}
+	remaining := time.Until(session.Expires)
+	if remaining < 89*24*time.Hour || remaining > 91*24*time.Hour {
+		t.Fatalf("session cookie remaining lifetime=%s, want about 90 days", remaining)
+	}
+	if session.MaxAge < int((89*24*time.Hour)/time.Second) {
+		t.Fatalf("session cookie max_age=%d, want close to 90 days", session.MaxAge)
+	}
+}
+
+func TestConsoleProtectedRequestRenewsSessionCookie(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	expiresAt := time.Now().Add(time.Hour).Unix()
+	payload := "admin@example.com:" + strconv.FormatInt(expiresAt, 10)
+	signature := auth.Sign(payload, cfg.SecretKey)
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/console/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: "aiyolo_console", Value: payload + ":" + signature, Path: "/console"})
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("dashboard status=%d body=%s", response.StatusCode, body)
+	}
+
+	var refreshed *http.Cookie
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "aiyolo_console" {
+			refreshed = cookie
+			break
+		}
+	}
+	if refreshed == nil {
+		t.Fatal("refreshed session cookie missing")
+	}
+	if refreshed.Expires.Before(time.Unix(expiresAt, 0).Add(80 * 24 * time.Hour)) {
+		t.Fatalf("refreshed cookie expiry=%s, want sliding renewal from prior expiry=%s", refreshed.Expires.UTC(), time.Unix(expiresAt, 0).UTC())
+	}
+	remaining := time.Until(refreshed.Expires)
+	if remaining < 89*24*time.Hour || remaining > 91*24*time.Hour {
+		t.Fatalf("refreshed cookie remaining lifetime=%s, want about 90 days", remaining)
 	}
 }
 
@@ -821,7 +913,7 @@ func TestConsoleCanResyncModelsFromExistingOpenRouterProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updatedRule.ProviderID != "openrouter" || updatedRule.ModelAlias != "openai/gpt-4.1-mini" || updatedRule.InputPricePerMillionTokens != 250000000 || updatedRule.OutputPricePerMillionTokens != 1000000000 || updatedRule.CacheReadPricePerMillionTokens != 50000000 || updatedRule.CacheWritePricePerMillionTokens != 625000000 {
+	if updatedRule.ProviderID != "openrouter" || updatedRule.ModelAlias != "openai/gpt-4.1-mini" || updatedRule.Currency != domain.CurrencyCNY || updatedRule.InputPricePerMillionTokens != 2000000000 || updatedRule.OutputPricePerMillionTokens != 8000000000 || updatedRule.CacheReadPricePerMillionTokens != 400000000 || updatedRule.CacheWritePricePerMillionTokens != 5000000000 {
 		t.Fatalf("unexpected pricing rule for updated route: %+v", updatedRule)
 	}
 	imported, err := store.LookupModelRoute(ctx, "openrouter/auto")
@@ -835,7 +927,7 @@ func TestConsoleCanResyncModelsFromExistingOpenRouterProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if importedRule.ProviderID != "openrouter" || importedRule.ModelAlias != "openrouter/auto" || importedRule.InputPricePerMillionTokens != 15000000 || importedRule.OutputPricePerMillionTokens != 60000000 {
+	if importedRule.ProviderID != "openrouter" || importedRule.ModelAlias != "openrouter/auto" || importedRule.Currency != domain.CurrencyCNY || importedRule.InputPricePerMillionTokens != 120000000 || importedRule.OutputPricePerMillionTokens != 480000000 {
 		t.Fatalf("unexpected pricing rule for imported route: %+v", importedRule)
 	}
 	conflicting, err := store.LookupModelRoute(ctx, "foreign/shared-model")
@@ -857,7 +949,7 @@ func TestConsoleCanResyncModelsFromExistingOpenRouterProvider(t *testing.T) {
 	}
 	modelsBody, _ := io.ReadAll(modelsResponse.Body)
 	modelsHTML := string(modelsBody)
-	if !strings.Contains(modelsHTML, "计费") || !strings.Contains(modelsHTML, "$0.1500 / 百万输入") || !strings.Contains(modelsHTML, "$0.6000 / 百万输出") {
+	if !strings.Contains(modelsHTML, "计费") || !strings.Contains(modelsHTML, "¥1.2000 / 百万输入") || !strings.Contains(modelsHTML, "¥4.8000 / 百万输出") {
 		t.Fatalf("pricing details missing from models page: %s", modelsHTML)
 	}
 	if !strings.Contains(modelsHTML, "继承提供方默认代理 · xray-balancer-socks5") {
@@ -865,6 +957,95 @@ func TestConsoleCanResyncModelsFromExistingOpenRouterProvider(t *testing.T) {
 	}
 	if !regexp.MustCompile(`(?s)<strong>openrouter/auto</strong>.*?<dt>代理</dt>\s*<dd>xray-balancer-socks5</dd>`).MatchString(modelsHTML) {
 		t.Fatalf("imported openrouter route should render the effective provider default proxy: %s", modelsHTML)
+	}
+}
+
+func TestConsoleSettingsExchangeRateAffectsOpenRouterSync(t *testing.T) {
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-or-test" {
+			t.Fatalf("unexpected auth header: %s", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"openai/gpt-4.1-mini","pricing":{"prompt":"0.0000025","completion":"0.00001"}}]}`))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	ctx := context.Background()
+	if err := store.SeedDefaults(ctx, storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-or-test", Status: domain.StatusEnabled, TimeoutSeconds: 90}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	settingsForm := url.Values{
+		"local_password_enabled":   {"on"},
+		"allowed_emails":           {"admin@example.com"},
+		"usd_to_cny_exchange_rate": {"6.5"},
+	}
+	settingsRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/settings/auth", strings.NewReader(settingsForm.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	settingsRequest.Header.Set("HX-Request", "true")
+	settingsResponse, err := client.Do(settingsRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer settingsResponse.Body.Close()
+	if settingsResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(settingsResponse.Body)
+		t.Fatalf("save settings status=%d body=%s", settingsResponse.StatusCode, body)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/providers/openrouter/sync-models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("HX-Request", "true")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("resync status=%d body=%s", response.StatusCode, body)
+	}
+
+	imported, err := store.LookupModelRoute(ctx, "openai/gpt-4.1-mini")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, err := store.GetPricingRule(ctx, imported.PriceRuleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rule.Currency != domain.CurrencyCNY || rule.InputPricePerMillionTokens != 1625000000 || rule.OutputPricePerMillionTokens != 6500000000 {
+		t.Fatalf("unexpected pricing rule after custom exchange rate: %+v", rule)
+	}
+
+	settings, err := store.GetConsoleAuthSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.USDCNYExchangeRate != "6.5" {
+		t.Fatalf("unexpected saved exchange rate: %+v", settings)
 	}
 }
 
@@ -1153,8 +1334,11 @@ func TestConsoleChatPageIsPrimaryEntry(t *testing.T) {
 	if !strings.Contains(html, "chat-workspace-page") || !strings.Contains(html, "gpt-5.4") {
 		t.Fatalf("chat primary entry missing expected content: %s", html)
 	}
-	if strings.Contains(html, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
-		t.Fatalf("advanced chat settings should be collapsed by default: %s", html)
+	if strings.Contains(html, `id="chat-advanced"`) || strings.Contains(html, `>高级设置<`) || strings.Contains(html, `>System prompt<`) {
+		t.Fatalf("advanced chat settings should be omitted from chat page: %s", html)
+	}
+	if !strings.Contains(html, `<textarea name="chat_system_prompt" hidden>`) {
+		t.Fatalf("chat page should keep a hidden system prompt field: %s", html)
 	}
 	if !strings.Contains(html, "你正在 AIYolo 提供的 AI 助手") {
 		t.Fatalf("default production system prompt missing from chat page: %s", html)
@@ -1446,7 +1630,7 @@ func TestConsoleChatSessionSavePreservesUpdatedAtWithoutMessageActivity(t *testi
 	}
 }
 
-func TestConsoleChatPageAdvancedSettingsCollapsedByDefault(t *testing.T) {
+func TestConsoleChatPageOmitsAdvancedSettings(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
 		t.Fatal(err)
@@ -1477,8 +1661,11 @@ func TestConsoleChatPageAdvancedSettingsCollapsedByDefault(t *testing.T) {
 	if strings.Contains(html, "chat-shell is-sidebar-collapsed") {
 		t.Fatalf("chat page should keep the sidebar visible by default: %s", html)
 	}
-	if strings.Contains(html, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
-		t.Fatalf("advanced chat settings should be collapsed by default: %s", html)
+	if strings.Contains(html, `id="chat-advanced"`) || strings.Contains(html, `>高级设置<`) || strings.Contains(html, `>System prompt<`) {
+		t.Fatalf("advanced chat settings should be omitted from chat page: %s", html)
+	}
+	if !strings.Contains(html, `<textarea name="chat_system_prompt" hidden>`) {
+		t.Fatalf("chat page should keep a hidden system prompt field: %s", html)
 	}
 	if strings.Contains(html, "Server sessions") || strings.Contains(html, "Stored on the server and resumable after disconnects") || strings.Contains(html, "Sessions are stored on the server so completed or partial output can be recovered after a disconnect.") {
 		t.Fatalf("chat page should omit the removed server-session copy: %s", html)
@@ -2494,6 +2681,8 @@ func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
 	}
 	for _, route := range []domain.ModelRoute{
 		{PublicName: "claude-sonnet", ProviderID: "anthropic-main", UpstreamModel: "claude-sonnet-4-5", Protocol: domain.ProtocolAnthropic, AllowedProtocols: []string{domain.ProtocolAnthropic}, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "claude-opus-4.7", ProviderID: "anthropic-main", UpstreamModel: "claude-opus-4.7", Protocol: domain.ProtocolAnthropic, AllowedProtocols: []string{domain.ProtocolAnthropic}, Enabled: true, Priority: 1, Weight: 100},
+		{PublicName: "claude-sonnet-4.6", ProviderID: "anthropic-main", UpstreamModel: "claude-sonnet-4.6", Protocol: domain.ProtocolAnthropic, AllowedProtocols: []string{domain.ProtocolAnthropic}, Enabled: true, Priority: 1, Weight: 100},
 		{PublicName: "deepseek-v4-flash", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-flash", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 2, Weight: 100},
 		{PublicName: "deepseek-v4-pro", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
 		{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100},
@@ -2525,8 +2714,8 @@ func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
 	defer pageResponse.Body.Close()
 	pageBody, _ := io.ReadAll(pageResponse.Body)
 	pageHTML := string(pageBody)
-	if strings.Contains(pageHTML, "claude-sonnet") {
-		t.Fatalf("anthropic route should be filtered out of chat page: %s", pageHTML)
+	if strings.Contains(pageHTML, "claude-sonnet-4-5") {
+		t.Fatalf("non-curated anthropic route should be filtered out of chat page: %s", pageHTML)
 	}
 	if strings.Contains(pageHTML, "gpt-4.1-mini") {
 		t.Fatalf("non-curated route should be filtered out of chat page: %s", pageHTML)
@@ -2537,12 +2726,12 @@ func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
 	if strings.Contains(pageHTML, "chatgpt-image-2") {
 		t.Fatalf("image route should be filtered out of chat page: %s", pageHTML)
 	}
-	for _, expected := range []string{"deepseek-v4-pro", "gpt-5.4"} {
+	for _, expected := range []string{"deepseek-v4-pro", "gpt-5.4", "claude-opus-4.7", "claude-sonnet-4.6", "gpt-5.5"} {
 		if !strings.Contains(pageHTML, expected) {
 			t.Fatalf("expected curated model slot %q in chat page: %s", expected, pageHTML)
 		}
 	}
-	for _, unexpected := range []string{"gpt-5.5", "gpt-5.5-pro", "gemini-3.1-pro-preview"} {
+	for _, unexpected := range []string{"gpt-5.5-pro", "gemini-3.1-pro-preview"} {
 		if strings.Contains(pageHTML, unexpected) {
 			t.Fatalf("unexpected curated model slot %q in chat page: %s", unexpected, pageHTML)
 		}
@@ -2553,8 +2742,11 @@ func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
 	if strings.Contains(pageHTML, `aria-controls="chat-advanced" onclick="const panel=document.getElementById('chat-advanced');if(panel){panel.open=true;panel.scrollIntoView({behavior:'smooth',block:'nearest'});}"`) {
 		t.Fatalf("tools shortcut should be hidden when no tools are available: %s", pageHTML)
 	}
-	if strings.Contains(pageHTML, `<details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details" open>`) {
-		t.Fatalf("advanced chat settings should be collapsed by default: %s", pageHTML)
+	if strings.Contains(pageHTML, `id="chat-advanced"`) || strings.Contains(pageHTML, `>高级设置<`) || strings.Contains(pageHTML, `>System prompt<`) {
+		t.Fatalf("advanced chat settings should be omitted from chat page: %s", pageHTML)
+	}
+	if !strings.Contains(pageHTML, `<textarea name="chat_system_prompt" hidden>`) {
+		t.Fatalf("chat page should keep a hidden system prompt field: %s", pageHTML)
 	}
 	if strings.Contains(pageHTML, `data-chat-action="pick-attachments"`) {
 		t.Fatalf("attachment quick action should stay hidden when attachment upload is disabled: %s", pageHTML)

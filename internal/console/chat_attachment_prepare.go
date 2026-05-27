@@ -11,11 +11,11 @@ import (
 func (handler *Handler) runConsoleChatTurn(ctx context.Context, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) (consoleChatExecution, error) {
 	protocol := handler.consoleChatExecutionProtocol(route, provider, history, attachments)
 	if protocol == "" {
-		return consoleChatExecution{StatusCode: 400, Usage: domain.UsageRecord{Currency: "USD", StatusCode: 400}}, &consoleUpstreamError{StatusCode: 400, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
+		return consoleChatExecution{StatusCode: 400, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: 400}}, &consoleUpstreamError{StatusCode: 400, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
 	}
 	preparedHistory, preparedAttachments, err := handler.prepareConsoleChatAttachmentsForProvider(ctx, protocol, provider, history, attachments)
 	if err != nil {
-		return consoleChatExecution{StatusCode: 502, Usage: domain.UsageRecord{Currency: "USD", StatusCode: 502}}, err
+		return consoleChatExecution{StatusCode: 502, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: 502}}, err
 	}
 	return runConsoleChatTurnWithContinuation(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, preparedHistory, userInput, preparedAttachments, false, nil, nil)
 }
@@ -23,11 +23,11 @@ func (handler *Handler) runConsoleChatTurn(ctx context.Context, provider domain.
 func (handler *Handler) runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
 	protocol = handler.consoleChatExecutionProtocol(route, provider, history, attachments)
 	if protocol == "" {
-		return consoleChatExecution{StatusCode: 400, Usage: domain.UsageRecord{Currency: "USD", StatusCode: 400, Stream: stream}}, &consoleUpstreamError{StatusCode: 400, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
+		return consoleChatExecution{StatusCode: 400, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: 400, Stream: stream}}, &consoleUpstreamError{StatusCode: 400, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
 	}
 	preparedHistory, preparedAttachments, err := handler.prepareConsoleChatAttachmentsForProvider(ctx, protocol, provider, history, attachments)
 	if err != nil {
-		return consoleChatExecution{StatusCode: 502, Usage: domain.UsageRecord{Currency: "USD", StatusCode: 502, Stream: stream}}, err
+		return consoleChatExecution{StatusCode: 502, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: 502, Stream: stream}}, err
 	}
 	return runConsoleChatTurnWithContinuation(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, preparedHistory, userInput, preparedAttachments, stream, onDelta, onReasoning)
 }

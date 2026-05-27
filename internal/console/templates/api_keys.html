@@ -61,14 +61,14 @@
           <span class="field-help">{{msg .Locale "0 表示不限。" "0 means unlimited."}}</span>
         </label>
         <label class="field">
-          <span class="field-label">{{msg .Locale "日预算（分）" "Daily budget cents"}}</span>
+          <span class="field-label">{{msg .Locale "日预算（人民币分）" "Daily budget (CNY fen)"}}</span>
           <input name="daily_budget_cents" type="number" min="0" value="0">
-          <span class="field-help">{{msg .Locale "0 表示不设日预算上限。" "0 means no daily budget cap."}}</span>
+          <span class="field-help">{{msg .Locale "0 表示不设日预算上限；单位是人民币分。" "0 means no daily budget cap; the unit is CNY fen."}}</span>
         </label>
         <label class="field span-2">
-          <span class="field-label">{{msg .Locale "月预算（分）" "Monthly budget cents"}}</span>
+          <span class="field-label">{{msg .Locale "月预算（人民币分）" "Monthly budget (CNY fen)"}}</span>
           <input name="monthly_budget_cents" type="number" min="0" value="0">
-          <span class="field-help">{{msg .Locale "0 表示不设月预算上限。" "0 means no monthly budget cap."}}</span>
+          <span class="field-help">{{msg .Locale "0 表示不设月预算上限；单位是人民币分。" "0 means no monthly budget cap; the unit is CNY fen."}}</span>
         </label>
         <div class="field span-2">
           <button class="primary-button" type="submit">{{msg .Locale "创建密钥" "Create key"}}</button>
@@ -130,7 +130,7 @@
             <td>{{join .AllowedProtocols ", "}}</td>
             <td>{{join .AllowedModels ", "}}</td>
             <td>RPM {{.RPMLimit}}<span class="meta">TPM {{.TPMLimit}} · {{msg $.Locale "并发" "Concurrency"}} {{.ConcurrentLimit}}</span></td>
-            <td>{{msg $.Locale "日" "Day"}} {{.DailyBudgetCents}}<span class="meta">{{msg $.Locale "月" "Month"}} {{.MonthlyBudgetCents}}</span></td>
+            <td>{{msg $.Locale "日" "Day"}} {{centsMoney .DailyBudgetCents "CNY"}}<span class="meta">{{msg $.Locale "月" "Month"}} {{centsMoney .MonthlyBudgetCents "CNY"}}</span></td>
             <td>{{timefmt .CreatedAt}}</td>
             <td>
               <div class="table-actions">

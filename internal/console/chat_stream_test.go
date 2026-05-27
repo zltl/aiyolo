@@ -317,24 +317,27 @@ func TestConsoleChatRoutesOnlyIncludeAllowedModels(t *testing.T) {
 		{PublicName: "deepseek-v4-pro", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, Enabled: true},
 		{PublicName: "deepseek/deepseek-v4-pro", ProviderID: "openrouter", UpstreamModel: "deepseek/deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, Enabled: true},
 		{PublicName: "openai/gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true},
+		{PublicName: "claude-opus-4.7", ProviderID: "anthropic-main", UpstreamModel: "claude-opus-4.7", Protocol: domain.ProtocolAnthropic, Enabled: true},
+		{PublicName: "claude-sonnet-4.6", ProviderID: "anthropic-main", UpstreamModel: "claude-sonnet-4.6", Protocol: domain.ProtocolAnthropic, Enabled: true},
 		{PublicName: "gpt-5.5", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, Enabled: true},
 		{PublicName: "gemini-3.1-pro-preview", ProviderID: "openrouter", UpstreamModel: "google/gemini-3.1-pro-preview", Protocol: domain.ProtocolOpenAI, Enabled: true},
 	}
 	providers := []domain.Provider{
 		{ID: "deepseek", Name: "DeepSeek", Protocol: domain.ProtocolOpenAI, Status: domain.StatusEnabled},
 		{ID: "openrouter", Name: "OpenRouter", Protocol: domain.ProtocolOpenAI, Status: domain.StatusEnabled},
+		{ID: "anthropic-main", Name: "Anthropic", Protocol: domain.ProtocolAnthropic, Status: domain.StatusEnabled},
 	}
 
 	views := consoleChatRoutes(routes, providers)
-	if len(views) != 2 {
-		t.Fatalf("expected 2 allowed routes, got %d: %+v", len(views), views)
+	if len(views) != 5 {
+		t.Fatalf("expected 5 allowed routes, got %d: %+v", len(views), views)
 	}
 
-	joined := views[0].PublicName + "," + views[1].PublicName
-	if joined != "deepseek-v4-pro,openai/gpt-5.4" {
+	joined := strings.Join([]string{views[0].PublicName, views[1].PublicName, views[2].PublicName, views[3].PublicName, views[4].PublicName}, ",")
+	if joined != "deepseek-v4-pro,openai/gpt-5.4,claude-opus-4.7,claude-sonnet-4.6,gpt-5.5" {
 		t.Fatalf("unexpected curated routes: %s", joined)
 	}
-	for _, blocked := range []string{"deepseek/deepseek-v4-pro", "gpt-5.5", "gemini-3.1-pro-preview"} {
+	for _, blocked := range []string{"deepseek/deepseek-v4-pro", "gemini-3.1-pro-preview"} {
 		if strings.Contains(joined, blocked) {
 			t.Fatalf("blocked model %q leaked into chat routes: %s", blocked, joined)
 		}

@@ -123,6 +123,23 @@
       <section class="panel">
         <div class="section-head">
           <div>
+            <p class="section-kicker">{{msg .Locale "计费换算" "Billing conversion"}}</p>
+            <h2>{{msg .Locale "美元转人民币汇率" "USD to CNY exchange rate"}}</h2>
+          </div>
+          <span class="badge tone-neutral">{{msg .Locale "兼容模型导入" "Compatible imports"}}</span>
+        </div>
+        <div class="form-grid">
+          <label class="field span-2">
+            <span class="field-label">{{msg .Locale "1 美元 = ? 人民币" "1 USD = ? CNY"}}</span>
+            <input name="usd_to_cny_exchange_rate" type="number" min="0.0001" step="0.0001" value="{{.USDCNYExchangeRate}}">
+            <span class="field-help">{{msg .Locale "DeepSeek 官方人民币费率不走这里；这个值只用于把 OpenRouter 等兼容接口返回的美元价格换算成人民币。改完后重新同步模型，新的价格规则才会按新汇率写入。" "DeepSeek official RMB pricing does not use this field. It is only used to convert USD pricing returned by compatible APIs such as OpenRouter into CNY. Re-sync models after changing it so new pricing rules are written with the new rate."}}</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <div>
             <p class="section-kicker">{{msg .Locale "保存前检查" "Guardrails"}}</p>
             <h2>{{msg .Locale "保存前要满足的约束" "Checks before saving"}}</h2>
           </div>

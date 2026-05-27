@@ -519,10 +519,10 @@ func (handler *Handler) streamChatReplace(w http.ResponseWriter, r *http.Request
 func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
 	prompt := strings.TrimSpace(userInput)
 	if prompt == "" && len(attachments) == 0 {
-		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest, Stream: stream}}, errors.New("message is empty")
+		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusBadRequest, Stream: stream}}, errors.New("message is empty")
 	}
 	if protocol != domain.ProtocolOpenAI && protocol != domain.ProtocolAnthropic {
-		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest, Stream: stream}}, &consoleUpstreamError{StatusCode: http.StatusBadRequest, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
+		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusBadRequest, Stream: stream}}, &consoleUpstreamError{StatusCode: http.StatusBadRequest, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
 	}
 
 	timeoutSeconds := provider.TimeoutSeconds
@@ -539,28 +539,28 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 
 	httpClient, err := proxytransport.NewTransportFactory().HTTPClient(chatCtx, provider, profile, stream)
 	if err != nil {
-		return consoleChatExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadGateway, Stream: stream}}, err
+		return consoleChatExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusBadGateway, Stream: stream}}, err
 	}
 	body, err := buildConsoleChatRequestBody(protocol, provider, route, systemPrompt, history, prompt, attachments, stream, reasoningEffort)
 	if err != nil {
-		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadRequest, Stream: stream}}, err
+		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusBadRequest, Stream: stream}}, err
 	}
 	request, err := buildConsoleChatUpstreamRequest(chatCtx, provider, protocol, body, stream)
 	if err != nil {
-		return consoleChatExecution{StatusCode: http.StatusInternalServerError, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusInternalServerError, Stream: stream}}, err
+		return consoleChatExecution{StatusCode: http.StatusInternalServerError, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusInternalServerError, Stream: stream}}, err
 	}
 
 	started := time.Now()
 	response, err := httpClient.Do(request)
 	if err != nil {
-		return consoleChatExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: "USD", StatusCode: http.StatusBadGateway, LatencyMS: time.Since(started).Milliseconds(), Stream: stream}}, err
+		return consoleChatExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusBadGateway, LatencyMS: time.Since(started).Milliseconds(), Stream: stream}}, err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode >= http.StatusBadRequest {
 		responseBody, _ := io.ReadAll(response.Body)
 		upstreamErr := parseConsoleUpstreamError(response.StatusCode, responseBody)
-		return consoleChatExecution{StatusCode: response.StatusCode, Usage: domain.UsageRecord{Currency: "USD", StatusCode: response.StatusCode, LatencyMS: time.Since(started).Milliseconds(), Stream: stream}}, upstreamErr
+		return consoleChatExecution{StatusCode: response.StatusCode, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: response.StatusCode, LatencyMS: time.Since(started).Milliseconds(), Stream: stream}}, upstreamErr
 	}
 
 	if stream {
@@ -572,7 +572,7 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 
 	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
-		return consoleChatExecution{StatusCode: response.StatusCode, Usage: domain.UsageRecord{Currency: "USD", StatusCode: response.StatusCode, LatencyMS: time.Since(started).Milliseconds(), Stream: stream}}, err
+		return consoleChatExecution{StatusCode: response.StatusCode, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: response.StatusCode, LatencyMS: time.Since(started).Milliseconds(), Stream: stream}}, err
 	}
 	return parseConsoleChatJSONResponse(responseBody, protocol, route, provider, response.StatusCode, stream, started)
 }
@@ -589,7 +589,7 @@ func runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, pr
 			ProviderName:  firstNonEmpty(provider.Name, provider.ID),
 			UpstreamModel: firstNonEmpty(route.UpstreamModel, route.PublicName),
 		},
-		Usage: domain.UsageRecord{Currency: "USD", Stream: stream},
+		Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, Stream: stream},
 	}
 	var combinedOutput strings.Builder
 	var combinedReasoning strings.Builder
@@ -722,7 +722,7 @@ func finalizeConsoleChatExecutionAggregate(target *consoleChatExecution, route d
 	target.Result.ProviderID = firstNonEmpty(target.Result.ProviderID, provider.ID)
 	target.Result.ProviderName = firstNonEmpty(target.Result.ProviderName, provider.Name, provider.ID)
 	target.Result.UpstreamModel = firstNonEmpty(target.Result.UpstreamModel, route.UpstreamModel, route.PublicName)
-	target.Usage.Currency = firstNonEmpty(target.Usage.Currency, "USD")
+	target.Usage.Currency = firstNonEmpty(target.Usage.Currency, domain.DefaultBillingCurrency)
 	target.Usage.LatencyMS = time.Since(started).Milliseconds()
 	if target.Usage.TotalTokens == 0 {
 		target.Usage.TotalTokens = target.Usage.InputTokens + target.Usage.OutputTokens + target.Usage.CacheCreationTokens + target.Usage.CacheReadTokens
@@ -971,10 +971,10 @@ func joinConsoleChatUpstreamURL(baseURL string, endpoint string) (string, error)
 func parseConsoleChatJSONResponse(body []byte, protocol string, route domain.ModelRoute, provider domain.Provider, statusCode int, stream bool, started time.Time) (consoleChatExecution, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return consoleChatExecution{StatusCode: statusCode, Usage: domain.UsageRecord{Currency: "USD", StatusCode: statusCode, Stream: stream, LatencyMS: time.Since(started).Milliseconds()}}, err
+		return consoleChatExecution{StatusCode: statusCode, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: statusCode, Stream: stream, LatencyMS: time.Since(started).Milliseconds()}}, err
 	}
 	usage := parseConsoleChatUsageFromJSON(body, protocol)
-	usage.Currency = firstNonEmpty(usage.Currency, "USD")
+	usage.Currency = firstNonEmpty(usage.Currency, domain.DefaultBillingCurrency)
 	usage.StatusCode = statusCode
 	usage.Stream = stream
 	usage.LatencyMS = time.Since(started).Milliseconds()
@@ -1015,7 +1015,7 @@ func parseConsoleChatJSONResponse(body []byte, protocol string, route domain.Mod
 
 func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domain.ModelRoute, provider domain.Provider, started time.Time, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
 	reader := bufio.NewReader(body)
-	usage := domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK, Stream: true}
+	usage := domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusOK, Stream: true}
 	result := consoleChatResultView{
 		PublicName:    route.PublicName,
 		ProviderID:    provider.ID,
@@ -1220,7 +1220,7 @@ func parseConsoleChatUsageFromJSON(body []byte, protocol string) domain.UsageRec
 			}
 		}
 		if usagePayload == nil && payload["input_tokens"] != nil {
-			usage := domain.UsageRecord{Currency: "USD", InputTokens: consoleIntNumber(payload["input_tokens"])}
+			usage := domain.UsageRecord{Currency: domain.DefaultBillingCurrency, InputTokens: consoleIntNumber(payload["input_tokens"])}
 			usage.TotalTokens = usage.InputTokens
 			return usage
 		}
@@ -1228,7 +1228,7 @@ func parseConsoleChatUsageFromJSON(body []byte, protocol string) domain.UsageRec
 	if usagePayload == nil {
 		return domain.UsageRecord{}
 	}
-	usage := domain.UsageRecord{Currency: "USD"}
+	usage := domain.UsageRecord{Currency: domain.DefaultBillingCurrency}
 	if protocol == domain.ProtocolAnthropic {
 		usage.InputTokens = consoleIntNumber(usagePayload["input_tokens"])
 		usage.OutputTokens = consoleIntNumber(usagePayload["output_tokens"])

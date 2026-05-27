@@ -293,7 +293,7 @@ func buildModelTestUsageRecord(requestID, userID, protocol string, route domain.
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens + usage.CacheCreationTokens + usage.CacheReadTokens
 	}
 	if usage.Currency == "" {
-		usage.Currency = firstNonEmpty(pricingRule.Currency, "USD")
+		usage.Currency = firstNonEmpty(pricingRule.Currency, domain.DefaultBillingCurrency)
 	}
 	if usage.CostMicroCents == 0 && usage.StatusCode < 400 {
 		usage.CostMicroCents = calculateModelTestUsageCost(pricingRule, usage)
@@ -343,7 +343,7 @@ func runModelRouteTest(ctx context.Context, provider domain.Provider, route doma
 
 	httpClient, err := proxytransport.NewTransportFactory().HTTPClient(testCtx, provider, profile, false)
 	if err != nil {
-		return modelTestExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: "USD"}}, err
+		return modelTestExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency}}, err
 	}
 
 	client := newOpenAICompatibleClient(provider, httpClient)
@@ -362,14 +362,14 @@ func runModelRouteTest(ctx context.Context, provider domain.Provider, route doma
 		if errors.As(err, &apiErr) && apiErr.HTTPStatusCode > 0 {
 			statusCode = apiErr.HTTPStatusCode
 		}
-		return modelTestExecution{StatusCode: statusCode, Usage: domain.UsageRecord{Currency: "USD", StatusCode: statusCode, LatencyMS: time.Since(start).Milliseconds()}}, err
+		return modelTestExecution{StatusCode: statusCode, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: statusCode, LatencyMS: time.Since(start).Milliseconds()}}, err
 	}
 
 	usage := domain.UsageRecord{
 		InputTokens:  response.Usage.PromptTokens,
 		OutputTokens: response.Usage.CompletionTokens,
 		TotalTokens:  response.Usage.TotalTokens,
-		Currency:     "USD",
+		Currency:     domain.DefaultBillingCurrency,
 		StatusCode:   http.StatusOK,
 		LatencyMS:    time.Since(start).Milliseconds(),
 	}

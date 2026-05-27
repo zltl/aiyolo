@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260527b">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260528a">
   <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body class="chat-workspace-body">
@@ -16,45 +16,127 @@
 
 {{define "chat-content"}}
 <div id="chat-content" class="chat-workspace-page">
-  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
-    <aside class="chat-sidebar">
-      <div class="chat-sidebar-surface">
-        <div class="chat-sidebar-top">
-          <div class="chat-sidebar-brand">
-            <div class="chat-sidebar-brand-copy">
-              <strong>AIYolo</strong>
-              <p>{{msg .Locale "控制台对话" "Console Chat"}}</p>
+  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
+    <div class="chat-workbench">
+      <div class="chat-sidebar-column">
+        <nav class="chat-activitybar" aria-label="{{msg .Locale "工作台导航" "Workbench navigation"}}">
+          <div class="chat-activitybar-group">
+            <div class="chat-activitybar-brand" aria-hidden="true">
+              <span class="chat-activitybar-brand-mark">AY</span>
             </div>
+            <button class="chat-activitybar-item" type="button" data-chat-action="switch-sidebar-view" data-chat-sidebar-view="files" aria-label="{{msg .Locale "文件资源管理器" "File explorer"}}" title="{{msg .Locale "文件资源管理器" "File explorer"}}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.75 7.25A2.25 2.25 0 0 1 6 5h4.12a1.4 1.4 0 0 1 .99.41l1.48 1.48a1.4 1.4 0 0 0 .99.41H18A2.25 2.25 0 0 1 20.25 9.5v7A2.25 2.25 0 0 1 18 18.75H6a2.25 2.25 0 0 1-2.25-2.25z"></path></svg>
+            </button>
+            <button class="chat-activitybar-item" type="button" data-chat-action="switch-sidebar-view" data-chat-sidebar-view="sessions" aria-label="{{msg .Locale "会话列表" "Session list"}}" title="{{msg .Locale "会话列表" "Session list"}}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6.75h12A2.25 2.25 0 0 1 20.25 9v7A2.25 2.25 0 0 1 18 18.25H9.91a1.5 1.5 0 0 0-.95.34l-2.86 2.33a.5.5 0 0 1-.82-.38v-2.29A2.25 2.25 0 0 1 3.75 16V9A2.25 2.25 0 0 1 6 6.75Z"></path><path d="M8 11h8"></path><path d="M8 14h5"></path></svg>
+            </button>
           </div>
-          <a class="ghost-button chat-sidebar-new" href="/console/chat">{{msg .Locale "发起新对话" "Start new chat"}}</a>
-        </div>
+          <div class="chat-activitybar-group chat-activitybar-group-panels">
+            <button class="chat-activitybar-item chat-activitybar-item-secondary" type="button" data-chat-action="toggle-pane" data-chat-pane="sidebar" aria-label="{{msg .Locale "切换左侧栏" "Toggle sidebar"}}" title="{{msg .Locale "切换左侧栏" "Toggle sidebar"}}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3.75" y="4.75" width="16.5" height="14.5" rx="2.25"></rect><path d="M9 4.75v14.5"></path><path d="m14.5 9.5-3 2.75 3 2.75"></path></svg>
+            </button>
+            <button class="chat-activitybar-item chat-activitybar-item-secondary" type="button" data-chat-action="toggle-pane" data-chat-pane="editor" aria-label="{{msg .Locale "切换编辑器" "Toggle editor"}}" title="{{msg .Locale "切换编辑器" "Toggle editor"}}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M7 4.75h7.25l2.75 2.75v11A1.75 1.75 0 0 1 15.25 20.25h-8.5A1.75 1.75 0 0 1 5 18.5v-12A1.75 1.75 0 0 1 6.75 4.75Z"></path><path d="M14.25 4.75V8h3.25"></path><path d="M8.75 12h4.5"></path><path d="M8.75 15.25h5.5"></path></svg>
+            </button>
+            <button class="chat-activitybar-item chat-activitybar-item-secondary" type="button" data-chat-action="toggle-pane" data-chat-pane="chat" aria-label="{{msg .Locale "切换对话面板" "Toggle chat pane"}}" title="{{msg .Locale "切换对话面板" "Toggle chat pane"}}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6.75h12A2.25 2.25 0 0 1 20.25 9v6A2.25 2.25 0 0 1 18 17.25H10.5L6 20.25v-3A2.25 2.25 0 0 1 3.75 15V9A2.25 2.25 0 0 1 6 6.75Z"></path><path d="M8.25 11.25h7.5"></path><path d="M8.25 14.25h5.25"></path></svg>
+            </button>
+          </div>
+        </nav>
 
-        <section class="chat-sidebar-section">
-          <div class="chat-session-store" data-chat-session-store></div>
-        </section>
-
-        <details id="chat-advanced" class="chat-sidebar-section chat-sidebar-details">
-          <summary class="chat-sidebar-summary">
-            <div>
-              <p class="chat-sidebar-label">{{msg .Locale "高级设置" "Advanced"}}</p>
-              <strong>{{msg .Locale "系统提示词" "System prompt"}}</strong>
+        <aside class="chat-sidebar">
+          <div class="chat-sidebar-surface">
+            <div class="chat-sidebar-top">
+              <div class="chat-sidebar-brand">
+                <div class="chat-sidebar-brand-copy">
+                  <strong>AIYolo</strong>
+                  <p>{{msg .Locale "控制台对话工作区" "Console chat workspace"}}</p>
+                </div>
+              </div>
+              <a class="ghost-button chat-sidebar-new" href="/console/chat">{{msg .Locale "发起新对话" "Start new chat"}}</a>
             </div>
-            <span class="chat-sidebar-summary-indicator" aria-hidden="true">
-              <i class="chat-control-icon" data-lucide="chevron-down"></i>
-            </span>
-          </summary>
-          <div class="chat-sidebar-details-body">
-            <label class="chat-system-field">
-              <span class="chat-field-caption">{{msg .Locale "固定当前会话的语气、边界和排查范围。" "Pin the tone, boundaries, and debugging scope for this conversation."}}</span>
-              <textarea name="chat_system_prompt" rows="7">{{.ChatForm.SystemPrompt}}</textarea>
-            </label>
+
+            <section class="chat-sidebar-section chat-sidebar-panel" data-chat-sidebar-panel="files">
+              <div class="chat-explorer-toolbar">
+                <div class="chat-explorer-heading">
+                  <p class="chat-explorer-kicker">{{msg .Locale "资源管理器" "Explorer"}}</p>
+                  <strong>{{msg .Locale "Cloud Agent Workspace" "Cloud Agent Workspace"}}</strong>
+                </div>
+                <button class="ghost-button chat-workspace-refresh" type="button" data-chat-action="refresh-workspace">{{msg .Locale "刷新" "Refresh"}}</button>
+              </div>
+              <div class="chat-explorer-section">
+                <div class="chat-explorer-section-head">
+                  <span class="chat-explorer-section-caret" aria-hidden="true">v</span>
+                  <span>{{msg .Locale "工作区" "Workspace"}}</span>
+                </div>
+                <div class="chat-explorer-root" data-chat-workspace-root-copy>{{msg .Locale "等待 Cloud Agent 工作区" "Waiting for the Cloud Agent workspace"}}</div>
+                <p class="chat-workspace-status" data-chat-workspace-status>{{msg .Locale "切换到 Cloud Agent 环境后，可浏览容器里的目录与文件。" "Switch to a Cloud Agent environment to browse files inside the container."}}</p>
+                <div class="chat-workspace-tree" data-chat-workspace-tree></div>
+              </div>
+            </section>
+
+            <section class="chat-sidebar-section chat-sidebar-panel" data-chat-sidebar-panel="sessions" hidden>
+              <div class="chat-sidebar-head">
+                <div>
+                  <p class="chat-sidebar-label">{{msg .Locale "会话" "Sessions"}}</p>
+                  <strong>{{msg .Locale "当前对话列表" "Current chat sessions"}}</strong>
+                </div>
+              </div>
+              <div class="chat-session-store" data-chat-session-store></div>
+            </section>
           </div>
-        </details>
+        </aside>
       </div>
-    </aside>
 
-    <section class="chat-stage">
-      <div class="chat-stage-main">
+      <div class="chat-pane-divider" data-chat-pane-divider="sidebar" role="separator" aria-orientation="vertical" aria-label="{{msg .Locale "调整目录树宽度" "Resize files width"}}"></div>
+
+      <section class="chat-editor-pane">
+        <div class="chat-editor-pane-shell">
+          <div class="chat-editor-titlebar">
+            <div class="chat-editor-title-copy">
+              <p class="chat-explorer-kicker">{{msg .Locale "编辑器" "Editor"}}</p>
+              <strong>{{msg .Locale "活动文件" "Active file"}}</strong>
+            </div>
+            <div class="chat-editor-actions">
+              <button class="ghost-button" type="button" data-chat-action="save-workspace-file" disabled>{{msg .Locale "保存" "Save"}}</button>
+            </div>
+          </div>
+          <div class="chat-editor-tabs" role="tablist" aria-label="{{msg .Locale "打开的文件" "Open editors"}}">
+            <div class="chat-editor-tab is-active" role="tab" aria-selected="true">
+              <span class="chat-editor-tab-icon" aria-hidden="true"></span>
+              <span class="chat-editor-tab-name" data-chat-editor-tab-name>{{msg .Locale "尚未打开文件" "No file open"}}</span>
+              <span class="chat-editor-tab-dirty" data-chat-editor-dirty hidden></span>
+            </div>
+          </div>
+          <div class="chat-editor-toolbar">
+            <div class="chat-editor-heading">
+              <p class="chat-editor-directory" data-chat-editor-directory>{{msg .Locale "从左侧目录树选择一个文本文件开始编辑。" "Choose a text file from the left tree to start editing."}}</p>
+              <strong data-chat-editor-path>{{msg .Locale "尚未打开文件" "No file open"}}</strong>
+            </div>
+          </div>
+          <div class="chat-editor-status" data-chat-editor-status>{{msg .Locale "从左侧目录树选择一个文本文件开始编辑。" "Choose a text file from the left tree to start editing."}}</div>
+          <textarea class="chat-editor-input" data-chat-editor-input spellcheck="false" disabled placeholder="{{msg .Locale "从左侧目录树选择文件后，这里会加载 Cloud Agent 工作区里的文本内容。" "Pick a file from the tree to load the Cloud Agent workspace text here."}}"></textarea>
+          <div class="chat-editor-statusbar" aria-live="polite">
+            <span class="chat-editor-statusbar-item" data-chat-editor-state>{{msg .Locale "未选择文件" "No file selected"}}</span>
+            <span class="chat-editor-statusbar-item" data-chat-editor-language>{{msg .Locale "纯文本" "Plain text"}}</span>
+            <span class="chat-editor-statusbar-item" data-chat-editor-bytes>0 B</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="chat-pane-divider" data-chat-pane-divider="editor" role="separator" aria-orientation="vertical" aria-label="{{msg .Locale "调整编辑器宽度" "Resize editor width"}}"></div>
+
+      <section class="chat-stage">
+        <div class="chat-stage-main">
+          <header class="chat-stage-topbar">
+            <div class="chat-stage-topbar-side">
+              <div class="chat-stage-title">
+                <p class="chat-stage-title-kicker">{{msg .Locale "AIYolo Chat" "AIYolo Chat"}}</p>
+                <h1 data-chat-session-title>{{msg .Locale "新会话" "New chat"}}</h1>
+              </div>
+              <span class="chat-stage-model is-muted">{{msg .Locale "未选择模型" "No model selected"}}</span>
+            </div>
+          </header>
       {{if .ChatError}}
       <div class="flash flash-error chat-inline-flash" role="alert">{{.ChatError}}</div>
       {{end}}
@@ -105,58 +187,12 @@
       <input type="hidden" name="chat_client_session_id" value="{{.ChatForm.ClientSessionID}}">
       <input type="hidden" name="chat_history_json" value='{{.ChatHistoryJSON}}'>
       <input type="hidden" name="chat_draft_attachments_json" value='{{.ChatDraftAttachmentsJSON}}'>
+      <textarea name="chat_system_prompt" hidden>{{.ChatForm.SystemPrompt}}</textarea>
       <input id="chat-session-store-json" type="hidden" value='{{.ChatSessionStoreJSON}}'>
       {{range .ChatMessages}}
       <input type="hidden" name="chat_message_role" value="{{.Role}}">
       <input type="hidden" name="chat_message_content" value="{{.Content}}">
       {{end}}
-
-      <section class="chat-shell-dock" data-chat-shell-dock hidden>
-        <div class="chat-shell-resize-handle" data-chat-shell-resize-handle role="separator" aria-orientation="horizontal" aria-label="{{msg .Locale "调整 Shell 高度" "Resize shell height"}}"></div>
-        <div class="chat-shell-panel">
-          <div class="chat-shell-panel-bar">
-            <div class="chat-shell-panel-tabs" role="tablist" aria-label="{{msg .Locale "底部面板" "Bottom panel"}}">
-              <button class="chat-shell-panel-tab is-active" type="button" role="tab" aria-selected="true">
-                {{msg .Locale "终端" "Terminal"}}
-              </button>
-            </div>
-            <div class="chat-shell-panel-actions">
-              <button class="ghost-button" type="button" data-chat-shell-action="clear">{{msg .Locale "清屏" "Clear"}}</button>
-              <button class="ghost-button" type="button" data-chat-shell-action="reconnect">{{msg .Locale "重连" "Reconnect"}}</button>
-              <button class="ghost-button" type="button" data-chat-shell-action="close">{{msg .Locale "关闭" "Close"}}</button>
-            </div>
-          </div>
-          <div class="chat-shell-panel-toolbar">
-            <div class="chat-shell-panel-copy">
-              <div class="chat-shell-panel-title">
-                <strong>{{msg .Locale "Claude Agent Shell" "Claude Agent Shell"}}</strong>
-                <span class="chat-terminal-status" data-chat-shell-status>{{msg .Locale "未连接" "Not connected"}}</span>
-              </div>
-              <div class="chat-shell-panel-meta">
-                <span class="chat-shell-panel-chip">
-                  <span class="chat-shell-panel-chip-label">Session</span>
-                  <strong data-chat-shell-session>{{msg .Locale "未连接" "Not connected"}}</strong>
-                </span>
-                <span class="chat-shell-panel-chip">
-                  <span class="chat-shell-panel-chip-label">Worker</span>
-                  <strong data-chat-shell-worker>{{msg .Locale "未连接" "Not connected"}}</strong>
-                </span>
-                <span class="chat-shell-panel-chip">
-                  <span class="chat-shell-panel-chip-label">Container</span>
-                  <strong data-chat-shell-container>{{msg .Locale "未连接" "Not connected"}}</strong>
-                </span>
-                <span class="chat-shell-panel-chip">
-                  <span class="chat-shell-panel-chip-label">Workspace</span>
-                  <strong data-chat-shell-workspace>{{msg .Locale "未连接" "Not connected"}}</strong>
-                </span>
-              </div>
-            </div>
-          </div>
-          <div class="chat-shell-panel-surface">
-            <div class="chat-terminal-canvas" data-chat-shell-terminal></div>
-          </div>
-        </div>
-      </section>
 
       <div class="chat-footer">
         <div class="chat-composer">
@@ -203,9 +239,9 @@
                   {{end}}
                 </div>
               </details>
-              <button class="chat-shell-launch" type="button" data-chat-action="open-shell" {{if eq .ChatForm.Environment "local"}}disabled{{end}} aria-label="{{msg .Locale "打开 Shell" "Open shell"}}" title="{{msg .Locale "打开 Claude Agent 容器 Shell" "Open the Claude Agent container shell"}}">
+              <button class="chat-shell-launch" type="button" data-chat-action="open-shell" {{if eq .ChatForm.Environment "local"}}disabled{{end}} aria-label="{{msg .Locale "打开 Claude Code 终端" "Open Claude Code terminal"}}" title="{{msg .Locale "打开 Claude Code 终端" "Open Claude Code terminal"}}">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4.75 6.25A1.25 1.25 0 0 1 6 5h12a1.25 1.25 0 0 1 1.25 1.25v11.5A1.25 1.25 0 0 1 18 19H6a1.25 1.25 0 0 1-1.25-1.25z"></path><path d="m8.5 9.5 2.75 2.5-2.75 2.5"></path><path d="M13.5 14.5h2.75"></path></svg>
-                <span class="chat-visually-hidden">{{msg .Locale "打开 Shell" "Open shell"}}</span>
+                <span class="chat-visually-hidden">{{msg .Locale "打开 Claude Code 终端" "Open Claude Code terminal"}}</span>
               </button>
               {{end}}
               {{if .ChatRoutes}}
@@ -262,13 +298,25 @@
         </div>
 
       </div>
+
+      <section class="chat-shell-dock" data-chat-shell-dock hidden>
+        <div class="chat-shell-resize-handle" data-chat-shell-resize-handle role="separator" aria-orientation="horizontal" aria-label="{{msg .Locale "调整 Shell 高度" "Resize shell height"}}"></div>
+        <div class="chat-shell-panel">
+          <div class="chat-shell-panel-bar">
+            <div class="chat-shell-panel-tabs" data-chat-shell-tabs role="tablist" aria-label="{{msg .Locale "底部终端" "Bottom terminals"}}"></div>
+          </div>
+          <div class="chat-shell-panels" data-chat-shell-panels></div>
+        </div>
+      </section>
       </div>
-    </section>
+      </section>
+    </div>
   </form>
   <script src="https://unpkg.com/lucide@1.16.0/dist/umd/lucide.min.js"></script>
   <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
   <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
   <script src="/console/static/chat-shell.js?v=chat-shell-20260527b"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260527b"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260527h"></script>
+  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260527d"></script>
 </div>
 {{end}}

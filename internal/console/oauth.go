@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -167,6 +168,7 @@ func (handler *Handler) settingsTemplateData(ctx context.Context, r *http.Reques
 		"LocalPasswordEnabled": settings.LocalPasswordEnabled,
 		"AllowedEmailsText":    strings.Join(settings.AllowedEmails, "\n"),
 		"AllowedDomainsText":   strings.Join(settings.AllowedDomains, "\n"),
+		"USDCNYExchangeRate":   normalizeUSDCNYExchangeRate(settings.USDCNYExchangeRate),
 		"AdminEmail":           handler.cfg.AdminEmail,
 		"AuthProviders":        providers,
 		"UserDirectory":        userDirectory,
@@ -189,6 +191,15 @@ func (handler *Handler) saveAuthSettings(w http.ResponseWriter, r *http.Request)
 		AllowedDomains:       splitLinesCSV(r.FormValue("allowed_domains")),
 		UpdatedAt:            time.Now().UTC(),
 	}
+	exchangeRate := strings.TrimSpace(r.FormValue("usd_to_cny_exchange_rate"))
+	if exchangeRate == "" {
+		exchangeRate = current.USDCNYExchangeRate
+	}
+	if rate, ok := new(big.Rat).SetString(strings.TrimSpace(exchangeRate)); !ok || rate.Sign() <= 0 {
+		handler.renderSettingsResponse(w, r, "", handler.requestText(r, "美元兑人民币汇率必须是大于 0 的数字。", "USD to CNY exchange rate must be a number greater than zero."))
+		return
+	}
+	settings.USDCNYExchangeRate = normalizeUSDCNYExchangeRate(exchangeRate)
 	currentProviders := make(map[string]domain.OAuthProviderSettings, len(current.Providers))
 	for _, provider := range current.Providers {
 		currentProviders[provider.ID] = provider
@@ -338,7 +349,7 @@ func (handler *Handler) consoleAuthSettings(ctx context.Context) (domain.Console
 }
 
 func (handler *Handler) defaultConsoleAuthSettings() domain.ConsoleAuthSettings {
-	settings := domain.ConsoleAuthSettings{LocalPasswordEnabled: true, Providers: builtInOAuthProviders()}
+	settings := domain.ConsoleAuthSettings{LocalPasswordEnabled: true, USDCNYExchangeRate: domain.DefaultUSDCNYExchangeRate, Providers: builtInOAuthProviders()}
 	if email := strings.TrimSpace(handler.cfg.AdminEmail); email != "" {
 		settings.AllowedEmails = []string{strings.ToLower(email)}
 	}
@@ -367,6 +378,7 @@ func mergeConsoleAuthSettings(defaults, saved domain.ConsoleAuthSettings) domain
 	if len(saved.AllowedDomains) > 0 {
 		merged.AllowedDomains = append([]string(nil), saved.AllowedDomains...)
 	}
+	merged.USDCNYExchangeRate = normalizeUSDCNYExchangeRate(firstNonEmpty(saved.USDCNYExchangeRate, defaults.USDCNYExchangeRate))
 	if !saved.UpdatedAt.IsZero() {
 		merged.UpdatedAt = saved.UpdatedAt
 	}
@@ -397,6 +409,14 @@ func mergeConsoleAuthSettings(defaults, saved domain.ConsoleAuthSettings) domain
 	}
 	merged.Providers = providers
 	return merged
+}
+
+func (handler *Handler) consoleUSDCNYExchangeRate(ctx context.Context) (string, error) {
+	settings, err := handler.consoleAuthSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	return normalizeUSDCNYExchangeRate(settings.USDCNYExchangeRate), nil
 }
 
 func mergeProviderSettings(defaults, saved domain.OAuthProviderSettings) domain.OAuthProviderSettings {

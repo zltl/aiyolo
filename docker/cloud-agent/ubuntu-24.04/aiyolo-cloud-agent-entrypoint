@@ -2,7 +2,7 @@
 set -euo pipefail
 
 claude_user="${AIYOLO_CLAUDE_USER:-aiyolo}"
-claude_home="${AIYOLO_CLAUDE_HOME:-/home/${claude_user}}"
+claude_home="${AIYOLO_CLAUDE_HOME:-/workspace}"
 
 install -d -m 0755 "${XDG_RUNTIME_DIR:-/tmp/runtime-root}" /tmp/.X11-unix
 install -d -o "$claude_user" -g "$claude_user" -m 0755 /workspace "$claude_home" "$claude_home/.claude"

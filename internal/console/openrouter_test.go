@@ -36,7 +36,7 @@ func TestFetchOpenRouterModelsUsesMetadataContextLength(t *testing.T) {
 	if len(imports) != 3 {
 		t.Fatalf("import count=%d", len(imports))
 	}
-	if imports[0].Route.PublicName != "openai/gpt-5.5" || imports[0].Route.ContextTokens != 1050000 || imports[0].PricingRule.InputPricePerMillionTokens != 250000000 || imports[0].PricingRule.OutputPricePerMillionTokens != 1000000000 {
+	if imports[0].Route.PublicName != "openai/gpt-5.5" || imports[0].Route.ContextTokens != 1050000 || imports[0].PricingRule.Currency != domain.CurrencyCNY || imports[0].PricingRule.InputPricePerMillionTokens != 2000000000 || imports[0].PricingRule.OutputPricePerMillionTokens != 8000000000 {
 		t.Fatalf("first import=%+v", imports[0])
 	}
 	if imports[1].Route.PublicName != "openrouter/auto" || imports[1].Route.ContextTokens != 2000000 {
