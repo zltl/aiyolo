@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260528d">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260528h">
   <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body class="chat-workspace-body">
@@ -46,29 +46,8 @@
 
         <aside class="chat-sidebar">
           <div class="chat-sidebar-surface">
-            <div class="chat-sidebar-top">
-              <div class="chat-sidebar-brand">
-                <div class="chat-sidebar-brand-copy">
-                  <strong>AIYolo</strong>
-                  <p>{{msg .Locale "控制台对话工作区" "Console chat workspace"}}</p>
-                </div>
-              </div>
-              <a class="ghost-button chat-sidebar-new" href="/console/chat">{{msg .Locale "发起新对话" "Start new chat"}}</a>
-            </div>
-
             <section class="chat-sidebar-section chat-sidebar-panel" data-chat-sidebar-panel="files">
-              <div class="chat-explorer-toolbar">
-                <div class="chat-explorer-heading">
-                  <p class="chat-explorer-kicker">{{msg .Locale "资源管理器" "Explorer"}}</p>
-                  <strong>{{msg .Locale "Cloud Agent Workspace" "Cloud Agent Workspace"}}</strong>
-                </div>
-                <button class="ghost-button chat-workspace-refresh" type="button" data-chat-action="refresh-workspace">{{msg .Locale "刷新" "Refresh"}}</button>
-              </div>
               <div class="chat-explorer-section">
-                <div class="chat-explorer-section-head">
-                  <span class="chat-explorer-section-caret" aria-hidden="true">v</span>
-                  <span>{{msg .Locale "工作区" "Workspace"}}</span>
-                </div>
                 <div class="chat-explorer-root" data-chat-workspace-root-copy>{{msg .Locale "等待 Cloud Agent 工作区" "Waiting for the Cloud Agent workspace"}}</div>
                 <p class="chat-workspace-status" data-chat-workspace-status>{{msg .Locale "切换到 Cloud Agent 环境后，可浏览容器里的目录与文件。" "Switch to a Cloud Agent environment to browse files inside the container."}}</p>
                 <div class="chat-workspace-tree" data-chat-workspace-tree></div>
@@ -92,15 +71,6 @@
 
       <section class="chat-editor-pane">
         <div class="chat-editor-pane-shell">
-          <div class="chat-editor-titlebar">
-            <div class="chat-editor-title-copy">
-              <p class="chat-explorer-kicker">{{msg .Locale "编辑器" "Editor"}}</p>
-              <strong>{{msg .Locale "活动文件" "Active file"}}</strong>
-            </div>
-            <div class="chat-editor-actions">
-              <button class="ghost-button" type="button" data-chat-action="save-workspace-file" disabled>{{msg .Locale "保存" "Save"}}</button>
-            </div>
-          </div>
           <div class="chat-editor-tabs" role="tablist" aria-label="{{msg .Locale "打开的文件" "Open editors"}}">
             <div class="chat-editor-tab is-active" role="tab" aria-selected="true">
               <span class="chat-editor-tab-icon" aria-hidden="true"></span>
@@ -128,11 +98,6 @@
 
       <section class="chat-stage">
         <div class="chat-stage-main">
-          <header class="chat-stage-topbar">
-            <div class="chat-stage-topbar-side">
-              <span class="chat-stage-model is-muted">{{msg .Locale "未选择模型" "No model selected"}}</span>
-            </div>
-          </header>
       {{if .ChatError}}
       <div class="flash flash-error chat-inline-flash" role="alert">{{.ChatError}}</div>
       {{end}}
@@ -312,7 +277,7 @@
   <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
   <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
   <script src="/console/static/chat-shell.js?v=chat-shell-20260527b"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260527h"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260527m"></script>
   <script src="/console/static/chat-workspace.js?v=chat-workspace-20260528a"></script>
 </div>
 {{end}}

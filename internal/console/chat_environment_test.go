@@ -2,7 +2,6 @@ package console
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -1028,17 +1027,17 @@ func TestChatWorkspaceTreeEndpointLoadsCloudAgentSession(t *testing.T) {
 			WorkspacePath: options.WorkspacePath,
 		}, nil
 	}
-	handler.runCloudAgentCommand = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, script string) (string, error) {
+	handler.listCloudAgentWorkspaceTree = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceTree, error) {
 		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
 			t.Fatalf("unexpected workspace tree bridge inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
 		}
 		if ensureCalls.Load() == 0 {
 			t.Fatal("workspace tree command ran before ensuring cloud agent runtime")
 		}
-		if !strings.Contains(script, "AIOYOLO_WORKSPACE_TARGET=''") {
-			t.Fatalf("workspace tree script did not target the workspace root: %s", script)
+		if relativePath != "" {
+			t.Fatalf("workspace tree did not target the workspace root: %q", relativePath)
 		}
-		return `{"path":"","entries":[{"name":"cmd","path":"cmd","type":"directory","hasChildren":true},{"name":"README.md","path":"README.md","type":"file","size":128,"modifiedAt":"2026-05-27T03:10:00Z"}]}`, nil
+		return workerops.CloudAgentWorkspaceTree{Path: "", Entries: []workerops.CloudAgentWorkspaceEntry{{Name: "cmd", Path: "cmd", Type: "directory", HasChildren: true}, {Name: "README.md", Path: "README.md", Type: "file", Size: 128, ModifiedAt: "2026-05-27T03:10:00Z"}}}, nil
 	}
 
 	server := mountedConsoleTestServer(handler)
@@ -1133,17 +1132,17 @@ func TestChatWorkspaceFileEndpointReadsFile(t *testing.T) {
 			WorkspacePath: options.WorkspacePath,
 		}, nil
 	}
-	handler.runCloudAgentCommand = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, script string) (string, error) {
+	handler.readCloudAgentWorkspaceFile = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceFile, error) {
 		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
 			t.Fatalf("unexpected workspace file bridge inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
 		}
 		if ensureCalls.Load() == 0 {
 			t.Fatal("workspace file command ran before ensuring cloud agent runtime")
 		}
-		if !strings.Contains(script, "AIOYOLO_WORKSPACE_TARGET='README.md'") {
-			t.Fatalf("workspace file script did not target README.md: %s", script)
+		if relativePath != "README.md" {
+			t.Fatalf("workspace file did not target README.md: %q", relativePath)
 		}
-		return `{"path":"README.md","size":42,"content":"hello from workspace\n"}`, nil
+		return workerops.CloudAgentWorkspaceFile{Path: "README.md", Size: 42, Content: "hello from workspace\n"}, nil
 	}
 
 	server := mountedConsoleTestServer(handler)
@@ -1235,21 +1234,20 @@ func TestSaveChatWorkspaceFilePersistsChanges(t *testing.T) {
 			WorkspacePath: options.WorkspacePath,
 		}, nil
 	}
-	handler.runCloudAgentCommand = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, script string) (string, error) {
+	handler.writeCloudAgentWorkspaceFile = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content string) (workerops.CloudAgentWorkspaceFile, error) {
 		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
 			t.Fatalf("unexpected workspace save bridge inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
 		}
 		if ensureCalls.Load() == 0 {
 			t.Fatal("workspace save command ran before ensuring cloud agent runtime")
 		}
-		expectedContent := base64.StdEncoding.EncodeToString([]byte("package main\n"))
-		if !strings.Contains(script, consoleChatWorkspaceShellQuote("cmd/main.go")) {
-			t.Fatalf("workspace save script did not target cmd/main.go: %s", script)
+		if relativePath != "cmd/main.go" {
+			t.Fatalf("workspace save did not target cmd/main.go: %q", relativePath)
 		}
-		if !strings.Contains(script, consoleChatWorkspaceShellQuote(expectedContent)) {
-			t.Fatalf("workspace save script did not embed the expected file payload: %s", script)
+		if content != "package main\n" {
+			t.Fatalf("workspace save content mismatch: %q", content)
 		}
-		return `{"path":"cmd/main.go","bytes":13}`, nil
+		return workerops.CloudAgentWorkspaceFile{Path: "cmd/main.go", Bytes: 13}, nil
 	}
 
 	server := mountedConsoleTestServer(handler)

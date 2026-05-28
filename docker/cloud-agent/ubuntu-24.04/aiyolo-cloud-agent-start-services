@@ -9,6 +9,9 @@ display="${AIYOLO_DISPLAY:-:99}"
 
 declare -a pids=()
 
+/usr/local/bin/aiyolo-ass >/tmp/aiyolo-ass.log 2>&1 &
+pids+=("$!")
+
 if [[ "$enable_dockerd" == "1" ]]; then
   /usr/local/bin/aiyolo-cloud-agent-start-docker >/tmp/aiyolo-dockerd.log 2>&1 &
   pids+=("$!")

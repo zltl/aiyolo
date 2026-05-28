@@ -31,6 +31,216 @@
     }
     window.lucide.createIcons();
   };
+  const pickerViewportMargin = 8;
+  const pickerViewportGap = 6;
+  const isChatPicker = (node) => node instanceof HTMLDetailsElement && node.classList.contains("chat-model-picker");
+  let pickerIDCounter = 0;
+  const pickerMenuPortals = new WeakMap();
+  const ensurePickerID = (picker) => {
+    if (!isChatPicker(picker)) {
+      return "";
+    }
+    if (!picker.dataset.chatPickerId) {
+      pickerIDCounter += 1;
+      picker.dataset.chatPickerId = `chat-picker-${pickerIDCounter}`;
+    }
+    return picker.dataset.chatPickerId;
+  };
+  const pickerMenu = (picker) => {
+    if (!isChatPicker(picker)) {
+      return null;
+    }
+    const localMenu = picker.querySelector(".chat-model-picker-menu");
+    if (localMenu instanceof HTMLElement) {
+      return localMenu;
+    }
+    const pickerID = picker.dataset.chatPickerId || "";
+    if (pickerID === "") {
+      return null;
+    }
+    return document.body.querySelector(`.chat-model-picker-menu[data-chat-picker-owner="${pickerID}"]`);
+  };
+  const pickerFromMenu = (menu) => {
+    if (!(menu instanceof HTMLElement)) {
+      return null;
+    }
+    const pickerID = menu.dataset.chatPickerOwner || "";
+    if (pickerID === "") {
+      return null;
+    }
+    return Array.from(currentForm()?.querySelectorAll(".chat-model-picker") || []).find((picker) => picker instanceof HTMLDetailsElement && picker.dataset.chatPickerId === pickerID) || null;
+  };
+  const pickerFromTarget = (target) => {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+    const localPicker = target.closest(".chat-model-picker");
+    if (localPicker instanceof HTMLDetailsElement) {
+      return localPicker;
+    }
+    return pickerFromMenu(target.closest(".chat-model-picker-menu"));
+  };
+  const pickerFormControls = (form, selector) => {
+    const controls = [];
+    const seen = new Set();
+    const add = (node) => {
+      if (!(node instanceof HTMLElement) || seen.has(node)) {
+        return;
+      }
+      seen.add(node);
+      controls.push(node);
+    };
+    form?.querySelectorAll(selector).forEach(add);
+    document.body.querySelectorAll(`.chat-model-picker-menu[data-chat-picker-owner] ${selector}`).forEach((node) => {
+      const picker = pickerFromMenu(node.closest(".chat-model-picker-menu"));
+      if (!form || !picker || !form.contains(picker)) {
+        return;
+      }
+      add(node);
+    });
+    return controls;
+  };
+  const portalPickerMenu = (picker, menu) => {
+    if (!isChatPicker(picker) || !(menu instanceof HTMLElement) || menu.parentElement === document.body) {
+      return;
+    }
+    const pickerID = ensurePickerID(picker);
+    const form = picker.closest("form");
+    if (form instanceof HTMLFormElement) {
+      if (!form.id) {
+        form.id = "chat-form";
+      }
+      menu.querySelectorAll("input, select, textarea, button").forEach((control) => {
+        if (control instanceof HTMLElement) {
+          control.setAttribute("form", form.id);
+        }
+      });
+    }
+    const placeholder = document.createComment("chat-picker-menu");
+    pickerMenuPortals.set(picker, placeholder);
+    menu.dataset.chatPickerOwner = pickerID;
+    menu.after(placeholder);
+    document.body.appendChild(menu);
+  };
+  const restorePickerMenu = (picker) => {
+    if (!isChatPicker(picker)) {
+      return;
+    }
+    const menu = pickerMenu(picker);
+    const placeholder = pickerMenuPortals.get(picker);
+    if (!(menu instanceof HTMLElement) || !placeholder?.parentNode) {
+      return;
+    }
+    placeholder.parentNode.insertBefore(menu, placeholder);
+    placeholder.remove();
+    pickerMenuPortals.delete(picker);
+  };
+  const setPickerExpanded = (picker) => {
+    if (!isChatPicker(picker)) {
+      return;
+    }
+    const summary = picker.querySelector("summary");
+    if (summary instanceof HTMLElement) {
+      summary.setAttribute("aria-expanded", picker.open ? "true" : "false");
+    }
+  };
+  const clearPickerMenuPlacement = (picker) => {
+    if (!isChatPicker(picker)) {
+      return;
+    }
+    const menu = pickerMenu(picker);
+    picker.classList.remove("is-floating-menu", "is-menu-above", "is-menu-below");
+    setPickerExpanded(picker);
+    if (!(menu instanceof HTMLElement)) {
+      return;
+    }
+    menu.classList.remove("is-floating-menu", "is-menu-above", "is-menu-below");
+    menu.style.removeProperty("top");
+    menu.style.removeProperty("left");
+    menu.style.removeProperty("width");
+    menu.style.removeProperty("height");
+    menu.style.removeProperty("max-height");
+    menu.style.removeProperty("visibility");
+    restorePickerMenu(picker);
+  };
+  const syncPickerMenuPlacement = (picker) => {
+    if (!isChatPicker(picker) || !picker.open) {
+      clearPickerMenuPlacement(picker);
+      return;
+    }
+    const summary = picker.querySelector("summary");
+    const menu = pickerMenu(picker);
+    if (!(summary instanceof HTMLElement) || !(menu instanceof HTMLElement)) {
+      return;
+    }
+
+    portalPickerMenu(picker, menu);
+    picker.classList.add("is-floating-menu");
+    menu.classList.add("is-floating-menu");
+    setPickerExpanded(picker);
+    menu.style.visibility = "hidden";
+    menu.style.removeProperty("top");
+    menu.style.removeProperty("left");
+    menu.style.removeProperty("width");
+    menu.style.removeProperty("height");
+    menu.style.removeProperty("max-height");
+
+    const triggerRect = summary.getBoundingClientRect();
+    const visualViewport = window.visualViewport || null;
+    const viewportWidth = Math.max(1, Math.floor(visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 0));
+    const viewportHeight = Math.max(1, Math.floor(visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0));
+    const maxWidth = Math.max(180, viewportWidth - pickerViewportMargin * 2);
+    const measuredWidth = Math.ceil(menu.getBoundingClientRect().width || menu.offsetWidth || 0);
+    const triggerWidth = Math.ceil(triggerRect.width || 0);
+    const menuWidth = Math.min(maxWidth, Math.max(triggerWidth, measuredWidth, 180));
+
+    menu.style.width = `${menuWidth}px`;
+    menu.style.maxHeight = "none";
+
+    const naturalHeight = Math.ceil(menu.scrollHeight || menu.getBoundingClientRect().height || 0);
+    const viewportCap = Math.max(48, viewportHeight - pickerViewportMargin * 2);
+    const availableBelow = Math.max(0, viewportHeight - triggerRect.bottom - pickerViewportGap - pickerViewportMargin);
+    const availableAbove = Math.max(0, triggerRect.top - pickerViewportGap - pickerViewportMargin);
+    const neededHeight = Math.min(naturalHeight || viewportCap, viewportCap);
+    const fitsBelow = availableBelow >= neededHeight;
+    const fitsAbove = availableAbove >= neededHeight;
+    const openBelow = fitsBelow || (!fitsAbove && availableBelow >= availableAbove);
+    const availableHeight = Math.min(viewportCap, Math.max(48, openBelow ? availableBelow : availableAbove));
+    const menuHeight = Math.min(neededHeight, availableHeight);
+
+    const maxLeft = viewportWidth - pickerViewportMargin - menuWidth;
+    const alignedLeft = triggerRect.right - menuWidth;
+    const left = Math.round(Math.min(Math.max(pickerViewportMargin, alignedLeft), Math.max(pickerViewportMargin, maxLeft)));
+    const rawTop = openBelow
+      ? triggerRect.bottom + pickerViewportGap
+      : triggerRect.top - pickerViewportGap - menuHeight;
+    const maxTop = viewportHeight - pickerViewportMargin - menuHeight;
+    const top = Math.round(Math.min(Math.max(pickerViewportMargin, rawTop), Math.max(pickerViewportMargin, maxTop)));
+
+    picker.classList.toggle("is-menu-below", openBelow);
+    picker.classList.toggle("is-menu-above", !openBelow);
+  menu.classList.toggle("is-menu-below", openBelow);
+  menu.classList.toggle("is-menu-above", !openBelow);
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    menu.style.height = `${Math.max(48, Math.floor(menuHeight))}px`;
+    menu.style.maxHeight = `${Math.max(48, Math.floor(menuHeight))}px`;
+    menu.style.visibility = "";
+  };
+  const closeOtherPickers = (activePicker) => {
+    currentForm()?.querySelectorAll(".chat-model-picker[open]").forEach((picker) => {
+      if (picker !== activePicker && picker instanceof HTMLDetailsElement) {
+        picker.open = false;
+      }
+    });
+  };
+  const syncOpenPickerMenus = () => {
+    currentForm()?.querySelectorAll(".chat-model-picker[open]").forEach((picker) => {
+      if (picker instanceof HTMLDetailsElement) {
+        syncPickerMenuPlacement(picker);
+      }
+    });
+  };
   const sidebarPreferenceKey = "aiyolo.console.chat.sidebarCollapsed";
   const ownProperty = Object.prototype.hasOwnProperty;
   let activeStreamController = null;
@@ -427,7 +637,7 @@
   const environmentField = (form = currentForm()) => form?.querySelector("[data-chat-environment-input], select[name=\"chat_environment\"]") || null;
   const environmentPicker = (form = currentForm()) => form?.querySelector("[data-chat-environment-picker]") || null;
   const environmentPickerCopy = (form = currentForm()) => form?.querySelector("[data-chat-environment-picker-copy]") || null;
-  const environmentOptionInputs = (form = currentForm()) => Array.from(form?.querySelectorAll("[data-chat-environment-option]") || []).filter((input) => input instanceof HTMLInputElement);
+  const environmentOptionInputs = (form = currentForm()) => pickerFormControls(form, "[data-chat-environment-option]").filter((input) => input instanceof HTMLInputElement);
   const currentSelectedEnvironment = (form) => {
     const field = environmentField(form);
     if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement)) {
@@ -504,11 +714,11 @@
   const environmentEnsureURL = (form = currentForm()) => String(form?.dataset.chatEnvironmentEnsureUrl || "").trim();
 
   const currentSelectedModel = (form) => {
-    const checked = form?.querySelector("input[name=\"chat_public_name\"]:checked");
+    const checked = pickerFormControls(form, "input[name=\"chat_public_name\"]:checked")[0];
     if (checked instanceof HTMLInputElement) {
       return checked.value.trim();
     }
-    const first = form?.querySelector("input[name=\"chat_public_name\"]");
+    const first = pickerFormControls(form, "input[name=\"chat_public_name\"]")[0];
     return first instanceof HTMLInputElement ? first.value.trim() : "";
   };
 
@@ -538,11 +748,14 @@
   const reasoningEffortControl = (form = currentForm()) => form?.querySelector("[data-chat-reasoning-control]") || null;
   const reasoningEffortInput = (form = currentForm()) => form?.querySelector("[data-chat-reasoning-effort-input]") || null;
   const reasoningEffortPicker = (form = currentForm()) => form?.querySelector("[data-chat-reasoning-picker]") || null;
-  const reasoningEffortPickerMenu = (form = currentForm()) => reasoningEffortPicker(form)?.querySelector(".chat-reasoning-picker-menu") || null;
+  const reasoningEffortPickerMenu = (form = currentForm()) => {
+    const menu = pickerMenu(reasoningEffortPicker(form));
+    return menu?.classList.contains("chat-reasoning-picker-menu") ? menu : null;
+  };
   const reasoningEffortPickerCopy = (form = currentForm()) => form?.querySelector("[data-chat-reasoning-picker-copy]") || null;
 
   const refreshReasoningOptionStates = (form = currentForm()) => {
-    form?.querySelectorAll("[data-chat-reasoning-option]").forEach((input) => {
+    pickerFormControls(form, "[data-chat-reasoning-option]").forEach((input) => {
       if (!(input instanceof HTMLInputElement)) {
         return;
       }
@@ -554,7 +767,7 @@
   const setSelectedReasoningEffort = (form, value) => {
     const normalized = String(value || "").trim().toLowerCase();
     let matched = false;
-    form?.querySelectorAll("[data-chat-reasoning-option]").forEach((input) => {
+    pickerFormControls(form, "[data-chat-reasoning-option]").forEach((input) => {
       if (!(input instanceof HTMLInputElement)) {
         return;
       }
@@ -563,7 +776,7 @@
       matched = matched || checked;
     });
     if (!matched) {
-      const fallback = form?.querySelector("[data-chat-reasoning-option][value='']");
+      const fallback = pickerFormControls(form, "[data-chat-reasoning-option][value='']")[0];
       if (fallback instanceof HTMLInputElement) {
         fallback.checked = true;
       }
@@ -1097,7 +1310,7 @@
 
   const routeMap = (form) => {
     const routes = new Map();
-    form?.querySelectorAll("input[name=\"chat_public_name\"]").forEach((input) => {
+    pickerFormControls(form, "input[name=\"chat_public_name\"]").forEach((input) => {
       if (!(input instanceof HTMLInputElement)) {
         return;
       }
@@ -1119,7 +1332,7 @@
   };
 
   const refreshModelCardStates = (form) => {
-    form?.querySelectorAll("input[name=\"chat_public_name\"]").forEach((input) => {
+    pickerFormControls(form, "input[name=\"chat_public_name\"]").forEach((input) => {
       if (!(input instanceof HTMLInputElement)) {
         return;
       }
@@ -1130,7 +1343,7 @@
 
   const setSelectedModel = (form, publicName) => {
     let matched = false;
-    form?.querySelectorAll("input[name=\"chat_public_name\"]").forEach((input) => {
+    pickerFormControls(form, "input[name=\"chat_public_name\"]").forEach((input) => {
       if (!(input instanceof HTMLInputElement)) {
         return;
       }
@@ -1141,7 +1354,7 @@
       }
     });
     if (!matched) {
-      const first = form?.querySelector("input[name=\"chat_public_name\"]");
+      const first = pickerFormControls(form, "input[name=\"chat_public_name\"]")[0];
       if (first instanceof HTMLInputElement) {
         first.checked = true;
       }
@@ -3107,7 +3320,7 @@
       const session = captureSessionFromDOM(form, normalizeStore(loadStore(), form, routes), routes);
       updateStageHeader(root, session, routes);
       renderThread(root, session.messages, routes.get(session.publicName) || null);
-      const picker = target.closest(".chat-model-picker");
+      const picker = pickerFromTarget(target);
       if (picker instanceof HTMLDetailsElement) {
         picker.open = false;
       }
@@ -3117,7 +3330,7 @@
     }
     if (target instanceof HTMLInputElement && target.matches("[data-chat-environment-option]")) {
       setSelectedEnvironment(form, target.value);
-      const picker = target.closest(".chat-environment-picker");
+      const picker = pickerFromTarget(target);
       if (picker instanceof HTMLDetailsElement) {
         picker.open = false;
       }
@@ -3154,7 +3367,7 @@
       if (copy instanceof HTMLElement) {
         copy.textContent = input?.value ? reasoningEffortLabel(input.value) : reasoningEffortDefaultLabel();
       }
-      const picker = target.closest(".chat-reasoning-picker");
+      const picker = pickerFromTarget(target);
       if (picker instanceof HTMLDetailsElement) {
         picker.open = false;
       }
@@ -3202,16 +3415,49 @@
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   });
 
+  document.addEventListener("toggle", (event) => {
+    const picker = event.target;
+    if (!isChatPicker(picker)) {
+      return;
+    }
+    if (picker.open) {
+      closeOtherPickers(picker);
+      syncPickerMenuPlacement(picker);
+      window.requestAnimationFrame(() => syncPickerMenuPlacement(picker));
+      return;
+    }
+    clearPickerMenuPlacement(picker);
+  }, true);
+
+  document.addEventListener("scroll", syncOpenPickerMenus, true);
+  window.addEventListener("resize", syncOpenPickerMenus);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+    const form = currentForm();
+    const openPickers = Array.from(form?.querySelectorAll(".chat-model-picker[open]") || []).filter((picker) => picker instanceof HTMLDetailsElement);
+    if (openPickers.length === 0) {
+      return;
+    }
+    openPickers.forEach((picker) => {
+      picker.open = false;
+    });
+    event.preventDefault();
+  });
+
   document.addEventListener("click", (event) => {
     const form = currentForm();
     if (!form) {
       return;
     }
-    form.querySelectorAll(".chat-model-picker[open], .chat-reasoning-picker[open]").forEach((picker) => {
+    form.querySelectorAll(".chat-model-picker[open]").forEach((picker) => {
       if (!(picker instanceof HTMLDetailsElement)) {
         return;
       }
-      if (event.target instanceof Node && picker.contains(event.target)) {
+      const menu = pickerMenu(picker);
+      if (event.target instanceof Node && (picker.contains(event.target) || menu?.contains(event.target))) {
         return;
       }
       picker.open = false;

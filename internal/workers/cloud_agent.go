@@ -415,6 +415,10 @@ func cloudAgentContainerEnv(options CloudAgentStartOptions) map[string]string {
 		"AIYOLO_CLOUD_AGENT_ENABLE_DOCKERD":    boolString(options.EnableDockerd),
 		"AIYOLO_CLOUD_AGENT_AUTO_START_CHROME": boolString(options.AutoStartChrome),
 		"AIYOLO_CLOUD_AGENT_CHROME_URL":        options.OpenURL,
+		"AIYOLO_ASS_WORKSPACE_ROOT":            options.WorkspacePath,
+		"AIYOLO_ASS_USER":                      defaultCloudAgentClaudeUser,
+		"AIYOLO_ASS_HOME":                      defaultCloudAgentClaudeHome,
+		"AIYOLO_ASS_SOCKET_PATH":               cloudAgentASSSocketPath,
 		"AIYOLO_DISPLAY":                       options.Display,
 		"AIYOLO_VNC_PORT":                      strconv.Itoa(options.ContainerVNCPort),
 		"AIYOLO_CHROME_REMOTE_DEBUGGING_PORT":  strconv.Itoa(options.ContainerChromePort),
@@ -702,6 +706,7 @@ def ensure_container():
     run(args)
     if payload.get("enable_display"):
         wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", f"nc -z 127.0.0.1 {payload['container_vnc_port']}"] , 30)
+	wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "test -S ${AIYOLO_ASS_SOCKET_PATH:-/run/aiyolo/ass.sock}"], 30)
     if payload.get("enable_dockerd"):
         wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "docker info >/dev/null 2>&1"], 60)
     if payload.get("enable_display") and payload.get("auto_start_chrome"):
@@ -724,6 +729,7 @@ if __name__ == "__main__":
 var cloudAgentBuildContextFiles = map[string]string{
 	"Dockerfile":                        cloudAgentDockerfile,
 	"cloud-agent-base.json":             cloudAgentBaseJSON,
+	"aiyolo-ass":                        cloudAgentAssetString("cloud-agent/aiyolo-ass"),
 	"aiyolo-cloud-agent-entrypoint":     cloudAgentEntrypointScript,
 	"aiyolo-cloud-agent-info":           cloudAgentInfoScript,
 	"aiyolo-cloud-agent-start-display":  cloudAgentStartDisplayScript,
@@ -793,6 +799,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 COPY cloud-agent-base.json /etc/aiyolo/cloud-agent-base.json
+COPY aiyolo-ass /usr/local/bin/aiyolo-ass
 COPY aiyolo-cloud-agent-entrypoint /usr/local/bin/aiyolo-cloud-agent-entrypoint
 COPY aiyolo-cloud-agent-info /usr/local/bin/aiyolo-cloud-agent-info
 COPY aiyolo-cloud-agent-start-display /usr/local/bin/aiyolo-cloud-agent-start-display
@@ -801,6 +808,7 @@ COPY aiyolo-cloud-agent-start-docker /usr/local/bin/aiyolo-cloud-agent-start-doc
 COPY aiyolo-cloud-agent-start-services /usr/local/bin/aiyolo-cloud-agent-start-services
 
 RUN chmod 0755 \
+	/usr/local/bin/aiyolo-ass \
     /usr/local/bin/aiyolo-cloud-agent-entrypoint \
     /usr/local/bin/aiyolo-cloud-agent-info \
     /usr/local/bin/aiyolo-cloud-agent-start-display \
@@ -832,6 +840,7 @@ const cloudAgentBaseJSON = `{
     "google-chrome",
     "docker.io",
     "docker-in-docker",
+	"aiyolo-ass",
     "workspace-volume"
   ]
 }
@@ -844,6 +853,7 @@ claude_user="${AIYOLO_CLAUDE_USER:-aiyolo}"
 claude_home="${AIYOLO_CLAUDE_HOME:-/workspace}"
 
 install -d -m 0755 "${XDG_RUNTIME_DIR:-/tmp/runtime-root}" /tmp/.X11-unix
+install -d -m 0755 /run/aiyolo
 install -d -o "$claude_user" -g "$claude_user" -m 0755 /workspace "$claude_home" "$claude_home/.claude"
 chown -R "$claude_user:$claude_user" /workspace "$claude_home/.claude"
 chmod 1777 /tmp/.X11-unix
@@ -987,6 +997,9 @@ chrome_url="${AIYOLO_CLOUD_AGENT_CHROME_URL:-about:blank}"
 display="${AIYOLO_DISPLAY:-:99}"
 
 declare -a pids=()
+
+/usr/local/bin/aiyolo-ass >/tmp/aiyolo-ass.log 2>&1 &
+pids+=("$!")
 
 if [[ "$enable_dockerd" == "1" ]]; then
   /usr/local/bin/aiyolo-cloud-agent-start-docker >/tmp/aiyolo-dockerd.log 2>&1 &

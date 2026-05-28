@@ -77,6 +77,7 @@ func TestCloudAgentContainerEnvUsesConsoleBaseURLAndCustomModel(t *testing.T) {
 	env := cloudAgentContainerEnv(CloudAgentStartOptions{
 		UserID:         "user-1",
 		AgentType:      domain.CloudAgentTypeClaudeCode,
+		WorkspacePath:  domain.DefaultCloudAgentWorkspacePath,
 		APIBaseURL:     "https://aiyolo.quant67.com/v1",
 		ConsoleBaseURL: "https://aiyolo.quant67.com",
 		APIKey:         "test-key",
@@ -94,6 +95,35 @@ func TestCloudAgentContainerEnvUsesConsoleBaseURLAndCustomModel(t *testing.T) {
 	}
 	if env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] != "deepseek-v4-pro" {
 		t.Fatalf("unexpected custom model option name: %+v", env)
+	}
+	if env["AIYOLO_ASS_WORKSPACE_ROOT"] != "/workspace" || env["AIYOLO_ASS_USER"] != "aiyolo" || env["AIYOLO_ASS_SOCKET_PATH"] != cloudAgentASSSocketPath {
+		t.Fatalf("missing aiyolo-ass container env: %+v", env)
+	}
+}
+
+func TestBuildCloudAgentASSRemoteCommandUsesUnixSocket(t *testing.T) {
+	script := buildCloudAgentASSRemoteCommand("aiyolo-cloud-agent-user", "POST", "http://aiyolo-ass/v1/shell/exec", true)
+
+	if !strings.Contains(script, "--unix-socket") || !strings.Contains(script, cloudAgentASSSocketPath) {
+		t.Fatalf("ass remote command should call the Unix socket: %s", script)
+	}
+	if !strings.Contains(script, "--data-binary @-") {
+		t.Fatalf("ass remote command should stream request bodies over stdin: %s", script)
+	}
+	if !strings.Contains(script, "docker exec -i") {
+		t.Fatalf("ass remote command should run curl inside the cloud-agent container: %s", script)
+	}
+}
+
+func TestCloudAgentDockerfileInstallsASS(t *testing.T) {
+	if !strings.Contains(cloudAgentDockerfile, "COPY aiyolo-ass /usr/local/bin/aiyolo-ass") {
+		t.Fatalf("cloud-agent Dockerfile should copy aiyolo-ass: %s", cloudAgentDockerfile)
+	}
+	if !strings.Contains(cloudAgentStartServicesScript, "/usr/local/bin/aiyolo-ass") {
+		t.Fatalf("cloud-agent services should start aiyolo-ass: %s", cloudAgentStartServicesScript)
+	}
+	if !strings.Contains(cloudAgentAssetString("cloud-agent/aiyolo-ass"), "SERVICE = \"aiyolo-ass\"") {
+		t.Fatal("embedded cloud-agent build context should include the aiyolo-ass fallback script")
 	}
 }
 

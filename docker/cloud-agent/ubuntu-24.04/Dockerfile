@@ -59,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 COPY cloud-agent-base.json /etc/aiyolo/cloud-agent-base.json
+COPY aiyolo-ass /usr/local/bin/aiyolo-ass
 COPY aiyolo-cloud-agent-entrypoint /usr/local/bin/aiyolo-cloud-agent-entrypoint
 COPY aiyolo-cloud-agent-info /usr/local/bin/aiyolo-cloud-agent-info
 COPY aiyolo-cloud-agent-start-display /usr/local/bin/aiyolo-cloud-agent-start-display
@@ -67,6 +68,7 @@ COPY aiyolo-cloud-agent-start-docker /usr/local/bin/aiyolo-cloud-agent-start-doc
 COPY aiyolo-cloud-agent-start-services /usr/local/bin/aiyolo-cloud-agent-start-services
 
 RUN chmod 0755 \
+  /usr/local/bin/aiyolo-ass \
     /usr/local/bin/aiyolo-cloud-agent-entrypoint \
     /usr/local/bin/aiyolo-cloud-agent-info \
     /usr/local/bin/aiyolo-cloud-agent-start-display \

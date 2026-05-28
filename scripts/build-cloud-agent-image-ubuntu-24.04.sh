@@ -62,6 +62,11 @@ cleanup() {
 trap cleanup EXIT
 
 rsync -a "${template_context}/" "${build_context}/"
+if command -v "${GO:-go}" >/dev/null 2>&1; then
+  (cd "${repo_root}" && env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 "${GO:-go}" build -o "${build_context}/aiyolo-ass" ./cmd/aiyolo-ass)
+else
+  echo "未找到 Go，使用模板里的 Python aiyolo-ass 兜底脚本" >&2
+fi
 run_with_optional_proxy curl -fL --retry 5 --connect-timeout 30 "${rootfs_url}" -o "${build_context}/rootfs.tar.gz"
 
 build_args=(
