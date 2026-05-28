@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260528a">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260528d">
   <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body class="chat-workspace-body">
@@ -130,10 +130,6 @@
         <div class="chat-stage-main">
           <header class="chat-stage-topbar">
             <div class="chat-stage-topbar-side">
-              <div class="chat-stage-title">
-                <p class="chat-stage-title-kicker">{{msg .Locale "AIYolo Chat" "AIYolo Chat"}}</p>
-                <h1 data-chat-session-title>{{msg .Locale "新会话" "New chat"}}</h1>
-              </div>
               <span class="chat-stage-model is-muted">{{msg .Locale "未选择模型" "No model selected"}}</span>
             </div>
           </header>
@@ -239,9 +235,9 @@
                   {{end}}
                 </div>
               </details>
-              <button class="chat-shell-launch" type="button" data-chat-action="open-shell" {{if eq .ChatForm.Environment "local"}}disabled{{end}} aria-label="{{msg .Locale "打开 Claude Code 终端" "Open Claude Code terminal"}}" title="{{msg .Locale "打开 Claude Code 终端" "Open Claude Code terminal"}}">
+              <button class="chat-shell-launch" type="button" data-chat-action="open-shell" {{if eq .ChatForm.Environment "local"}}disabled{{end}} aria-label="{{msg .Locale "打开容器终端" "Open container terminal"}}" title="{{msg .Locale "打开容器终端" "Open container terminal"}}">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4.75 6.25A1.25 1.25 0 0 1 6 5h12a1.25 1.25 0 0 1 1.25 1.25v11.5A1.25 1.25 0 0 1 18 19H6a1.25 1.25 0 0 1-1.25-1.25z"></path><path d="m8.5 9.5 2.75 2.5-2.75 2.5"></path><path d="M13.5 14.5h2.75"></path></svg>
-                <span class="chat-visually-hidden">{{msg .Locale "打开 Claude Code 终端" "Open Claude Code terminal"}}</span>
+                <span class="chat-visually-hidden">{{msg .Locale "打开容器终端" "Open container terminal"}}</span>
               </button>
               {{end}}
               {{if .ChatRoutes}}
@@ -317,6 +313,6 @@
   <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
   <script src="/console/static/chat-shell.js?v=chat-shell-20260527b"></script>
   <script src="/console/static/chat.js?v=chat-gemini-20260527h"></script>
-  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260527d"></script>
+  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260528a"></script>
 </div>
 {{end}}

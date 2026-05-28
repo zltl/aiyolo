@@ -14,6 +14,9 @@
   const sidebarMinWidth = 220;
   const editorDefaultWidth = 520;
   const editorMinWidth = 320;
+  const workspaceDesktopBreakpoint = 1100;
+  const workspaceMinChatWidth = 420;
+  const workspaceMaxPreferredChatWidth = 860;
 
   let layoutState = readLayoutPreference();
   let workspaceSessionKey = "";
@@ -177,6 +180,111 @@
     return Math.min(viewportCap, Math.max(editorMinWidth, candidate));
   }
 
+  function readPixelSize(value, fallback = 0) {
+    const numeric = Number.parseFloat(String(value || "").trim());
+    return Number.isFinite(numeric) ? numeric : fallback;
+  }
+
+  function desktopWorkbenchWidth(form) {
+    const workbench = form?.querySelector(".chat-workbench");
+    return workbench instanceof HTMLElement ? workbench.clientWidth : 0;
+  }
+
+  function desktopActivitybarWidth(form) {
+    const activitybar = form?.querySelector(".chat-activitybar");
+    if (activitybar instanceof HTMLElement) {
+      const measured = activitybar.getBoundingClientRect().width;
+      if (measured > 0) {
+        return measured;
+      }
+      return readPixelSize(window.getComputedStyle(activitybar).width, 56);
+    }
+    return 56;
+  }
+
+  function desktopSidebarGap(form) {
+    const sidebarColumn = form?.querySelector(".chat-sidebar-column");
+    return sidebarColumn instanceof HTMLElement
+      ? readPixelSize(window.getComputedStyle(sidebarColumn).gap, 8.8)
+      : 8.8;
+  }
+
+  function desktopDividerWidth(form, pane) {
+    const divider = form?.querySelector(`[data-chat-pane-divider="${pane}"]`);
+    if (divider instanceof HTMLElement) {
+      const measured = divider.getBoundingClientRect().width;
+      if (measured > 0) {
+        return measured;
+      }
+      return readPixelSize(window.getComputedStyle(divider).width, 6.08);
+    }
+    return 6.08;
+  }
+
+  function preferredChatWidth(availableWidth) {
+    if (!Number.isFinite(availableWidth) || availableWidth <= 0) {
+      return workspaceMinChatWidth;
+    }
+    const responsive = Math.floor(availableWidth * 0.42);
+    return Math.min(workspaceMaxPreferredChatWidth, Math.max(workspaceMinChatWidth, responsive));
+  }
+
+  function reservedWorkbenchWidth(form) {
+    const activitybarWidth = desktopActivitybarWidth(form);
+    const sidebarGap = desktopSidebarGap(form);
+    let total = activitybarWidth;
+    if (!layoutState.sidebarCollapsed) {
+      total += sidebarGap + layoutState.sidebarWidth;
+      if (layoutState.editorOpen || layoutState.chatOpen) {
+        total += desktopDividerWidth(form, "sidebar");
+      }
+    }
+    if (layoutState.editorOpen) {
+      total += layoutState.editorWidth;
+      if (layoutState.chatOpen) {
+        total += desktopDividerWidth(form, "editor");
+      }
+    }
+    return total;
+  }
+
+  function rebalanceDesktopLayout(form) {
+    if (!(form instanceof HTMLFormElement) || !layoutState.chatOpen || window.innerWidth <= workspaceDesktopBreakpoint) {
+      return;
+    }
+    const availableWidth = desktopWorkbenchWidth(form);
+    if (availableWidth <= 0) {
+      return;
+    }
+
+    let overflow = reservedWorkbenchWidth(form) + preferredChatWidth(availableWidth) - availableWidth;
+    if (overflow <= 0) {
+      return;
+    }
+
+    if (layoutState.editorOpen) {
+      const nextWidth = Math.max(editorMinWidth, layoutState.editorWidth - overflow);
+      overflow -= layoutState.editorWidth - nextWidth;
+      layoutState.editorWidth = nextWidth;
+    }
+
+    if (overflow > 0 && !layoutState.sidebarCollapsed) {
+      const nextWidth = Math.max(sidebarMinWidth, layoutState.sidebarWidth - overflow);
+      overflow -= layoutState.sidebarWidth - nextWidth;
+      layoutState.sidebarWidth = nextWidth;
+    }
+
+    if (overflow > 0 && layoutState.editorOpen) {
+      overflow -= layoutState.editorWidth + desktopDividerWidth(form, "editor");
+      layoutState.editorOpen = false;
+      layoutState.editorWidth = normalizeEditorWidth(layoutState.editorWidth);
+    }
+
+    if (overflow > 0 && !layoutState.sidebarCollapsed) {
+      layoutState.sidebarCollapsed = true;
+    }
+  }
+
   function normalizeLayoutState(raw) {
     const parsed = raw && typeof raw === "object" ? raw : {};
     const sidebarPreference = readSidebarPreference();
@@ -297,6 +405,7 @@
     layoutState.sidebarWidth = normalizeSidebarWidth(layoutState.sidebarWidth);
     layoutState.editorWidth = normalizeEditorWidth(layoutState.editorWidth);
     ensureVisiblePane();
+    rebalanceDesktopLayout(form);
     form.classList.toggle("is-sidebar-collapsed", layoutState.sidebarCollapsed);
     form.classList.toggle("is-editor-collapsed", !layoutState.editorOpen);
     form.classList.toggle("is-chat-collapsed", !layoutState.chatOpen);

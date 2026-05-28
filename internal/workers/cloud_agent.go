@@ -223,8 +223,9 @@ func normalizeCloudAgentStartOptions(worker domain.WorkerServer, options CloudAg
 		return CloudAgentStartOptions{}, fmt.Errorf("cloud agent workspace path must be absolute")
 	}
 	safeUser := sanitizeCloudAgentSegment(options.UserID)
-	if strings.TrimSpace(options.ContainerName) == "" {
-		options.ContainerName = "aiyolo-cloud-agent-" + safeUser
+	options.ContainerName = normalizeCloudAgentContainerName(options.ContainerName, safeUser)
+	if options.ContainerName == "" {
+		return CloudAgentStartOptions{}, fmt.Errorf("cloud agent container name is required")
 	}
 	if strings.TrimSpace(options.WorkspaceRoot) == "" {
 		options.WorkspaceRoot = path.Join(worker.DataRoot, defaultCloudAgentWorkspaceSubdir, safeUser, "workspace")
@@ -351,6 +352,41 @@ func sanitizeCloudAgentSegment(value string) string {
 	return result
 }
 
+func normalizeCloudAgentContainerName(value string, safeUser string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "aiyolo-cloud-agent-" + firstNonEmpty(strings.TrimSpace(safeUser), "default")
+	}
+	if isValidDockerContainerName(value) {
+		return value
+	}
+	sanitized := sanitizeCloudAgentSegment(value)
+	if sanitized == "default" {
+		return "aiyolo-cloud-agent-" + firstNonEmpty(strings.TrimSpace(safeUser), "default")
+	}
+	return sanitized
+}
+
+func isValidDockerContainerName(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for index, ch := range value {
+		if index == 0 && !isCloudAgentContainerNameAlnum(ch) {
+			return false
+		}
+		if !isCloudAgentContainerNameAlnum(ch) && ch != '-' && ch != '_' && ch != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func isCloudAgentContainerNameAlnum(ch rune) bool {
+	return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9'
+}
+
 func cloudAgentHostPort(userID, discriminator string, base int) int {
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(strings.TrimSpace(userID) + ":" + strings.TrimSpace(discriminator)))
@@ -418,7 +454,8 @@ func buildCloudAgentRemoteCommand(payloadJSON string) string {
 	return "python3 - <<'PY'\n" + script + "\nPY"
 }
 
-const cloudAgentRemotePythonTemplate = `import json
+const cloudAgentRemotePythonTemplate = `import fcntl
+import json
 import os
 import pathlib
 import re
@@ -522,6 +559,11 @@ def inspect_container():
     return json.loads(result.stdout)[0]
 
 
+def exact_container_id():
+    result = run(["docker", "ps", "-a", "--filter", f"name=^/{payload['container_name']}$", "--format", "{{.ID}}"])
+    return result.stdout.strip()
+
+
 def container_summary(inspected):
     summary = {
         "status": "running" if inspected["State"].get("Running") else "stopped",
@@ -594,14 +636,47 @@ def wait_for(command, timeout_seconds):
     raise SystemExit("timed out waiting for container service")
 
 
+def remove_container():
+    deadline = time.time() + 15
+    last_error = ""
+    while time.time() < deadline:
+        if not exact_container_id():
+            return
+        try:
+            run(["docker", "rm", "-f", payload["container_name"]])
+        except subprocess.CalledProcessError as exc:
+            last_error = (exc.stdout or "").strip()
+            if not exact_container_id():
+                return
+            time.sleep(1)
+            continue
+        if not exact_container_id():
+            return
+        time.sleep(0.5)
+    if not exact_container_id():
+        return
+    detail = f": {last_error}" if last_error else ""
+    raise SystemExit(f"failed to remove stale cloud agent container{detail}")
+
+
+def acquire_container_lock():
+    lock_name = re.sub(r"[^0-9A-Za-z_.-]", "-", payload["container_name"])
+    lock_path = pathlib.Path("/tmp") / f"{lock_name}.lock"
+    lock_handle = lock_path.open("w")
+    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    return lock_handle
+
+
 def ensure_container():
-    existing = run(["docker", "ps", "-a", "--filter", f"name=^/{payload['container_name']}$", "--format", "{{.ID}}"])
-    existing_id = existing.stdout.strip()
+    existing_id = exact_container_id()
     if existing_id:
-        inspected = inspect_container()
-        if inspected.get("State", {}).get("Running") and container_matches(inspected):
+        try:
+            inspected = inspect_container()
+        except subprocess.CalledProcessError:
+            inspected = None
+        if inspected is not None and inspected.get("State", {}).get("Running") and container_matches(inspected):
             return container_summary(inspected)
-        run(["docker", "rm", "-f", payload["container_name"]])
+        remove_container()
     args = [
         "docker", "run", "-d",
         "--name", payload["container_name"],
@@ -639,8 +714,12 @@ if __name__ == "__main__":
 
     ensure_dirs()
     write_workspace_files()
-    ensure_image()
-    print(json.dumps(ensure_container(), ensure_ascii=True, sort_keys=True))`
+    lock_handle = acquire_container_lock()
+    try:
+        ensure_image()
+        print(json.dumps(ensure_container(), ensure_ascii=True, sort_keys=True))
+    finally:
+        lock_handle.close()`
 
 var cloudAgentBuildContextFiles = map[string]string{
 	"Dockerfile":                        cloudAgentDockerfile,

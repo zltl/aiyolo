@@ -122,34 +122,15 @@ func normalizeCloudAgentShellSize(cols, rows int) (int, int) {
 }
 
 func buildCloudAgentShellCommand(containerName, workspacePath, claudeSessionID, model string) string {
-	innerScript := fmt.Sprintf(`set -euo pipefail
+	innerScript := `set -euo pipefail
 
-if ! command -v claude >/dev/null 2>&1; then
-	printf 'claude is not installed in this container\n' >&2
+if ! command -v bash >/dev/null 2>&1; then
+	printf 'bash is not installed in this container\n' >&2
 	exit 127
 fi
 
-session_id=%s
-model=%s
-project_key="$(python3 - <<'PY'
-import os
-import re
-
-print(re.sub(r'[^0-9A-Za-z]', '-', os.getcwd()))
-PY
-)"
-session_file="$HOME/.claude/projects/$project_key/${session_id}.jsonl"
-cmd=(claude --dangerously-skip-permissions)
-if [[ -n "$model" ]]; then
-	cmd+=(--model "$model")
-fi
-if [[ -f "$session_file" ]]; then
-	cmd+=(--resume "$session_id")
-else
-	cmd+=(--session-id "$session_id")
-fi
-exec "${cmd[@]}"
-`, shellQuote(strings.TrimSpace(claudeSessionID)), shellQuote(strings.TrimSpace(model)))
+exec bash -i
+`
 	script := fmt.Sprintf(`container_name=%s
 workspace_path=%s
 if ! command -v docker >/dev/null 2>&1; then

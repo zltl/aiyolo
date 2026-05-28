@@ -4703,6 +4703,7 @@ textarea:focus-visible,
   --chat-vscode-muted: #8c8c90;
   --chat-vscode-status: #0e639c;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
   height: 100vh;

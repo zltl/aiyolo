@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/websocket"
 
@@ -62,13 +64,21 @@ type consoleChatShellReadyResponse struct {
 
 func (state consoleChatShellPageState) data() map[string]any {
 	return map[string]any{
-		"Title":          "Claude Code",
+		"Title":          "Cloud Agent Terminal",
 		"ChatShell":      state,
 		"ChatShellError": state.Error,
 	}
 }
 
 func (handler *Handler) resolveConsoleChatCloudAgentTarget(ctx context.Context, r *http.Request, chatSessionID string) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
+	return handler.resolveConsoleChatCloudAgentTargetWithRuntime(ctx, r, chatSessionID, false)
+}
+
+func (handler *Handler) resolveConsoleChatCloudAgentRuntimeTarget(ctx context.Context, r *http.Request, chatSessionID string) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
+	return handler.resolveConsoleChatCloudAgentTargetWithRuntime(ctx, r, chatSessionID, true)
+}
+
+func (handler *Handler) resolveConsoleChatCloudAgentTargetWithRuntime(ctx context.Context, r *http.Request, chatSessionID string, ensureRuntime bool) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
 	chatSessionID = strings.TrimSpace(chatSessionID)
 	if chatSessionID == "" {
 		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "缺少 chat session，无法打开 shell。", "Missing chat session; unable to open the shell."))
@@ -97,7 +107,7 @@ func (handler *Handler) resolveConsoleChatCloudAgentTarget(ctx context.Context, 
 	if strings.TrimSpace(account.ContainerName) == "" {
 		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "Cloud Agent 容器尚未就绪，请先在 chat 页面重试环境启动。", "The cloud agent container is not ready yet. Retry environment startup from the chat page first."))
 	}
-	worker, _, key, err := handler.workerExecutionInputs(ctx, cloudSession.WorkerID)
+	worker, proxy, key, err := handler.workerExecutionInputs(ctx, cloudSession.WorkerID)
 	if errors.Is(err, storage.ErrNotFound) {
 		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, fmt.Errorf("%w: %s", storage.ErrNotFound, handler.requestText(r, "Worker SSH 配置不存在，无法连接 shell。", "The worker SSH configuration is missing, so the shell cannot be opened."))
 	}
@@ -105,11 +115,98 @@ func (handler *Handler) resolveConsoleChatCloudAgentTarget(ctx context.Context, 
 		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
 	account.WorkspacePath = firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath))
+	if ensureRuntime {
+		account, cloudSession, err = handler.ensureConsoleChatCloudAgentRuntime(ctx, r, userID, worker, key, proxy, account, cloudSession)
+		if err != nil {
+			return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
+		}
+	}
 	return worker, key, account, cloudSession, nil
 }
 
+func (handler *Handler) consoleChatAllowedModelPublicNames(ctx context.Context) ([]string, error) {
+	routes, err := handler.store.ListModelRoutes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	providers, err := handler.store.ListProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return consoleChatRoutePublicNames(consoleChatRoutes(routes, providers)), nil
+}
+
+func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, r *http.Request, userID string, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession) (domain.CloudAgentAccount, domain.CloudAgentSession, error) {
+	baseURL := consoleChatCloudAgentBaseURL(handler.codexPublicBaseURL(r), worker)
+	if strings.TrimSpace(baseURL) == "" {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "无法解析当前 AIYolo 访问地址", "Unable to resolve the current AIYolo public URL"))
+	}
+	allowedModels, err := handler.consoleChatAllowedModelPublicNames(ctx)
+	if err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
+	}
+	now := time.Now().UTC()
+	account, err = handler.ensureConsoleChatEnvironmentAPIKey(ctx, userID, worker.ID, account, allowedModels, now)
+	if err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
+	}
+	account.WorkerID = worker.ID
+	account.AgentType = firstNonEmpty(strings.TrimSpace(account.AgentType), domain.CloudAgentTypeClaudeCode)
+	account.WorkspacePath = firstNonEmpty(strings.TrimSpace(account.WorkspacePath), strings.TrimSpace(cloudSession.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
+	account.Status = domain.CloudAgentStatusStarting
+	account.LastError = ""
+	if err := handler.store.UpsertCloudAgentAccount(ctx, account); err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
+	}
+
+	chatSessionID := firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(strings.TrimPrefix(cloudSession.ID, "chat-env-")))
+	instance, err := handler.ensureCloudAgent(ctx, worker, key, proxy, workerops.CloudAgentStartOptions{
+		UserID:         userID,
+		AgentType:      account.AgentType,
+		ContainerName:  strings.TrimSpace(account.ContainerName),
+		WorkspacePath:  account.WorkspacePath,
+		APIBaseURL:     strings.TrimRight(baseURL, "/") + "/v1",
+		ConsoleBaseURL: strings.TrimRight(baseURL, "/"),
+		APIKey:         account.Credential,
+		DefaultModel:   account.ModelPublicName,
+		AllowedModels:  allowedModels,
+		OpenURL:        strings.TrimRight(baseURL, "/") + "/console/chat?session=" + url.QueryEscape(chatSessionID),
+	})
+	if err != nil {
+		account.Status = domain.CloudAgentStatusError
+		account.LastError = err.Error()
+		_ = handler.store.UpsertCloudAgentAccount(context.WithoutCancel(ctx), account)
+		cloudSession.Status = domain.CloudAgentSessionStatusPending
+		cloudSession.LastError = err.Error()
+		_ = handler.store.UpsertCloudAgentSession(context.WithoutCancel(ctx), cloudSession)
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "Cloud Agent 启动失败：", "Cloud agent startup failed: ") + err.Error())
+	}
+	now = time.Now().UTC()
+	account.ContainerID = strings.TrimSpace(instance.ContainerID)
+	account.ContainerName = firstNonEmpty(strings.TrimSpace(instance.ContainerName), strings.TrimSpace(account.ContainerName))
+	account.Status = domain.CloudAgentStatusRunning
+	account.LastError = ""
+	account.LastStartedAt = &now
+	account.LastSeenAt = &now
+	if err := handler.store.UpsertCloudAgentAccount(ctx, account); err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
+	}
+	cloudSession.WorkerID = worker.ID
+	cloudSession.AccountID = account.ID
+	cloudSession.AgentType = account.AgentType
+	cloudSession.ChatSessionID = chatSessionID
+	cloudSession.WorkspacePath = account.WorkspacePath
+	cloudSession.Status = domain.CloudAgentSessionStatusActive
+	cloudSession.LastError = ""
+	cloudSession.ClosedAt = nil
+	if err := handler.store.UpsertCloudAgentSession(ctx, cloudSession); err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
+	}
+	return account, cloudSession, nil
+}
+
 func (handler *Handler) resolveConsoleChatShellTarget(ctx context.Context, r *http.Request) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
-	return handler.resolveConsoleChatCloudAgentTarget(ctx, r, r.URL.Query().Get("session"))
+	return handler.resolveConsoleChatCloudAgentRuntimeTarget(ctx, r, r.URL.Query().Get("session"))
 }
 
 func (handler *Handler) chatShellPageStateForSession(ctx context.Context, r *http.Request, chatSessionID string) (consoleChatShellPageState, error) {
@@ -186,6 +283,7 @@ func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request
 	defer ws.Close()
 	shell, err := handler.openCloudAgentShell(context.Background(), worker, key, account, cloudSession, consoleChatShellCols, consoleChatShellRows)
 	if err != nil {
+		log.Printf("console chat shell open failed session_id=%s worker_id=%s container=%s err=%v", cloudSession.ChatSessionID, worker.ID, account.ContainerName, err)
 		_ = websocket.JSON.Send(ws, consoleChatShellSocketEvent{Type: "error", Message: err.Error()})
 		return
 	}
@@ -197,7 +295,7 @@ func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request
 		defer sendMu.Unlock()
 		return websocket.JSON.Send(ws, event)
 	}
-	_ = send(consoleChatShellSocketEvent{Type: "ready", Message: handler.requestText(r, "Claude Code 已连接", "Claude Code connected")})
+	_ = send(consoleChatShellSocketEvent{Type: "ready", Message: handler.requestText(r, "终端已连接", "Terminal connected")})
 
 	shellDone := make(chan error, 1)
 	go func() {
@@ -215,8 +313,9 @@ func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request
 	case finalErr = <-clientDone:
 	}
 	_ = shell.Close()
-	closedMessage := handler.requestText(r, "Claude Code 已断开", "Claude Code disconnected")
+	closedMessage := handler.requestText(r, "终端已断开", "Terminal disconnected")
 	if finalErr != nil && !consoleChatShellIgnorableError(finalErr) {
+		log.Printf("console chat shell disconnected session_id=%s worker_id=%s container=%s err=%v", cloudSession.ChatSessionID, worker.ID, account.ContainerName, finalErr)
 		_ = send(consoleChatShellSocketEvent{Type: "error", Message: finalErr.Error()})
 		closedMessage = finalErr.Error()
 	}

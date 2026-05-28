@@ -86,7 +86,7 @@ type consoleChatWorkspaceFileSaveRequest struct {
 }
 
 func (handler *Handler) resolveConsoleChatWorkspaceTarget(ctx context.Context, r *http.Request) (consoleChatWorkspaceTarget, error) {
-	worker, key, account, cloudSession, err := handler.resolveConsoleChatCloudAgentTarget(ctx, r, r.URL.Query().Get("session"))
+	worker, key, account, cloudSession, err := handler.resolveConsoleChatCloudAgentRuntimeTarget(ctx, r, r.URL.Query().Get("session"))
 	if err != nil {
 		return consoleChatWorkspaceTarget{}, err
 	}

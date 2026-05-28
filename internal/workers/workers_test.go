@@ -115,6 +115,53 @@ func TestCloudAgentContainerEnvSkipsCustomModelOptionForClaudeModel(t *testing.T
 	}
 }
 
+func TestNormalizeCloudAgentStartOptionsSanitizesEmailContainerNames(t *testing.T) {
+	options, err := normalizeCloudAgentStartOptions(domain.WorkerServer{
+		ID:          "worker-0",
+		SSHHost:     "10.0.0.5",
+		SSHUsername: "ubuntu",
+		SSHKeyID:    "ssh-key-1",
+		DataRoot:    "/srv/aiyolo",
+	}, CloudAgentStartOptions{
+		UserID:         "i@quant67.com",
+		ContainerName:  "aiyolo-cloud-agent-i@quant67.com",
+		APIBaseURL:     "https://aiyolo.quant67.com/v1",
+		ConsoleBaseURL: "https://aiyolo.quant67.com",
+		APIKey:         "test-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ContainerName != "aiyolo-cloud-agent-i-quant67-com" {
+		t.Fatalf("ContainerName=%q, want sanitized Docker-safe name", options.ContainerName)
+	}
+	if !strings.Contains(options.WorkspaceRoot, "/cloud-agents/i-quant67-com/workspace") {
+		t.Fatalf("WorkspaceRoot should use sanitized user segment, got %q", options.WorkspaceRoot)
+	}
+}
+
+func TestNormalizeCloudAgentStartOptionsKeepsValidCustomContainerName(t *testing.T) {
+	options, err := normalizeCloudAgentStartOptions(domain.WorkerServer{
+		ID:          "worker-0",
+		SSHHost:     "10.0.0.5",
+		SSHUsername: "ubuntu",
+		SSHKeyID:    "ssh-key-1",
+		DataRoot:    "/srv/aiyolo",
+	}, CloudAgentStartOptions{
+		UserID:         "i@quant67.com",
+		ContainerName:  "custom.agent_1",
+		APIBaseURL:     "https://aiyolo.quant67.com/v1",
+		ConsoleBaseURL: "https://aiyolo.quant67.com",
+		APIKey:         "test-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.ContainerName != "custom.agent_1" {
+		t.Fatalf("ContainerName=%q, want valid custom name preserved", options.ContainerName)
+	}
+}
+
 func TestBuildCloudAgentClaudeCodeRemoteScriptIncludesSessionRecoveryAndFlags(t *testing.T) {
 	script := buildCloudAgentClaudeCodeRemoteScript("aiyolo-cloud-agent-user", "/workspace", CloudAgentClaudeCodeOptions{
 		SessionID:     "550e8400-e29b-41d4-a716-446655440000",
@@ -164,13 +211,33 @@ func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
 	if !strings.Contains(script, `-w "$workspace_path"`) {
 		t.Fatalf("shell command should preserve the workspace directory: %s", script)
 	}
-	if !strings.Contains(script, `cmd=(claude --dangerously-skip-permissions)`) {
-		t.Fatalf("shell command should launch interactive claude code instead of a plain bash login shell: %s", script)
+	if !strings.Contains(script, `exec bash -i`) {
+		t.Fatalf("shell command should launch an interactive bash shell inside the container: %s", script)
 	}
-	if !strings.Contains(script, `cmd+=(--resume "$session_id")`) || !strings.Contains(script, `cmd+=(--session-id "$session_id")`) {
-		t.Fatalf("shell command should resume the existing claude session or create it on first launch: %s", script)
+	if strings.Contains(script, `claude`) {
+		t.Fatalf("shell command should not launch claude directly: %s", script)
 	}
-	if !strings.Contains(script, `cmd+=(--model "$model")`) {
-		t.Fatalf("shell command should reuse the selected model when opening claude code: %s", script)
+	if !strings.Contains(script, `bash is not installed in this container`) {
+		t.Fatalf("shell command should surface a clear bash-missing error: %s", script)
+	}
+}
+
+func TestBuildCloudAgentRemoteCommandSerializesContainerEnsure(t *testing.T) {
+	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user"}`)
+
+	if !strings.Contains(script, "import fcntl") {
+		t.Fatalf("remote script should import fcntl for container locking: %s", script)
+	}
+	if !strings.Contains(script, `def acquire_container_lock():`) || !strings.Contains(script, `fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)`) {
+		t.Fatalf("remote script should serialize same-container ensure operations with an exclusive lock: %s", script)
+	}
+	if !strings.Contains(script, `def remove_container():`) || !strings.Contains(script, `failed to remove stale cloud agent container`) {
+		t.Fatalf("remote script should retry and surface clear errors when removing a stale container: %s", script)
+	}
+	if !strings.Contains(script, `if not exact_container_id():`) {
+		t.Fatalf("remote script should tolerate containers disappearing during removal races: %s", script)
+	}
+	if !strings.Contains(script, `lock_handle = acquire_container_lock()`) {
+		t.Fatalf("remote script should hold the container lock around ensure_image and ensure_container: %s", script)
 	}
 }
