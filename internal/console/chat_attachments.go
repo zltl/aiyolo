@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/zltl/aiyolo/internal/artifacts"
 )
 
 const (
@@ -63,8 +65,13 @@ func (handler *Handler) uploadChatAttachments(w http.ResponseWriter, r *http.Req
 }
 
 func (handler *Handler) chatAttachmentFile(w http.ResponseWriter, r *http.Request) {
-	if !handler.cfg.ChatAttachments.CanUpload() {
+	if !handler.cfg.ChatAttachments.CanList() {
 		http.Error(w, handler.requestText(r, "当前没有配置可读取 chat 附件的对象存储。", "Chat attachment storage is not configured."), http.StatusServiceUnavailable)
+		return
+	}
+	subjectPrefix, err := handler.consoleChatAttachmentSubjectPrefix(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 	reader, err := handler.newChatAttachmentReader(handler.cfg.ChatAttachments)
@@ -79,6 +86,10 @@ func (handler *Handler) chatAttachmentFile(w http.ResponseWriter, r *http.Reques
 	objectKey = strings.TrimLeft(objectKey, "/")
 	if objectKey == "" {
 		http.Error(w, "attachment path is required", http.StatusNotFound)
+		return
+	}
+	if !consoleChatAttachmentOwnsObject(handler.cfg.ChatAttachments, objectKey, subjectPrefix) {
+		http.NotFound(w, r)
 		return
 	}
 	payload, mediaType, err := reader.ReadObject(r.Context(), objectKey)
@@ -187,6 +198,42 @@ func sanitizeConsoleChatAttachmentPart(value string) string {
 		return "console"
 	}
 	return cleaned
+}
+
+func (handler *Handler) consoleChatAttachmentSubjectPrefix(r *http.Request) (string, error) {
+	subject := strings.TrimSpace(currentConsoleSessionSubject(r, handler.cfg.SecretKey))
+	if subject == "" {
+		return "", errors.New(handler.requestText(r, "当前登录会话无效。", "The current console session is invalid."))
+	}
+	return sanitizeConsoleChatAttachmentPart(subject), nil
+}
+
+func consoleChatAttachmentVisibleKey(cfg artifacts.Config, objectKey string) string {
+	normalized := artifacts.NormalizeObjectKey(objectKey)
+	prefix := artifacts.NormalizeObjectKey(cfg.S3.Prefix)
+	if prefix == "" {
+		return normalized
+	}
+	if normalized == prefix {
+		return ""
+	}
+	if strings.HasPrefix(normalized, prefix+"/") {
+		return strings.TrimPrefix(normalized, prefix+"/")
+	}
+	return normalized
+}
+
+func consoleChatAttachmentOwnsObject(cfg artifacts.Config, objectKey string, subjectPrefix string) bool {
+	subjectPrefix = artifacts.NormalizeObjectKey(subjectPrefix)
+	if subjectPrefix == "" {
+		return false
+	}
+	relativeKey := consoleChatAttachmentVisibleKey(cfg, objectKey)
+	if relativeKey == subjectPrefix || strings.HasPrefix(relativeKey, subjectPrefix+"/") {
+		return true
+	}
+	legacyPrefix := path.Join("chat", subjectPrefix)
+	return relativeKey == legacyPrefix || strings.HasPrefix(relativeKey, legacyPrefix+"/")
 }
 
 func (handler *Handler) writeChatAttachmentResponse(w http.ResponseWriter, statusCode int, response consoleChatAttachmentUploadResponse) {

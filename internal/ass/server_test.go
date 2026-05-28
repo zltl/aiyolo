@@ -51,7 +51,7 @@ func TestFSTreeReadAndWriteFile(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &read); err != nil {
 		t.Fatal(err)
 	}
-	if read.Data.Content != "hello\n" || !strings.HasPrefix(read.Data.Revision, "sha256:") {
+	if read.Data.Kind != "text" || read.Data.Content != "hello\n" || !strings.HasPrefix(read.Data.Revision, "sha256:") {
 		t.Fatalf("unexpected read response: %+v", read.Data)
 	}
 
@@ -119,6 +119,35 @@ func TestReadFileRejectsBinary(t *testing.T) {
 	response := performRequest(server, http.MethodGet, "/v1/fs/file?path=blob.bin", "")
 	if response.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("read status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestReadFileReturnsImagePreview(t *testing.T) {
+	root := t.TempDir()
+	payload := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x00, 0x00, 0x00, 0x0d, 'I', 'H', 'D', 'R'}
+	if err := os.WriteFile(filepath.Join(root, "diagram.png"), payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServer(t, root)
+
+	response := performRequest(server, http.MethodGet, "/v1/fs/file?path=diagram.png", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read status=%d body=%s", response.Code, response.Body.String())
+	}
+	var read struct {
+		Data fsFileData `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &read); err != nil {
+		t.Fatal(err)
+	}
+	if read.Data.Kind != "image" || read.Data.MediaType != "image/png" {
+		t.Fatalf("unexpected image response: %+v", read.Data)
+	}
+	if !strings.HasPrefix(read.Data.PreviewURL, "data:image/png;base64,") {
+		t.Fatalf("unexpected preview url: %+v", read.Data)
+	}
+	if read.Data.Content != "" {
+		t.Fatalf("image preview should not include text content: %+v", read.Data)
 	}
 }
 

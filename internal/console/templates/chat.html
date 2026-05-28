@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260528h">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260528p">
   <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body class="chat-workspace-body">
@@ -16,7 +16,7 @@
 
 {{define "chat-content"}}
 <div id="chat-content" class="chat-workspace-page">
-  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
+  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-attachment-tree-url="{{.ChatAttachmentTreeURL}}" data-chat-attachment-tree-enabled="{{if .ChatAttachmentTreeEnabled}}true{{else}}false{{end}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
     <div class="chat-workbench">
       <div class="chat-sidebar-column">
         <nav class="chat-activitybar" aria-label="{{msg .Locale "工作台导航" "Workbench navigation"}}">
@@ -48,9 +48,24 @@
           <div class="chat-sidebar-surface">
             <section class="chat-sidebar-section chat-sidebar-panel" data-chat-sidebar-panel="files">
               <div class="chat-explorer-section">
-                <div class="chat-explorer-root" data-chat-workspace-root-copy>{{msg .Locale "等待 Cloud Agent 工作区" "Waiting for the Cloud Agent workspace"}}</div>
-                <p class="chat-workspace-status" data-chat-workspace-status>{{msg .Locale "切换到 Cloud Agent 环境后，可浏览容器里的目录与文件。" "Switch to a Cloud Agent environment to browse files inside the container."}}</p>
-                <div class="chat-workspace-tree" data-chat-workspace-tree></div>
+                <section class="chat-explorer-tree-section">
+                  <div class="chat-explorer-section-head">
+                    <span class="chat-explorer-section-caret" aria-hidden="true">&gt;</span>
+                    <span>{{msg .Locale "Chat 附件存储" "Chat attachment storage"}}</span>
+                  </div>
+                  <div class="chat-explorer-root" data-chat-attachment-root-copy>{{msg .Locale "等待加载附件目录" "Waiting for the attachment tree"}}</div>
+                  <p class="chat-workspace-status" data-chat-attachment-status>{{msg .Locale "当前没有配置可浏览的 chat 附件目录。" "Chat attachment browsing is not configured."}}</p>
+                  <div class="chat-workspace-tree" data-chat-attachment-tree></div>
+                </section>
+                <section class="chat-explorer-tree-section" data-chat-workspace-section hidden>
+                  <div class="chat-explorer-section-head">
+                    <span class="chat-explorer-section-caret" aria-hidden="true">&gt;</span>
+                    <span>{{msg .Locale "Cloud Agent 工作区" "Cloud Agent workspace"}}</span>
+                  </div>
+                  <div class="chat-explorer-root" data-chat-workspace-root-copy>{{msg .Locale "等待 Cloud Agent 工作区" "Waiting for the Cloud Agent workspace"}}</div>
+                  <p class="chat-workspace-status" data-chat-workspace-status>{{msg .Locale "切换到 Cloud Agent 环境后，可浏览容器里的目录与文件。" "Switch to a Cloud Agent environment to browse files inside the container."}}</p>
+                  <div class="chat-workspace-tree" data-chat-workspace-tree></div>
+                </section>
               </div>
             </section>
 
@@ -80,16 +95,24 @@
           </div>
           <div class="chat-editor-toolbar">
             <div class="chat-editor-heading">
-              <p class="chat-editor-directory" data-chat-editor-directory>{{msg .Locale "从左侧目录树选择一个文本文件开始编辑。" "Choose a text file from the left tree to start editing."}}</p>
+              <p class="chat-editor-directory" data-chat-editor-directory>{{msg .Locale "从左侧目录树选择文件后，可在这里编辑文本或预览图片。" "Choose a file from the tree to edit text or preview images here."}}</p>
               <strong data-chat-editor-path>{{msg .Locale "尚未打开文件" "No file open"}}</strong>
             </div>
           </div>
-          <div class="chat-editor-status" data-chat-editor-status>{{msg .Locale "从左侧目录树选择一个文本文件开始编辑。" "Choose a text file from the left tree to start editing."}}</div>
-          <textarea class="chat-editor-input" data-chat-editor-input spellcheck="false" disabled placeholder="{{msg .Locale "从左侧目录树选择文件后，这里会加载 Cloud Agent 工作区里的文本内容。" "Pick a file from the tree to load the Cloud Agent workspace text here."}}"></textarea>
-          <div class="chat-editor-statusbar" aria-live="polite">
-            <span class="chat-editor-statusbar-item" data-chat-editor-state>{{msg .Locale "未选择文件" "No file selected"}}</span>
-            <span class="chat-editor-statusbar-item" data-chat-editor-language>{{msg .Locale "纯文本" "Plain text"}}</span>
-            <span class="chat-editor-statusbar-item" data-chat-editor-bytes>0 B</span>
+          <div class="chat-editor-status" data-chat-editor-status>{{msg .Locale "从左侧目录树选择文件后，可在这里编辑文本或预览图片。" "Choose a file from the tree to edit text or preview images here."}}</div>
+          <div class="chat-editor-surface">
+            <div class="chat-editor-preview" data-chat-editor-preview hidden>
+              <div class="chat-editor-preview-toolbar" role="toolbar" aria-label="{{msg .Locale "图片预览背景" "Image preview background"}}">
+                <span class="chat-editor-preview-toolbar-label">{{msg .Locale "背景" "Background"}}</span>
+                <div class="chat-editor-preview-backgrounds" role="group" aria-label="{{msg .Locale "切换图片预览背景" "Choose image preview background"}}">
+                  <button class="chat-editor-preview-background is-active" type="button" data-chat-action="set-image-preview-background" data-chat-preview-background="grid" aria-pressed="true" title="{{msg .Locale "网格背景" "Grid background"}}">{{msg .Locale "网格" "Grid"}}</button>
+                  <button class="chat-editor-preview-background" type="button" data-chat-action="set-image-preview-background" data-chat-preview-background="light" aria-pressed="false" title="{{msg .Locale "浅色背景" "Light background"}}">{{msg .Locale "浅色" "Light"}}</button>
+                  <button class="chat-editor-preview-background" type="button" data-chat-action="set-image-preview-background" data-chat-preview-background="dark" aria-pressed="false" title="{{msg .Locale "深色背景" "Dark background"}}">{{msg .Locale "深色" "Dark"}}</button>
+                </div>
+              </div>
+              <img class="chat-editor-preview-image" data-chat-editor-preview-image alt="" />
+            </div>
+            <textarea class="chat-editor-input" data-chat-editor-input spellcheck="false" disabled placeholder="{{msg .Locale "从左侧目录树选择文件后，这里会加载 Cloud Agent 工作区里的文本内容或图片预览。" "Pick a file from the tree to load Cloud Agent workspace text or an image preview here."}}"></textarea>
           </div>
         </div>
       </section>
@@ -184,76 +207,82 @@
             <div class="chat-composer-right">
               {{if gt (len .ChatEnvironmentOptions) 1}}
               <input type="hidden" name="chat_environment" value="{{.ChatForm.Environment}}" data-chat-environment-input>
-              <details class="chat-model-picker chat-environment-picker" data-chat-environment-picker>
-                <summary class="chat-model-picker-trigger chat-environment-picker-trigger" aria-label="{{msg .Locale "选择环境" "Choose environment"}}">
-                  <span class="chat-model-picker-value chat-environment-picker-value" data-chat-environment-picker-copy>{{chatEnvironmentLabel .ChatForm.Environment .ChatEnvironmentOptions}}</span>
-                  <span class="chat-model-picker-icon chat-environment-picker-icon" aria-hidden="true">
-                    <i class="chat-control-icon" data-lucide="chevron-down"></i>
-                  </span>
-                </summary>
-                <div class="chat-model-picker-menu chat-environment-picker-menu" role="radiogroup" aria-label="{{msg .Locale "环境" "Environment"}}">
-                  {{range .ChatEnvironmentOptions}}
-                  <label class="chat-model-picker-option chat-environment-picker-option {{if eq $.ChatForm.Environment .Value}}is-active{{end}}">
-                    <input class="chat-route-control chat-environment-option-control" type="radio" name="chat_environment_choice" value="{{.Value}}" data-chat-environment-option data-chat-environment-label="{{.Label}}" {{if eq $.ChatForm.Environment .Value}}checked{{end}}>
-                    <span class="chat-model-name">{{.Label}}</span>
-                  </label>
-                  {{end}}
-                </div>
-              </details>
-              <button class="chat-shell-launch" type="button" data-chat-action="open-shell" {{if eq .ChatForm.Environment "local"}}disabled{{end}} aria-label="{{msg .Locale "打开容器终端" "Open container terminal"}}" title="{{msg .Locale "打开容器终端" "Open container terminal"}}">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4.75 6.25A1.25 1.25 0 0 1 6 5h12a1.25 1.25 0 0 1 1.25 1.25v11.5A1.25 1.25 0 0 1 18 19H6a1.25 1.25 0 0 1-1.25-1.25z"></path><path d="m8.5 9.5 2.75 2.5-2.75 2.5"></path><path d="M13.5 14.5h2.75"></path></svg>
-                <span class="chat-visually-hidden">{{msg .Locale "打开容器终端" "Open container terminal"}}</span>
-              </button>
-              {{end}}
-              {{if .ChatRoutes}}
-              <details class="chat-model-picker">
-                <summary class="chat-model-picker-trigger" aria-label="{{msg .Locale "选择模型" "Choose model"}}">
-                  <span class="chat-model-picker-value" data-chat-model-picker-copy>{{if .SelectedChatRoute.PublicName}}{{.SelectedChatRoute.PublicName}}{{else}}{{msg .Locale "选择模型" "Choose model"}}{{end}}</span>
-                  <span class="chat-model-picker-icon" aria-hidden="true">
-                    <i class="chat-control-icon" data-lucide="chevron-down"></i>
-                  </span>
-                </summary>
-                <div class="chat-model-picker-menu" role="radiogroup" aria-label="{{msg .Locale "对话模型" "Conversation model"}}">
-                  {{range .ChatRoutes}}
-                  <label class="chat-model-picker-option {{if eq $.ChatForm.PublicName .PublicName}}is-active{{end}}" data-chat-provider-name="{{.ProviderName}}" data-chat-upstream-model="{{.UpstreamModel}}" data-chat-reasoning-efforts="{{join .ReasoningEfforts ","}}">
-                    <input class="chat-route-control" type="radio" name="chat_public_name" value="{{.PublicName}}" {{if eq $.ChatForm.PublicName .PublicName}}checked{{end}}>
-                    <span class="chat-model-name">{{.PublicName}}</span>
-                    <span class="chat-model-detail">{{.ProviderName}} · {{.UpstreamModel}}</span>
-                  </label>
-                  {{end}}
-                </div>
-              </details>
-              <div class="chat-reasoning-effort" data-chat-reasoning-control {{if not .SelectedChatRoute.ReasoningEfforts}}hidden{{end}}>
-                <input id="chat-reasoning-effort" type="hidden" name="chat_reasoning_effort" value="{{.ChatForm.ReasoningEffort}}" data-chat-reasoning-effort-input {{if not .SelectedChatRoute.ReasoningEfforts}}disabled{{end}}>
-                <details class="chat-model-picker chat-reasoning-picker" data-chat-reasoning-picker>
-                  <summary class="chat-model-picker-trigger chat-reasoning-picker-trigger" aria-label="{{msg .Locale "思考模式" "Thinking mode"}}">
-                    <span class="chat-model-picker-value chat-reasoning-picker-value" data-chat-reasoning-picker-copy>{{if .ChatForm.ReasoningEffort}}{{reasoningEffortLabel .Locale .ChatForm.ReasoningEffort}}{{else}}reasoning_effort · default{{end}}</span>
-                    <span class="chat-model-picker-icon chat-reasoning-picker-icon" aria-hidden="true">
+              <div class="chat-composer-toolbar-group chat-composer-toolbar-group-environment">
+                <details class="chat-model-picker chat-environment-picker" data-chat-environment-picker>
+                  <summary class="chat-model-picker-trigger chat-environment-picker-trigger" aria-label="{{msg .Locale "选择环境" "Choose environment"}}">
+                    <span class="chat-model-picker-value chat-environment-picker-value" data-chat-environment-picker-copy>{{chatEnvironmentLabel .ChatForm.Environment .ChatEnvironmentOptions}}</span>
+                    <span class="chat-model-picker-icon chat-environment-picker-icon" aria-hidden="true">
                       <i class="chat-control-icon" data-lucide="chevron-down"></i>
                     </span>
                   </summary>
-                  <div class="chat-model-picker-menu chat-reasoning-picker-menu" role="radiogroup" aria-label="{{msg .Locale "思考模式" "Thinking mode"}}">
-                    <label class="chat-model-picker-option chat-reasoning-picker-option {{if eq .ChatForm.ReasoningEffort ""}}is-active{{end}}">
-                      <input class="chat-route-control chat-reasoning-option-control" type="radio" name="chat_reasoning_effort_choice" value="" data-chat-reasoning-option {{if eq .ChatForm.ReasoningEffort ""}}checked{{end}}>
-                      <span class="chat-model-name">reasoning_effort · default</span>
-                      <span class="chat-model-detail">{{msg .Locale "不显式传值，沿用 DeepSeek 默认思考强度。" "Leave reasoning_effort unset and let DeepSeek choose the default effort."}}</span>
-                    </label>
-                    {{range .SelectedChatRoute.ReasoningEfforts}}
-                    <label class="chat-model-picker-option chat-reasoning-picker-option {{if eq $.ChatForm.ReasoningEffort .}}is-active{{end}}">
-                      <input class="chat-route-control chat-reasoning-option-control" type="radio" name="chat_reasoning_effort_choice" value="{{.}}" data-chat-reasoning-option {{if eq $.ChatForm.ReasoningEffort .}}checked{{end}}>
-                      <span class="chat-model-name">{{reasoningEffortLabel $.Locale .}}</span>
-                      <span class="chat-model-detail">reasoning_effort={{reasoningEffortLabel $.Locale .}}</span>
+                  <div class="chat-model-picker-menu chat-environment-picker-menu" role="radiogroup" aria-label="{{msg .Locale "环境" "Environment"}}">
+                    {{range .ChatEnvironmentOptions}}
+                    <label class="chat-model-picker-option chat-environment-picker-option {{if eq $.ChatForm.Environment .Value}}is-active{{end}}">
+                      <input class="chat-route-control chat-environment-option-control" type="radio" name="chat_environment_choice" value="{{.Value}}" data-chat-environment-option data-chat-environment-label="{{.Label}}" {{if eq $.ChatForm.Environment .Value}}checked{{end}}>
+                      <span class="chat-model-name">{{.Label}}</span>
                     </label>
                     {{end}}
                   </div>
                 </details>
+                <button class="chat-shell-launch" type="button" data-chat-action="open-shell" {{if eq .ChatForm.Environment "local"}}hidden disabled{{end}} aria-label="{{msg .Locale "打开容器终端" "Open container terminal"}}" title="{{msg .Locale "打开容器终端" "Open container terminal"}}">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4.75 6.25A1.25 1.25 0 0 1 6 5h12a1.25 1.25 0 0 1 1.25 1.25v11.5A1.25 1.25 0 0 1 18 19H6a1.25 1.25 0 0 1-1.25-1.25z"></path><path d="m8.5 9.5 2.75 2.5-2.75 2.5"></path><path d="M13.5 14.5h2.75"></path></svg>
+                  <span class="chat-visually-hidden">{{msg .Locale "打开容器终端" "Open container terminal"}}</span>
+                </button>
               </div>
               {{end}}
-              <span class="chat-queue-indicator" data-chat-queue-indicator hidden></span>
-              <button class="primary-button chat-send-button" type="button" data-chat-action="composer-primary" aria-label="{{msg .Locale "开始发送" "Start sending"}}" hidden>
-                <span class="chat-send-glyph" data-chat-primary-start aria-hidden="true"><i class="chat-control-icon" data-lucide="send-horizontal"></i></span>
-                <span class="chat-send-glyph" data-chat-primary-stop aria-hidden="true" hidden><i class="chat-control-icon" data-lucide="square"></i></span>
-              </button>
+              {{if .ChatRoutes}}
+              <div class="chat-composer-toolbar-group chat-composer-toolbar-group-route">
+                <details class="chat-model-picker">
+                  <summary class="chat-model-picker-trigger" aria-label="{{msg .Locale "选择模型" "Choose model"}}">
+                    <span class="chat-model-picker-value" data-chat-model-picker-copy>{{if .SelectedChatRoute.PublicName}}{{.SelectedChatRoute.PublicName}}{{else}}{{msg .Locale "选择模型" "Choose model"}}{{end}}</span>
+                    <span class="chat-model-picker-icon" aria-hidden="true">
+                      <i class="chat-control-icon" data-lucide="chevron-down"></i>
+                    </span>
+                  </summary>
+                  <div class="chat-model-picker-menu" role="radiogroup" aria-label="{{msg .Locale "对话模型" "Conversation model"}}">
+                    {{range .ChatRoutes}}
+                    <label class="chat-model-picker-option {{if eq $.ChatForm.PublicName .PublicName}}is-active{{end}}" data-chat-provider-name="{{.ProviderName}}" data-chat-upstream-model="{{.UpstreamModel}}" data-chat-reasoning-efforts="{{join .ReasoningEfforts ","}}">
+                      <input class="chat-route-control" type="radio" name="chat_public_name" value="{{.PublicName}}" {{if eq $.ChatForm.PublicName .PublicName}}checked{{end}}>
+                      <span class="chat-model-name">{{.PublicName}}</span>
+                      <span class="chat-model-detail">{{.ProviderName}} · {{.UpstreamModel}}</span>
+                    </label>
+                    {{end}}
+                  </div>
+                </details>
+                <div class="chat-reasoning-effort" data-chat-reasoning-control {{if not .SelectedChatRoute.ReasoningEfforts}}hidden{{end}}>
+                  <input id="chat-reasoning-effort" type="hidden" name="chat_reasoning_effort" value="{{.ChatForm.ReasoningEffort}}" data-chat-reasoning-effort-input {{if not .SelectedChatRoute.ReasoningEfforts}}disabled{{end}}>
+                  <details class="chat-model-picker chat-reasoning-picker" data-chat-reasoning-picker>
+                    <summary class="chat-model-picker-trigger chat-reasoning-picker-trigger" aria-label="{{msg .Locale "思考模式" "Thinking mode"}}">
+                      <span class="chat-model-picker-value chat-reasoning-picker-value" data-chat-reasoning-picker-copy>{{if .ChatForm.ReasoningEffort}}{{msg $.Locale "思考" "Thinking"}} · {{reasoningEffortLabel $.Locale .ChatForm.ReasoningEffort}}{{else}}{{msg $.Locale "思考" "Thinking"}} · {{msg $.Locale "默认" "Default"}}{{end}}</span>
+                      <span class="chat-model-picker-icon chat-reasoning-picker-icon" aria-hidden="true">
+                        <i class="chat-control-icon" data-lucide="chevron-down"></i>
+                      </span>
+                    </summary>
+                    <div class="chat-model-picker-menu chat-reasoning-picker-menu" role="radiogroup" aria-label="{{msg .Locale "思考模式" "Thinking mode"}}">
+                      <label class="chat-model-picker-option chat-reasoning-picker-option {{if eq .ChatForm.ReasoningEffort ""}}is-active{{end}}">
+                        <input class="chat-route-control chat-reasoning-option-control" type="radio" name="chat_reasoning_effort_choice" value="" data-chat-reasoning-option {{if eq .ChatForm.ReasoningEffort ""}}checked{{end}}>
+                        <span class="chat-model-name">reasoning_effort · default</span>
+                        <span class="chat-model-detail">{{msg .Locale "不显式传值，沿用 DeepSeek 默认思考强度。" "Leave reasoning_effort unset and let DeepSeek choose the default effort."}}</span>
+                      </label>
+                      {{range .SelectedChatRoute.ReasoningEfforts}}
+                      <label class="chat-model-picker-option chat-reasoning-picker-option {{if eq $.ChatForm.ReasoningEffort .}}is-active{{end}}">
+                        <input class="chat-route-control chat-reasoning-option-control" type="radio" name="chat_reasoning_effort_choice" value="{{.}}" data-chat-reasoning-option {{if eq $.ChatForm.ReasoningEffort .}}checked{{end}}>
+                        <span class="chat-model-name">{{reasoningEffortLabel $.Locale .}}</span>
+                        <span class="chat-model-detail">reasoning_effort={{reasoningEffortLabel $.Locale .}}</span>
+                      </label>
+                      {{end}}
+                    </div>
+                  </details>
+                </div>
+              </div>
+              {{end}}
+              <div class="chat-composer-primary">
+                <span class="chat-queue-indicator" data-chat-queue-indicator hidden></span>
+                <button class="primary-button chat-send-button" type="button" data-chat-action="composer-primary" aria-label="{{msg .Locale "开始发送" "Start sending"}}" hidden>
+                  <span class="chat-send-glyph" data-chat-primary-start aria-hidden="true"><i class="chat-control-icon" data-lucide="send-horizontal"></i></span>
+                  <span class="chat-send-glyph" data-chat-primary-stop aria-hidden="true" hidden><i class="chat-control-icon" data-lucide="square"></i></span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -273,11 +302,11 @@
       </section>
     </div>
   </form>
-  <script src="https://unpkg.com/lucide@1.16.0/dist/umd/lucide.min.js"></script>
+      <script src="https://cdn.jsdmirror.com/npm/lucide@1.16.0/dist/umd/lucide.min.js"></script>
   <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
   <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
   <script src="/console/static/chat-shell.js?v=chat-shell-20260527b"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260527m"></script>
-  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260528a"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260528c"></script>
+  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260528g"></script>
 </div>
 {{end}}

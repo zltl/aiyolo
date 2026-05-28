@@ -1,0 +1,22 @@
+{
+  "base_os": "ubuntu",
+  "base_version": "24.04",
+  "image_flavor": "local-cloud-agent",
+  "features": [
+    "git",
+    "nodejs",
+    "npm",
+    "python3",
+    "jq",
+    "claude-code",
+    "xvfb",
+    "fluxbox",
+    "x11vnc",
+    "desktop-vnc",
+    "google-chrome",
+    "docker.io",
+    "docker-in-docker",
+    "aiyolo-ass",
+    "workspace-volume"
+  ]
+}

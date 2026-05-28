@@ -145,6 +145,7 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 	if err != nil {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
+	assDownloadURL, assSHA256URL := handler.consoleChatCloudAgentASSArtifactURLs(baseURL)
 	now := time.Now().UTC()
 	account, err = handler.ensureConsoleChatEnvironmentAPIKey(ctx, userID, worker.ID, account, allowedModels, now)
 	if err != nil {
@@ -171,6 +172,8 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 		DefaultModel:   account.ModelPublicName,
 		AllowedModels:  allowedModels,
 		OpenURL:        strings.TrimRight(baseURL, "/") + "/console/chat?session=" + url.QueryEscape(chatSessionID),
+		ASSDownloadURL: assDownloadURL,
+		ASSSHA256URL:   assSHA256URL,
 	})
 	if err != nil {
 		account.Status = domain.CloudAgentStatusError

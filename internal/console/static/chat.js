@@ -241,7 +241,7 @@
       }
     });
   };
-  const sidebarPreferenceKey = "aiyolo.console.chat.sidebarCollapsed";
+  const sidebarPreferenceKey = "aiyolo.console.chat.sidebarCollapsed.v2";
   const ownProperty = Object.prototype.hasOwnProperty;
   let activeStreamController = null;
   let activeStreamStopRequested = false;
@@ -654,7 +654,7 @@
         return label;
       }
     }
-    return next === "local" ? "本地 Chat" : next;
+    return next === "local" ? t("本地", "Local") : next;
   };
   const refreshEnvironmentOptionStates = (form) => {
     const selected = currentSelectedEnvironment(form);
@@ -733,6 +733,10 @@
   };
 
   const reasoningEffortDefaultLabel = () => "reasoning_effort · default";
+  const reasoningEffortSummaryLabel = (value) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    return normalized === "" ? t("思考 · 默认", "Thinking · default") : `${t("思考", "Thinking")} · ${reasoningEffortLabel(normalized)}`;
+  };
 
   const reasoningEffortLabel = (value) => {
     switch (String(value || "").trim().toLowerCase()) {
@@ -849,7 +853,7 @@
     input.value = enabled ? nextValue : "";
     setSelectedReasoningEffort(form, enabled ? nextValue : "");
     if (copy instanceof HTMLElement) {
-      copy.textContent = input.value ? reasoningEffortLabel(input.value) : reasoningEffortDefaultLabel();
+      copy.textContent = reasoningEffortSummaryLabel(input.value);
     }
   };
 
@@ -875,10 +879,12 @@
   const shellHeightPreferenceKey = "aiyolo.console.chat.shellHeight";
   const shellDefaultHeight = 360;
   const shellMinHeight = 240;
+  const shellReadyProbeTimeoutMs = 3000;
   let shellInstances = [];
   let activeShellInstanceID = "";
   let shellResizeState = null;
   let shellInstanceCounter = 0;
+  let shellOpenInFlight = false;
 
   const syncDraftFieldHeight = (field) => {
     if (!(field instanceof HTMLTextAreaElement)) {
@@ -1299,10 +1305,13 @@
     }
     if (shellButton instanceof HTMLButtonElement) {
       const hasShellSocket = shellSocketBaseURL(form) !== "";
-      const canOpenShell = hasShellSocket && currentSelectedEnvironment(form) !== "local" && currentSelectedModel(form) !== "";
-      shellButton.hidden = !hasShellSocket;
+      const showShellButton = hasShellSocket && isCloudAgentEnvironment(currentSelectedEnvironment(form));
+      const canOpenShell = showShellButton && currentSelectedModel(form) !== "" && !shellOpenInFlight;
+      shellButton.hidden = !showShellButton;
       shellButton.disabled = !canOpenShell;
-      shellButton.title = canOpenShell
+      shellButton.title = shellOpenInFlight
+        ? t("正在打开 Claude Code 终端…", "Opening the Claude Code terminal…")
+        : canOpenShell
         ? t("打开 Claude Code 终端", "Open the Claude Code terminal")
         : t("切换到 Cloud Agent 环境后即可打开 Claude Code 终端", "Switch to a Cloud Agent environment to open the Claude Code terminal");
     }
@@ -2373,7 +2382,8 @@
     }
     applyShellHeight(form, readShellHeightPreference());
     renderShellMeta(form, {});
-    setSidebarCollapsed(form, false);
+    const sidebarCollapsed = readSidebarPreference();
+    setSidebarCollapsed(form, sidebarCollapsed == null ? true : sidebarCollapsed);
     const routes = routeMap(form);
     let store = normalizeStore(loadStore(), form, routes);
     const serverSession = captureSessionFromDOM(form, store, routes);
@@ -2668,10 +2678,11 @@
     }
   };
 
-  const ensureChatEnvironment = async (form) => {
+  const ensureChatEnvironment = async (form, options = {}) => {
     const root = currentRoot();
     const field = environmentField(form);
     const ensureURL = environmentEnsureURL(form);
+    const suppressSuccessNotice = Boolean(options && options.suppressSuccessNotice);
     if (!root || !(field instanceof HTMLInputElement || field instanceof HTMLSelectElement) || ensureURL === "") {
       return null;
     }
@@ -2711,7 +2722,12 @@
         writeClientSessionID(form, parsed.sessionId.trim());
       }
       setAttachmentStatus(root, "", false);
-      setInlineFlash(root, String(parsed.notice || "").trim(), false);
+      const notice = String(parsed.notice || "").trim();
+      if (notice === "") {
+        setInlineFlash(root, "", false);
+      } else if (!suppressSuccessNotice) {
+        setInlineFlash(root, notice, false);
+      }
       queuePersist();
       emitChatState({ source: "ensure-environment", ensured: parsed });
       return parsed;
@@ -2726,6 +2742,21 @@
     }
   };
 
+  const fetchWithTimeout = async (url, options, timeoutMs) => {
+    if (typeof AbortController !== "function") {
+      return fetch(url, options);
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      controller.abort();
+    }, Math.max(0, timeoutMs));
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      window.clearTimeout(timer);
+    }
+  };
+
   const probeReadyChatShell = async (form) => {
     const sessionID = readClientSessionID(form);
     const environment = currentSelectedEnvironment(form);
@@ -2736,11 +2767,11 @@
     try {
       const readyURL = new URL(`${shellPageURL.replace(/\/$/, "")}/ready`, window.location.href);
       readyURL.searchParams.set("session", sessionID);
-      const response = await fetch(readyURL.toString(), {
+      const response = await fetchWithTimeout(readyURL.toString(), {
         method: "GET",
         credentials: "same-origin",
         headers: { Accept: "application/json" },
-      });
+      }, shellReadyProbeTimeoutMs);
       if (!response.ok) {
         return null;
       }
@@ -2758,12 +2789,13 @@
     }
   };
 
-  const openChatShell = async (form) => {
+  const openChatShell = async (form, options = {}) => {
     const root = currentRoot();
     const baseSocketURL = shellSocketBaseURL(form);
     if (!root || baseSocketURL === "") {
       return;
     }
+    const showProgress = options.showProgress !== false;
     if (currentSelectedEnvironment(form) === "local") {
       setInlineFlash(root, t("先选择 Cloud Agent 环境，再打开 Claude Code 终端。", "Select a Cloud Agent environment before opening the Claude Code terminal."), true);
       return;
@@ -2772,56 +2804,79 @@
       setInlineFlash(root, t("先选择一个模型，再打开 Claude Code 终端。", "Choose a model before opening the Claude Code terminal."), true);
       return;
     }
-    let shellState = await probeReadyChatShell(form);
-    let ensured = null;
-    if (!shellState) {
-	    try {
-	      ensured = await ensureChatEnvironment(form);
-	    } catch (_error) {
-	      return;
-	    }
-	  }
-    const sessionID = String(shellState?.sessionId || ensured?.sessionId || readClientSessionID(form)).trim();
-    if (sessionID === "") {
-      setInlineFlash(root, t("Shell 会话未生成，请重试。", "The shell session could not be created. Please retry."), true);
+    if (shellOpenInFlight) {
+      if (showProgress) {
+        setInlineFlash(root, t("Claude Code 终端正在打开…", "The Claude Code terminal is already opening…"), false);
+      }
       return;
     }
-    let nextSocketURL = String(shellState?.socketUrl || "").trim();
-    if (nextSocketURL === "") {
-	    const nextURL = new URL(baseSocketURL, window.location.href);
-	    nextURL.searchParams.set("session", sessionID);
-	    nextSocketURL = nextURL.toString();
-	  }
-    const instance = createShellInstance({
-      sessionID,
-	    workerID: shellState?.workerId || ensured?.workerId,
-	    containerName: shellState?.containerName || ensured?.containerName,
-	    workspacePath: shellState?.workspacePath || ensured?.workspacePath,
-      socketURL: nextSocketURL,
-    });
+    shellOpenInFlight = true;
+    updateComposerControls(form);
+    if (showProgress) {
+      setInlineFlash(root, t("正在打开 Claude Code 终端…", "Opening the Claude Code terminal…"), false);
+    }
+    try {
+      let shellState = await probeReadyChatShell(form);
+      let ensured = null;
+      if (!shellState) {
+        try {
+          ensured = await ensureChatEnvironment(form, { suppressSuccessNotice: true });
+        } catch (_error) {
+          return;
+        }
+      }
+      const sessionID = String(shellState?.sessionId || ensured?.sessionId || readClientSessionID(form)).trim();
+      if (sessionID === "") {
+        setInlineFlash(root, t("Shell 会话未生成，请重试。", "The shell session could not be created. Please retry."), true);
+        return;
+      }
+      let nextSocketURL = String(shellState?.socketUrl || "").trim();
+      if (nextSocketURL === "") {
+        const nextURL = new URL(baseSocketURL, window.location.href);
+        nextURL.searchParams.set("session", sessionID);
+        nextSocketURL = nextURL.toString();
+      }
+      const instance = createShellInstance({
+        sessionID,
+        workerID: shellState?.workerId || ensured?.workerId,
+        containerName: shellState?.containerName || ensured?.containerName,
+        workspacePath: shellState?.workspacePath || ensured?.workspacePath,
+        socketURL: nextSocketURL,
+      });
 
-    shellInstances = [...shellInstances, instance];
-    activeShellInstanceID = instance.id;
-    renderShellDockContents(form);
-    setShellDockVisible(form, true);
-    renderShellMeta(instance);
-    const controller = ensureShellController(form, instance);
-    if (!controller) {
-      closeShellInstance(form, instance.id);
-      return;
+      shellInstances = [...shellInstances, instance];
+      activeShellInstanceID = instance.id;
+      renderShellDockContents(form);
+      setShellDockVisible(form, true);
+      renderShellMeta(instance);
+      if (showProgress) {
+        setInlineFlash(root, "", false);
+      }
+      const controller = ensureShellController(form, instance);
+      if (!controller) {
+        closeShellInstance(form, instance.id);
+        return;
+      }
+      controller.connect({ resetTerminal: true });
+      window.setTimeout(() => {
+        controller.refresh?.();
+        controller.focus?.();
+      }, 0);
+    } finally {
+      shellOpenInFlight = false;
+      updateComposerControls(form);
     }
-    controller.connect({ resetTerminal: true });
-    window.setTimeout(() => {
-      controller.refresh?.();
-      controller.focus?.();
-    }, 0);
   };
 
+  const shouldAutoOpenCloudAgentShell = (form) => (
+    form instanceof HTMLFormElement
+    && isCloudAgentEnvironment(currentSelectedEnvironment(form))
+    && currentSelectedModel(form) !== ""
+    && shellSocketBaseURL(form) !== ""
+  );
+
   const autoOpenCloudAgentShell = (form) => {
-    if (!(form instanceof HTMLFormElement)) {
-      return;
-    }
-    if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || currentSelectedModel(form) === "" || shellSocketBaseURL(form) === "") {
+    if (!shouldAutoOpenCloudAgentShell(form)) {
       return;
     }
     if (shellInstances.length > 0) {
@@ -2829,7 +2884,7 @@
       refreshActiveShellController();
       return;
     }
-    void openChatShell(form);
+    void openChatShell(form, { showProgress: false });
   };
 
   const delayWithAbort = (signal, timeoutMs) => new Promise((resolve, reject) => {
@@ -3337,8 +3392,9 @@
       if (shellInstances.length > 0) {
         closeAllChatShells(form);
       }
+      updateComposerControls(form);
       queuePersist();
-      void ensureChatEnvironment(form)
+      void ensureChatEnvironment(form, { suppressSuccessNotice: shouldAutoOpenCloudAgentShell(form) })
         .then(() => {
           autoOpenCloudAgentShell(form);
         })
@@ -3349,8 +3405,9 @@
       if (shellInstances.length > 0) {
         closeAllChatShells(form);
       }
+      updateComposerControls(form);
       queuePersist();
-      void ensureChatEnvironment(form)
+      void ensureChatEnvironment(form, { suppressSuccessNotice: shouldAutoOpenCloudAgentShell(form) })
         .then(() => {
           autoOpenCloudAgentShell(form);
         })
@@ -3365,7 +3422,7 @@
       }
       refreshReasoningOptionStates(form);
       if (copy instanceof HTMLElement) {
-        copy.textContent = input?.value ? reasoningEffortLabel(input.value) : reasoningEffortDefaultLabel();
+        copy.textContent = reasoningEffortSummaryLabel(input?.value);
       }
       const picker = pickerFromTarget(target);
       if (picker instanceof HTMLDetailsElement) {

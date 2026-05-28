@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+display="${AIYOLO_DISPLAY:-:99}"
+screen="${AIYOLO_SCREEN:-1440x900x24}"
+vnc_port="${AIYOLO_VNC_PORT:-5900}"
+
+mkdir -p /tmp/.X11-unix "${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
+chmod 1777 /tmp/.X11-unix
+rm -f "/tmp/.X11-unix/X${display#:}" "/tmp/.X${display#:}-lock"
+
+Xvfb "$display" -screen 0 "$screen" -nolisten tcp >/tmp/aiyolo-xvfb.log 2>&1 &
+sleep 1
+DISPLAY="$display" fluxbox >/tmp/aiyolo-fluxbox.log 2>&1 &
+DISPLAY="$display" x11vnc -display "$display" -forever -shared -nopw -rfbport "$vnc_port" >/tmp/aiyolo-x11vnc.log 2>&1 &
+
+wait -n

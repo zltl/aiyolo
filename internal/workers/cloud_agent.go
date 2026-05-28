@@ -2,10 +2,15 @@ package workers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
+	"net/http"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +36,11 @@ const (
 	defaultCloudAgentDockerStorageDriver = "vfs"
 	defaultCloudAgentClaudeUser          = "aiyolo"
 	defaultCloudAgentClaudeHome          = "/workspace"
+	cloudAgentImageBuildRevisionLabel    = "aiyolo.cloud_agent.build_revision"
+	cloudAgentImageASSSHA256Label        = "aiyolo.ass.sha256"
 )
+
+const CloudAgentASSArtifactObjectKey = "linux-amd64/aiyolo-ass"
 
 type CloudAgentStartOptions struct {
 	UserID               string
@@ -64,6 +73,8 @@ type CloudAgentStartOptions struct {
 	UbuntuSeries         string
 	UbuntuMirror         string
 	ChromeDEBURL         string
+	ASSDownloadURL       string
+	ASSSHA256URL         string
 }
 
 type CloudAgentInstance struct {
@@ -117,6 +128,9 @@ type cloudAgentRemotePayload struct {
 	ChromeDEBURL         string            `json:"chrome_deb_url"`
 	RootFSURL            string            `json:"rootfs_url,omitempty"`
 	RootFSIndexURL       string            `json:"rootfs_index_url"`
+	ASSDownloadURL       string            `json:"ass_download_url"`
+	ASSSHA256            string            `json:"ass_sha256"`
+	BuildRevision        string            `json:"build_revision"`
 	Files                map[string]string `json:"files"`
 	StartedAt            string            `json:"started_at"`
 	APIKey               string            `json:"api_key"`
@@ -145,6 +159,13 @@ func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	for key, value := range proxyEnv {
 		containerEnv[key] = value
 	}
+	resolveCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	assSHA256, err := resolveCloudAgentASSSHA256(resolveCtx, options.ASSSHA256URL)
+	if err != nil {
+		return CloudAgentInstance{}, err
+	}
+	buildRevision := cloudAgentBuildRevision(options, cloudAgentBuildContextFiles, assSHA256)
 	payload, err := json.Marshal(cloudAgentRemotePayload{
 		WorkerID:             worker.ID,
 		UserID:               options.UserID,
@@ -178,6 +199,9 @@ func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 		ChromeDEBURL:         options.ChromeDEBURL,
 		RootFSURL:            options.RootFSURL,
 		RootFSIndexURL:       options.RootFSIndexURL,
+		ASSDownloadURL:       options.ASSDownloadURL,
+		ASSSHA256:            assSHA256,
+		BuildRevision:        buildRevision,
 		Files:                cloudAgentBuildContextFiles,
 		StartedAt:            time.Now().UTC().Format(time.RFC3339),
 		APIKey:               options.APIKey,
@@ -299,7 +323,47 @@ func normalizeCloudAgentStartOptions(worker domain.WorkerServer, options CloudAg
 		options.RootFSIndexURL = defaultCloudAgentRootFSIndexURL
 	}
 	options.RootFSURL = strings.TrimSpace(options.RootFSURL)
+	options.ASSDownloadURL = strings.TrimSpace(options.ASSDownloadURL)
+	if options.ASSDownloadURL == "" {
+		return CloudAgentStartOptions{}, fmt.Errorf("cloud agent aiyolo-ass download url is required")
+	}
+	options.ASSSHA256URL = strings.TrimSpace(options.ASSSHA256URL)
+	if options.ASSSHA256URL == "" {
+		return CloudAgentStartOptions{}, fmt.Errorf("cloud agent aiyolo-ass sha256 url is required")
+	}
 	return options, nil
+}
+
+func resolveCloudAgentASSSHA256(ctx context.Context, checksumURL string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSpace(checksumURL), nil)
+	if err != nil {
+		return "", fmt.Errorf("build cloud agent aiyolo-ass checksum request: %w", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("download cloud agent aiyolo-ass checksum: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+		return "", fmt.Errorf("download cloud agent aiyolo-ass checksum: unexpected status %d: %s", response.StatusCode, strings.TrimSpace(string(detail)))
+	}
+	payload, err := io.ReadAll(io.LimitReader(response.Body, 512))
+	if err != nil {
+		return "", fmt.Errorf("read cloud agent aiyolo-ass checksum: %w", err)
+	}
+	fields := strings.Fields(string(payload))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("cloud agent aiyolo-ass checksum is empty")
+	}
+	checksum := strings.ToLower(strings.TrimSpace(fields[0]))
+	if len(checksum) != sha256.Size*2 {
+		return "", fmt.Errorf("cloud agent aiyolo-ass checksum must be %d hex chars", sha256.Size*2)
+	}
+	if _, err := hex.DecodeString(checksum); err != nil {
+		return "", fmt.Errorf("cloud agent aiyolo-ass checksum is invalid: %w", err)
+	}
+	return checksum, nil
 }
 
 func normalizeCloudAgentAllowedModels(values []string, defaultModel string) []string {
@@ -454,585 +518,47 @@ func boolString(value bool) string {
 }
 
 func buildCloudAgentRemoteCommand(payloadJSON string) string {
-	script := strings.ReplaceAll(cloudAgentRemotePythonTemplate, "__PAYLOAD_JSON__", strconv.Quote(payloadJSON))
+	script := cloudAgentAssetString("cloud-agent/remote_ensure.py.tmpl")
+	script = strings.ReplaceAll(script, "\t", "    ")
+	script = strings.ReplaceAll(script, "__PAYLOAD_JSON__", strconv.Quote(payloadJSON))
 	return "python3 - <<'PY'\n" + script + "\nPY"
 }
 
-const cloudAgentRemotePythonTemplate = `import fcntl
-import json
-import os
-import pathlib
-import re
-import shutil
-import subprocess
-import tempfile
-import urllib.request
-
-payload = json.loads(__PAYLOAD_JSON__)
-
-
-def run(args, env=None):
-    return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-
-
-def ensure_dirs():
-    pathlib.Path(payload["workspace_root"]).mkdir(parents=True, exist_ok=True)
-    pathlib.Path(payload["docker_data_root"]).mkdir(parents=True, exist_ok=True)
-
-
-def write_workspace_files():
-    metadata = {
-        "user_id": payload["user_id"],
-        "agent_type": payload["agent_type"],
-        "worker_id": payload["worker_id"],
-        "workspace_path": payload["workspace_path"],
-        "created_by": "console-chat",
-        "image": payload["image"],
-        "api_base_url": payload["api_base_url"],
-        "console_base_url": payload.get("console_base_url", ""),
-        "default_model": payload.get("default_model", ""),
-        "allowed_models": payload.get("allowed_models", []),
-        "open_url": payload.get("open_url", ""),
-        "last_started_at": payload.get("started_at", ""),
-    }
-    metadata_path = pathlib.Path(payload["workspace_root"]) / ".aiyolo-cloud-agent.json"
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
-    readme_path = pathlib.Path(payload["workspace_root"]) / "README.aiyolo-cloud-agent.txt"
-    readme_path.write_text(
-        "AIYolo cloud-agent is running for this workspace.\n"
-        "\n"
-        "Container runtime exports these variables inside the container:\n"
-        "- OPENAI_BASE_URL / OPENAI_API_BASE\n"
-        "- OPENAI_API_KEY\n"
-        "- AIYOLO_API_BASE_URL / AIYOLO_API_ROOT_URL\n"
-        "- AIYOLO_DEFAULT_MODEL / AIYOLO_ALLOWED_MODELS\n"
-        "\n"
-        "Open the browser inside the container at:\n"
-        f"{payload.get('open_url', '')}\n",
-        encoding="utf-8",
-    )
-
-
-def resolve_rootfs_url():
-    if payload.get("rootfs_url"):
-        return payload["rootfs_url"].strip()
-    with urllib.request.urlopen(payload["rootfs_index_url"], timeout=30) as response:
-        index_html = response.read().decode("utf-8", errors="replace")
-    matches = re.findall(r"ubuntu-base-" + re.escape(payload["ubuntu_series"]) + r"\.[0-9]+-base-amd64\.tar\.gz", index_html)
-    if not matches:
-        raise SystemExit("unable to resolve Ubuntu base rootfs from index")
-    matches = sorted(set(matches), key=lambda item: tuple(int(part) for part in re.findall(r"\d+", item)))
-    return payload["rootfs_index_url"].rstrip("/") + "/" + matches[-1]
-
-
-def ensure_image():
-    try:
-        run(["docker", "image", "inspect", payload["image"]])
-        return
-    except subprocess.CalledProcessError:
-        pass
-    build_env = os.environ.copy()
-    for key, value in (payload.get("proxy_env") or {}).items():
-        build_env[key] = value
-    temp_root = pathlib.Path(tempfile.mkdtemp(prefix="aiyolo-cloud-agent-build-"))
-    try:
-        for relative_path, content in (payload.get("files") or {}).items():
-            target_path = temp_root / relative_path
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(content, encoding="utf-8")
-        rootfs_url = resolve_rootfs_url()
-        rootfs_path = temp_root / "rootfs.tar.gz"
-        with urllib.request.urlopen(rootfs_url, timeout=60) as response, open(rootfs_path, "wb") as handle:
-            shutil.copyfileobj(response, handle)
-        build_args = [
-            "docker", "build", "--pull",
-            "--build-arg", f"UBUNTU_RELEASE={payload['ubuntu_release']}",
-            "--build-arg", f"APT_MIRROR={payload['ubuntu_mirror']}",
-            "--build-arg", f"CHROME_DEB_URL={payload['chrome_deb_url']}",
-        ]
-        for key in sorted((payload.get("proxy_env") or {}).keys()):
-            build_args.extend(["--build-arg", f"{key}={payload['proxy_env'][key]}"])
-        build_args.extend(["-t", payload["image"], "-f", str(temp_root / "Dockerfile"), str(temp_root)])
-        run(build_args, env=build_env)
-    finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
-
-
-def inspect_container():
-    result = run(["docker", "inspect", payload["container_name"]])
-    return json.loads(result.stdout)[0]
-
-
-def exact_container_id():
-    result = run(["docker", "ps", "-a", "--filter", f"name=^/{payload['container_name']}$", "--format", "{{.ID}}"])
-    return result.stdout.strip()
-
-
-def container_summary(inspected):
-    summary = {
-        "status": "running" if inspected["State"].get("Running") else "stopped",
-        "worker_id": payload["worker_id"],
-        "container_id": inspected["Id"],
-        "container_name": payload["container_name"],
-        "image": inspected["Config"].get("Image", payload["image"]),
-        "workspace_root": payload["workspace_root"],
-        "workspace_path": payload["workspace_path"],
-        "docker_data_root": payload["docker_data_root"],
-        "default_model": payload.get("default_model", ""),
-        "allowed_models": payload.get("allowed_models", []),
-        "console_url": payload.get("open_url", ""),
-        "api_base_url": payload.get("api_base_url", ""),
-        "last_started_at": payload.get("started_at", ""),
-    }
-    if payload.get("enable_display"):
-        summary["vnc"] = f"127.0.0.1:{payload['host_vnc_port']}"
-    if payload.get("enable_display") and payload.get("auto_start_chrome"):
-        summary["chrome_devtools"] = f"http://127.0.0.1:{payload['host_chrome_port']}/json/version"
-    return summary
-
-
-def env_map(inspected):
-    env = {}
-    for entry in inspected.get("Config", {}).get("Env") or []:
-        if "=" not in entry:
-            continue
-        key, value = entry.split("=", 1)
-        env[key] = value
-    return env
-
-
-def mount_source(inspected, destination):
-    for mount in inspected.get("Mounts") or []:
-        if mount.get("Destination") == destination:
-            return mount.get("Source", "")
-    return ""
-
-
-def container_matches(inspected):
-    labels = inspected.get("Config", {}).get("Labels") or {}
-    if labels.get("aiyolo.user_id") != payload["user_id"]:
-        return False
-    if labels.get("aiyolo.agent_type") != payload["agent_type"]:
-        return False
-    if labels.get("aiyolo.workspace_path") != payload["workspace_path"]:
-        return False
-    if inspected.get("Config", {}).get("Image") != payload["image"]:
-        return False
-    if mount_source(inspected, payload["workspace_path"]) != payload["workspace_root"]:
-        return False
-    if mount_source(inspected, "/var/lib/docker") != payload["docker_data_root"]:
-        return False
-    current_env = env_map(inspected)
-    for key, expected in (payload.get("container_env") or {}).items():
-        if current_env.get(key) != expected:
-            return False
-    return True
-
-
-def wait_for(command, timeout_seconds):
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        try:
-            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return
-        except subprocess.CalledProcessError:
-            time.sleep(1)
-    raise SystemExit("timed out waiting for container service")
-
-
-def remove_container():
-    deadline = time.time() + 15
-    last_error = ""
-    while time.time() < deadline:
-        if not exact_container_id():
-            return
-        try:
-            run(["docker", "rm", "-f", payload["container_name"]])
-        except subprocess.CalledProcessError as exc:
-            last_error = (exc.stdout or "").strip()
-            if not exact_container_id():
-                return
-            time.sleep(1)
-            continue
-        if not exact_container_id():
-            return
-        time.sleep(0.5)
-    if not exact_container_id():
-        return
-    detail = f": {last_error}" if last_error else ""
-    raise SystemExit(f"failed to remove stale cloud agent container{detail}")
-
-
-def acquire_container_lock():
-    lock_name = re.sub(r"[^0-9A-Za-z_.-]", "-", payload["container_name"])
-    lock_path = pathlib.Path("/tmp") / f"{lock_name}.lock"
-    lock_handle = lock_path.open("w")
-    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-    return lock_handle
-
-
-def ensure_container():
-    existing_id = exact_container_id()
-    if existing_id:
-        try:
-            inspected = inspect_container()
-        except subprocess.CalledProcessError:
-            inspected = None
-        if inspected is not None and inspected.get("State", {}).get("Running") and container_matches(inspected):
-            return container_summary(inspected)
-        remove_container()
-    args = [
-        "docker", "run", "-d",
-        "--name", payload["container_name"],
-        "--hostname", payload["container_name"],
-        "--restart", "unless-stopped",
-        "--add-host", "host.docker.internal:host-gateway",
-        "--privileged",
-        "--shm-size", payload["shm_size"],
-        "--label", f"aiyolo.user_id={payload['user_id']}",
-        "--label", f"aiyolo.agent_type={payload['agent_type']}",
-        "--label", f"aiyolo.workspace_path={payload['workspace_path']}",
-    ]
-    for key in sorted((payload.get("container_env") or {}).keys()):
-        args.extend(["-e", f"{key}={payload['container_env'][key]}"])
-    args.extend(["-v", f"{payload['workspace_root']}:{payload['workspace_path']}"])
-    args.extend(["-v", f"{payload['docker_data_root']}:/var/lib/docker"])
-    args.extend(["-w", payload["workspace_path"]])
-    if payload.get("enable_display"):
-        args.extend(["-p", f"127.0.0.1:{payload['host_vnc_port']}:{payload['container_vnc_port']}"])
-    if payload.get("enable_display") and payload.get("auto_start_chrome"):
-        args.extend(["-p", f"127.0.0.1:{payload['host_chrome_port']}:{payload['container_chrome_port']}"])
-    args.append(payload["image"])
-    run(args)
-    if payload.get("enable_display"):
-        wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", f"nc -z 127.0.0.1 {payload['container_vnc_port']}"] , 30)
-	wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "test -S ${AIYOLO_ASS_SOCKET_PATH:-/run/aiyolo/ass.sock}"], 30)
-    if payload.get("enable_dockerd"):
-        wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "docker info >/dev/null 2>&1"], 60)
-    if payload.get("enable_display") and payload.get("auto_start_chrome"):
-        wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", f"nc -z 127.0.0.1 {payload['container_chrome_port']}"] , 60)
-    return container_summary(inspect_container())
-
-
-if __name__ == "__main__":
-    import time
-
-    ensure_dirs()
-    write_workspace_files()
-    lock_handle = acquire_container_lock()
-    try:
-        ensure_image()
-        print(json.dumps(ensure_container(), ensure_ascii=True, sort_keys=True))
-    finally:
-        lock_handle.close()`
-
 var cloudAgentBuildContextFiles = map[string]string{
-	"Dockerfile":                        cloudAgentDockerfile,
-	"cloud-agent-base.json":             cloudAgentBaseJSON,
-	"aiyolo-ass":                        cloudAgentAssetString("cloud-agent/aiyolo-ass"),
-	"aiyolo-cloud-agent-entrypoint":     cloudAgentEntrypointScript,
-	"aiyolo-cloud-agent-info":           cloudAgentInfoScript,
-	"aiyolo-cloud-agent-start-display":  cloudAgentStartDisplayScript,
-	"aiyolo-cloud-agent-open-chrome":    cloudAgentOpenChromeScript,
-	"aiyolo-cloud-agent-start-docker":   cloudAgentStartDockerScript,
-	"aiyolo-cloud-agent-start-services": cloudAgentStartServicesScript,
+	"Dockerfile":                        cloudAgentAssetString("cloud-agent/Dockerfile"),
+	"cloud-agent-base.json":             cloudAgentAssetString("cloud-agent/cloud-agent-base.json"),
+	"aiyolo-cloud-agent-entrypoint":     cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-entrypoint"),
+	"aiyolo-cloud-agent-info":           cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-info"),
+	"aiyolo-cloud-agent-start-display":  cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-display"),
+	"aiyolo-cloud-agent-open-chrome":    cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-open-chrome"),
+	"aiyolo-cloud-agent-start-docker":   cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-docker"),
+	"aiyolo-cloud-agent-start-services": cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-services"),
 }
 
-const cloudAgentDockerfile = `FROM scratch
-
-ADD rootfs.tar.gz /
-
-ARG UBUNTU_RELEASE=noble
-ARG APT_MIRROR=https://mirrors.aliyun.com/ubuntu
-ARG CHROME_DEB_URL=https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-ARG NODE_VERSION=20.20.2
-ARG CLAUDE_CODE_VERSION=2.1.150
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
-ENV DISPLAY=:99
-ENV XDG_RUNTIME_DIR=/tmp/runtime-root
-ENV CHROME_BIN=/usr/bin/google-chrome-stable
-ENV AIYOLO_CLAUDE_USER=aiyolo
-ENV AIYOLO_CLAUDE_HOME=/workspace
-
-RUN set -eux; \
-    mirror="${APT_MIRROR%/}"; \
-    if [ -f /etc/apt/sources.list ]; then \
-      sed -i \
-        -e "s|http://archive.ubuntu.com/ubuntu|${mirror}|g" \
-        -e "s|http://security.ubuntu.com/ubuntu|${mirror}|g" \
-        -e "s|https://archive.ubuntu.com/ubuntu|${mirror}|g" \
-        -e "s|https://security.ubuntu.com/ubuntu|${mirror}|g" \
-        /etc/apt/sources.list; \
-    else \
-      printf 'deb %s %s main restricted universe multiverse\ndeb %s %s-updates main restricted universe multiverse\ndeb %s %s-security main restricted universe multiverse\n' \
-        "${mirror}" "${UBUNTU_RELEASE}" "${mirror}" "${UBUNTU_RELEASE}" "${mirror}" "${UBUNTU_RELEASE}" >/etc/apt/sources.list; \
-    fi; \
-    printf 'Acquire::Retries "5";\nAcquire::http::No-Cache "true";\nAcquire::https::No-Cache "true";\n' >/etc/apt/apt.conf.d/99aiyolo
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash bash-completion ca-certificates curl dbus-x11 file fluxbox fonts-dejavu-core fonts-liberation \
-    git iproute2 iptables iputils-ping jq less libasound2t64 libatk-bridge2.0-0 libcups2t64 libgbm1 libgtk-3-0 \
-    libnss3 libu2f-udev libxss1 libxtst6 mesa-utils netcat-openbsd procps psmisc python3 python3-dev python3-pip \
-    python3-venv rsync sudo tini tzdata uidmap unzip wget x11vnc xauth xdg-utils xterm xvfb zip \
-    docker.io fuse-overlayfs \
- && groupadd --gid 1000 "${AIYOLO_CLAUDE_USER}" \
- && useradd --uid 1000 --gid 1000 --create-home --home-dir "${AIYOLO_CLAUDE_HOME}" --shell /bin/bash "${AIYOLO_CLAUDE_USER}" \
- && install -d -o "${AIYOLO_CLAUDE_USER}" -g "${AIYOLO_CLAUDE_USER}" -m 0755 /workspace "${AIYOLO_CLAUDE_HOME}/.claude" \
- && install -d -m 0755 /etc/aiyolo /usr/local/bin /tmp/runtime-root /opt \
- && wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
- && apt-get install -y /tmp/google-chrome.deb \
- && rm -f /tmp/google-chrome.deb \
- && curl -fsSL --retry 5 --connect-timeout 30 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" -o /tmp/node.tar.gz \
- && tar -xzf /tmp/node.tar.gz -C /opt \
- && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/node" /usr/local/bin/node \
- && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npm" /usr/local/bin/npm \
- && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npx" /usr/local/bin/npx \
- && npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" --cache /tmp/.npm-cache --fund=false --audit=false \
- && node --version \
- && npm --version \
- && claude --version \
- && rm -f /tmp/node.tar.gz \
- && rm -rf /tmp/.npm-cache \
- && rm -rf /var/lib/apt/lists/*
-
-COPY cloud-agent-base.json /etc/aiyolo/cloud-agent-base.json
-COPY aiyolo-ass /usr/local/bin/aiyolo-ass
-COPY aiyolo-cloud-agent-entrypoint /usr/local/bin/aiyolo-cloud-agent-entrypoint
-COPY aiyolo-cloud-agent-info /usr/local/bin/aiyolo-cloud-agent-info
-COPY aiyolo-cloud-agent-start-display /usr/local/bin/aiyolo-cloud-agent-start-display
-COPY aiyolo-cloud-agent-open-chrome /usr/local/bin/aiyolo-cloud-agent-open-chrome
-COPY aiyolo-cloud-agent-start-docker /usr/local/bin/aiyolo-cloud-agent-start-docker
-COPY aiyolo-cloud-agent-start-services /usr/local/bin/aiyolo-cloud-agent-start-services
-
-RUN chmod 0755 \
-	/usr/local/bin/aiyolo-ass \
-    /usr/local/bin/aiyolo-cloud-agent-entrypoint \
-    /usr/local/bin/aiyolo-cloud-agent-info \
-    /usr/local/bin/aiyolo-cloud-agent-start-display \
-    /usr/local/bin/aiyolo-cloud-agent-open-chrome \
-    /usr/local/bin/aiyolo-cloud-agent-start-docker \
-    /usr/local/bin/aiyolo-cloud-agent-start-services
-
-WORKDIR /workspace
-
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/aiyolo-cloud-agent-entrypoint"]
-CMD ["/usr/local/bin/aiyolo-cloud-agent-start-services"]
-`
-
-const cloudAgentBaseJSON = `{
-  "base_os": "ubuntu",
-  "base_version": "24.04",
-  "image_flavor": "local-cloud-agent",
-  "features": [
-    "git",
-		"nodejs",
-		"npm",
-    "python3",
-    "jq",
-		"claude-code",
-    "xvfb",
-    "fluxbox",
-    "x11vnc",
-    "desktop-vnc",
-    "google-chrome",
-    "docker.io",
-    "docker-in-docker",
-	"aiyolo-ass",
-    "workspace-volume"
-  ]
-}
-`
-
-const cloudAgentEntrypointScript = `#!/usr/bin/env bash
-set -euo pipefail
-
-claude_user="${AIYOLO_CLAUDE_USER:-aiyolo}"
-claude_home="${AIYOLO_CLAUDE_HOME:-/workspace}"
-
-install -d -m 0755 "${XDG_RUNTIME_DIR:-/tmp/runtime-root}" /tmp/.X11-unix
-install -d -m 0755 /run/aiyolo
-install -d -o "$claude_user" -g "$claude_user" -m 0755 /workspace "$claude_home" "$claude_home/.claude"
-chown -R "$claude_user:$claude_user" /workspace "$claude_home/.claude"
-chmod 1777 /tmp/.X11-unix
-
-if [[ $# -eq 0 ]]; then
-  set -- /usr/local/bin/aiyolo-cloud-agent-start-services
-fi
-
-exec "$@"
-`
-
-const cloudAgentInfoScript = `#!/usr/bin/env bash
-set -euo pipefail
-
-cat /etc/os-release
-printf '\n--- manifest ---\n'
-cat /etc/aiyolo/cloud-agent-base.json
-printf '\n--- toolchain ---\n'
-git --version
-node --version
-npm --version
-claude --version
-python3 --version
-jq --version
-docker --version
-dockerd --version
-google-chrome-stable --version
-dpkg-query -W -f='xvfb ${Version}\n' xvfb 2>/dev/null || true
-dpkg-query -W -f='fluxbox ${Version}\n' fluxbox 2>/dev/null || true
-dpkg-query -W -f='x11vnc ${Version}\n' x11vnc 2>/dev/null || true
-printf '\n--- services ---\n'
-ps -ef | grep -E 'Xvfb|fluxbox|x11vnc|dockerd|google-chrome' | grep -v grep || true
-if docker info >/tmp/aiyolo-docker-info.log 2>&1; then
-  cat /tmp/aiyolo-docker-info.log
-else
-  cat /tmp/aiyolo-docker-info.log
-fi
-printf '\n--- workspace ---\n'
-pwd
-ls -la /workspace | sed -n '1,80p'
-`
-
-const cloudAgentStartDisplayScript = `#!/usr/bin/env bash
-set -euo pipefail
-
-display="${AIYOLO_DISPLAY:-:99}"
-screen="${AIYOLO_SCREEN:-1440x900x24}"
-vnc_port="${AIYOLO_VNC_PORT:-5900}"
-
-mkdir -p /tmp/.X11-unix "${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
-chmod 1777 /tmp/.X11-unix
-rm -f "/tmp/.X11-unix/X${display#:}" "/tmp/.X${display#:}-lock"
-
-Xvfb "$display" -screen 0 "$screen" -nolisten tcp >/tmp/aiyolo-xvfb.log 2>&1 &
-sleep 1
-DISPLAY="$display" fluxbox >/tmp/aiyolo-fluxbox.log 2>&1 &
-DISPLAY="$display" x11vnc -display "$display" -forever -shared -nopw -rfbport "$vnc_port" >/tmp/aiyolo-x11vnc.log 2>&1 &
-
-wait -n
-`
-
-const cloudAgentOpenChromeScript = `#!/usr/bin/env bash
-set -euo pipefail
-
-display="${AIYOLO_DISPLAY:-:99}"
-remote_debug_port="${AIYOLO_CHROME_REMOTE_DEBUGGING_PORT:-9222}"
-if [[ $# -eq 0 ]]; then
-  set -- about:blank
-fi
-
-extra_flags=()
-if [[ -n "${AIYOLO_CHROME_EXTRA_FLAGS:-}" ]]; then
-  read -r -a extra_flags <<<"${AIYOLO_CHROME_EXTRA_FLAGS}"
-fi
-
-export DISPLAY="$display"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
-
-exec google-chrome-stable \
-  --no-sandbox \
-  --disable-dev-shm-usage \
-  --disable-gpu \
-  --no-first-run \
-  --no-default-browser-check \
-  --user-data-dir=/tmp/aiyolo-chrome-profile \
-  --remote-debugging-address=0.0.0.0 \
-  --remote-debugging-port="$remote_debug_port" \
-  "${extra_flags[@]}" \
-  "$@"
-`
-
-const cloudAgentStartDockerScript = `#!/usr/bin/env bash
-set -euo pipefail
-
-config_path=/etc/docker/daemon.json
-data_root="${AIYOLO_DOCKER_DATA_ROOT:-/var/lib/docker}"
-storage_driver="${AIYOLO_DOCKER_STORAGE_DRIVER:-vfs}"
-registry_mirror="${AIYOLO_DOCKER_REGISTRY_MIRROR:-}"
-dns_servers="${AIYOLO_DOCKER_DNS_SERVERS:-}"
-host="${AIYOLO_DOCKER_HOST:-unix:///var/run/docker.sock}"
-
-install -d -m 0755 /etc/docker "$data_root" /var/run
-
-CONFIG_PATH="$config_path" \
-REGISTRY_MIRROR="$registry_mirror" \
-DNS_SERVERS="$dns_servers" \
-STORAGE_DRIVER="$storage_driver" \
-python3 <<'PY'
-import json
-import os
-
-payload = {
-    "features": {"buildkit": True},
-    "iptables": True,
-    "storage-driver": os.environ["STORAGE_DRIVER"],
+func cloudAgentBuildRevision(options CloudAgentStartOptions, files map[string]string, assSHA256 string) string {
+	hash := sha256.New()
+	write := func(label string, value string) {
+		_, _ = hash.Write([]byte(label))
+		_, _ = hash.Write([]byte("\n"))
+		_, _ = hash.Write([]byte(value))
+		_, _ = hash.Write([]byte("\n"))
+	}
+	write("ubuntu_release", options.UbuntuRelease)
+	write("ubuntu_series", options.UbuntuSeries)
+	write("ubuntu_mirror", options.UbuntuMirror)
+	write("chrome_deb_url", options.ChromeDEBURL)
+	write("rootfs_url", options.RootFSURL)
+	write("rootfs_index_url", options.RootFSIndexURL)
+	write("ass_download_url", options.ASSDownloadURL)
+	write("ass_sha256", assSHA256)
+	keys := make([]string, 0, len(files))
+	for key := range files {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		write("file:"+key, files[key])
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
-registry_mirror = os.environ.get("REGISTRY_MIRROR", "").strip()
-if registry_mirror:
-    payload["registry-mirrors"] = [registry_mirror]
-
-dns_servers = [item.strip() for item in os.environ.get("DNS_SERVERS", "").split(",") if item.strip()]
-if dns_servers:
-    payload["dns"] = dns_servers
-
-with open(os.environ["CONFIG_PATH"], "w", encoding="utf-8") as handle:
-    json.dump(payload, handle, ensure_ascii=True, indent=2)
-    handle.write("\n")
-PY
-
-exec dockerd --host "$host" --data-root "$data_root" --exec-root /var/run/docker --pidfile /var/run/docker.pid
-`
-
-const cloudAgentStartServicesScript = `#!/usr/bin/env bash
-set -euo pipefail
-
-enable_display="${AIYOLO_CLOUD_AGENT_ENABLE_DISPLAY:-1}"
-enable_dockerd="${AIYOLO_CLOUD_AGENT_ENABLE_DOCKERD:-1}"
-auto_start_chrome="${AIYOLO_CLOUD_AGENT_AUTO_START_CHROME:-1}"
-chrome_url="${AIYOLO_CLOUD_AGENT_CHROME_URL:-about:blank}"
-display="${AIYOLO_DISPLAY:-:99}"
-
-declare -a pids=()
-
-/usr/local/bin/aiyolo-ass >/tmp/aiyolo-ass.log 2>&1 &
-pids+=("$!")
-
-if [[ "$enable_dockerd" == "1" ]]; then
-  /usr/local/bin/aiyolo-cloud-agent-start-docker >/tmp/aiyolo-dockerd.log 2>&1 &
-  pids+=("$!")
-fi
-
-if [[ "$enable_display" == "1" ]]; then
-  /usr/local/bin/aiyolo-cloud-agent-start-display >/tmp/aiyolo-display.log 2>&1 &
-  pids+=("$!")
-fi
-
-if [[ "$enable_display" == "1" && "$auto_start_chrome" == "1" ]]; then
-  for _ in $(seq 1 30); do
-    if nc -z 127.0.0.1 "${AIYOLO_VNC_PORT:-5900}" >/dev/null 2>&1 || [[ -S "/tmp/.X11-unix/X${display#:}" ]]; then
-      break
-    fi
-    sleep 1
-  done
-  /usr/local/bin/aiyolo-cloud-agent-open-chrome "$chrome_url" >/tmp/aiyolo-chrome.log 2>&1 &
-fi
-
-if [[ ${#pids[@]} -eq 0 ]]; then
-  exec sleep infinity
-fi
-
-cleanup() {
-  local pid
-  for pid in "${pids[@]}"; do
-    kill "$pid" >/dev/null 2>&1 || true
-  done
-}
-
-trap cleanup EXIT INT TERM
-
-wait -n "${pids[@]}"
-`

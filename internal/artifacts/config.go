@@ -1,7 +1,6 @@
 package artifacts
 
 import (
-	"fmt"
 	"net/url"
 	"path"
 	"strings"
@@ -10,6 +9,7 @@ import (
 type Config struct {
 	PublicBaseURL string
 	ProxyBasePath string
+	PublicViaProxy bool
 	S3            S3Config
 }
 
@@ -66,7 +66,33 @@ func (cfg Config) ObjectKey(objectKey string) string {
 	return cfg.S3.ObjectKey(cleaned)
 }
 
+func (cfg Config) RelativeObjectKey(objectKey string) string {
+	cleaned := NormalizeObjectKey(objectKey)
+	if cleaned == "" {
+		return ""
+	}
+	prefix := NormalizeObjectKey(cfg.S3.Prefix)
+	if prefix == "" {
+		return cleaned
+	}
+	if cleaned == prefix {
+		return ""
+	}
+	if strings.HasPrefix(cleaned, prefix+"/") {
+		return strings.TrimPrefix(cleaned, prefix+"/")
+	}
+	return cleaned
+}
+
 func (cfg Config) PublicObjectURL(objectKey string) string {
+	if cfg.PublicViaProxy {
+		base := normalizeURLLike(cfg.PublicBaseURL)
+		key := cfg.ProxyObjectURL(objectKey)
+		if base == "" || key == "" {
+			return ""
+		}
+		return base + key
+	}
 	base := cfg.PublicBase()
 	key := cfg.ObjectKey(objectKey)
 	if base == "" || key == "" {
@@ -76,23 +102,11 @@ func (cfg Config) PublicObjectURL(objectKey string) string {
 }
 
 func (cfg Config) ProxyObjectURL(objectKey string) string {
-	key := NormalizeObjectKey(objectKey)
+	key := cfg.RelativeObjectKey(objectKey)
 	if key == "" {
 		return ""
 	}
 	return path.Join(cfg.NormalizedProxyBasePath(), key)
-}
-
-func (cfg Config) ResolveProxyTarget(requestPath string) (string, error) {
-	key := cfg.ObjectKey(requestPath)
-	if key == "" {
-		return "", fmt.Errorf("artifact path is required")
-	}
-	base := cfg.PublicBase()
-	if base == "" {
-		return "", fmt.Errorf("artifact public base URL is not configured")
-	}
-	return base + "/" + key, nil
 }
 
 func (cfg S3Config) ActiveEndpoint() string {

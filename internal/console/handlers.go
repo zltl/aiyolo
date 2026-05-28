@@ -51,6 +51,7 @@ type Handler struct {
 	cloudAgentRuns               *consoleCloudAgentRunRegistry
 	newChatAttachmentPublisher   func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error)
 	newChatAttachmentReader      func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error)
+	newChatAttachmentCatalogReader func(cfg artifacts.Config) (artifacts.CatalogReader, error)
 	probeWorker                  func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (workerops.ProbeResult, error)
 	buildWorkerBootstrap         func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan
 	executeWorkerBootstrap       func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error)
@@ -78,6 +79,8 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 		return artifacts.NewPublisher(cfg)
 	}, newChatAttachmentReader: func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error) {
 		return artifacts.NewObjectReader(cfg)
+	}, newChatAttachmentCatalogReader: func(cfg artifacts.Config) (artifacts.CatalogReader, error) {
+		return artifacts.NewCatalogReader(cfg)
 	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentCommand: workerops.RunCloudAgentCommand, listCloudAgentWorkspaceTree: workerops.ListCloudAgentWorkspaceTree, readCloudAgentWorkspaceFile: workerops.ReadCloudAgentWorkspaceFile, writeCloudAgentWorkspaceFile: workerops.WriteCloudAgentWorkspaceFile, runCloudAgentChat: runConsoleCloudAgentChat}
 }
 
@@ -100,6 +103,7 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Get("/chat/shell/ready", handler.chatShellReady)
 		protected.Get("/chat/shell", handler.chatShellPage)
 		protected.Handle("/chat/shell/ws", http.HandlerFunc(handler.chatShellSocket))
+		protected.Get("/chat/attachments/tree", handler.chatAttachmentTree)
 		protected.Get("/chat/workspace/tree", handler.chatWorkspaceTree)
 		protected.Get("/chat/workspace/file", handler.chatWorkspaceFile)
 		protected.Post("/chat/workspace/file", handler.saveChatWorkspaceFile)

@@ -1,23 +1,31 @@
 package artifacts
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
-func TestProxyResolvesPrefixedObjectKey(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/releases/windows/aiyolo.exe" {
-			t.Fatalf("path=%q", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write([]byte("binary"))
-	}))
-	defer upstream.Close()
-
-	proxy := NewProxy(Config{PublicBaseURL: upstream.URL, ProxyBasePath: "/artifacts", S3: S3Config{Prefix: "releases"}})
+func TestProxyStreamsObjectThroughGatewayRelay(t *testing.T) {
+	updatedAt := time.Date(2026, time.May, 28, 12, 0, 0, 0, time.UTC)
+	requestedKey := ""
+	proxy := &Proxy{
+		cfg: Config{ProxyBasePath: "/artifacts"},
+		openObject: func(_ context.Context, objectKey string) (ObjectStream, error) {
+			requestedKey = objectKey
+			return ObjectStream{
+				Body:          io.NopCloser(strings.NewReader("binary")),
+				ContentType:   "application/octet-stream",
+				ContentLength: 6,
+				ETag:          "abc123",
+				LastModified:  updatedAt,
+			}, nil
+		},
+	}
 	request := httptest.NewRequest(http.MethodGet, "/artifacts/windows/aiyolo.exe", nil)
 	recorder := httptest.NewRecorder()
 
@@ -27,6 +35,15 @@ func TestProxyResolvesPrefixedObjectKey(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	if requestedKey != "windows/aiyolo.exe" {
+		t.Fatalf("requestedKey=%q", requestedKey)
+	}
+	if response.Header.Get("ETag") != "\"abc123\"" {
+		t.Fatalf("etag=%q", response.Header.Get("ETag"))
+	}
+	if response.Header.Get("Last-Modified") != updatedAt.Format(http.TimeFormat) {
+		t.Fatalf("last-modified=%q", response.Header.Get("Last-Modified"))
 	}
 	body, _ := io.ReadAll(response.Body)
 	if string(body) != "binary" {
@@ -41,6 +58,18 @@ func TestPublicObjectURLUsesNormalizedDomains(t *testing.T) {
 	}
 }
 
+func TestPublicObjectURLUsesProxyPathWhenEnabled(t *testing.T) {
+	cfg := Config{
+		PublicBaseURL:  "https://aiyolo.quant67.com",
+		ProxyBasePath:  "/artifacts",
+		PublicViaProxy: true,
+		S3:            S3Config{Prefix: "releases"},
+	}
+	if got := cfg.PublicObjectURL("linux-amd64/aiyolo-ass"); got != "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass" {
+		t.Fatalf("public url=%q", got)
+	}
+}
+
 func TestObjectKeyDoesNotDuplicateConfiguredPrefix(t *testing.T) {
 	cfg := Config{PublicBaseURL: "https://files.example.com", S3: S3Config{Prefix: "chat"}}
 	if got := cfg.ObjectKey("chat/admin-example.com/2026/05/23/upload.png"); got != "chat/admin-example.com/2026/05/23/upload.png" {
@@ -48,5 +77,12 @@ func TestObjectKeyDoesNotDuplicateConfiguredPrefix(t *testing.T) {
 	}
 	if got := cfg.PublicObjectURL("chat/admin-example.com/2026/05/23/upload.png"); got != "https://files.example.com/chat/admin-example.com/2026/05/23/upload.png" {
 		t.Fatalf("public url=%q", got)
+	}
+}
+
+func TestProxyObjectURLDoesNotDuplicateConfiguredPrefix(t *testing.T) {
+	cfg := Config{ProxyBasePath: "/console/chat/attachments/files", S3: S3Config{Prefix: "chat"}}
+	if got := cfg.ProxyObjectURL("chat/admin-example.com/2026/05/23/upload.png"); got != "/console/chat/attachments/files/admin-example.com/2026/05/23/upload.png" {
+		t.Fatalf("proxy url=%q", got)
 	}
 }

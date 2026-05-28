@@ -9,7 +9,8 @@
   const currentRoot = () => document.getElementById("chat-content");
   const currentForm = () => currentRoot()?.querySelector(".chat-shell[data-chat-stream-url]") || null;
   const layoutPreferenceKey = "aiyolo.console.chat.workspaceLayout";
-  const sidebarPreferenceKey = "aiyolo.console.chat.sidebarCollapsed";
+  const sidebarPreferenceKey = "aiyolo.console.chat.sidebarCollapsed.v2";
+  const imagePreviewBackgroundPreferenceKey = "aiyolo.console.chat.imagePreviewBackground";
   const sidebarDefaultWidth = 288;
   const sidebarMinWidth = 220;
   const editorDefaultWidth = 520;
@@ -20,11 +21,21 @@
 
   let layoutState = readLayoutPreference();
   let workspaceSessionKey = "";
+  let attachmentTreeRootLabel = "";
+  let attachmentTreeCache = new Map();
+  let attachmentOpenPaths = new Set([""]);
+  let attachmentLoadingPaths = new Set();
+  let attachmentActiveFilePath = "";
+  let attachmentTreeStatusMessage = "";
+  let attachmentTreeStatusError = false;
   let workspaceRootPath = "";
   let workspaceTreeCache = new Map();
   let workspaceOpenPaths = new Set([""]);
   let workspaceLoadingPaths = new Set();
   let workspaceActiveFilePath = "";
+  let workspaceEditorKind = "text";
+  let workspaceEditorMediaType = "";
+  let workspaceEditorPreviewURL = "";
   let workspaceEditorContent = "";
   let workspaceEditorSavedContent = "";
   let workspaceEditorSize = 0;
@@ -33,6 +44,7 @@
   let workspaceEditorStatusError = false;
   let workspaceTreeStatusMessage = "";
   let workspaceTreeStatusError = false;
+  let workspaceImagePreviewBackground = readImagePreviewBackgroundPreference();
   let paneResizeState = null;
 
   function safeParseJSON(raw, fallback) {
@@ -72,6 +84,14 @@
     return String(value || "").trim().startsWith("cloud-agent:");
   }
 
+  function attachmentTreeURL(form) {
+    return String(form?.dataset.chatAttachmentTreeUrl || "").trim();
+  }
+
+  function attachmentTreeEnabled(form) {
+    return String(form?.dataset.chatAttachmentTreeEnabled || "").trim() === "true";
+  }
+
   function workspaceTreeURL(form) {
     return String(form?.dataset.chatWorkspaceTreeUrl || "").trim();
   }
@@ -90,6 +110,22 @@
 
   function sidebarPanels(form) {
     return Array.from(form?.querySelectorAll("[data-chat-sidebar-panel]") || []).filter((node) => node instanceof HTMLElement);
+  }
+
+  function attachmentTreeHost(form) {
+    return form?.querySelector("[data-chat-attachment-tree]") || null;
+  }
+
+  function attachmentRootCopyNode(form) {
+    return form?.querySelector("[data-chat-attachment-root-copy]") || null;
+  }
+
+  function attachmentStatusNode(form) {
+    return form?.querySelector("[data-chat-attachment-status]") || null;
+  }
+
+  function workspaceSection(form) {
+    return form?.querySelector("[data-chat-workspace-section]") || null;
   }
 
   function workspaceTreeHost(form) {
@@ -120,16 +156,16 @@
     return form?.querySelector("[data-chat-editor-status]") || null;
   }
 
-  function workspaceEditorStateNode(form) {
-    return form?.querySelector("[data-chat-editor-state]") || null;
+  function workspaceEditorPreviewHost(form) {
+    return form?.querySelector("[data-chat-editor-preview]") || null;
   }
 
-  function workspaceEditorLanguageNode(form) {
-    return form?.querySelector("[data-chat-editor-language]") || null;
+  function workspaceEditorPreviewImage(form) {
+    return form?.querySelector("[data-chat-editor-preview-image]") || null;
   }
 
-  function workspaceEditorBytesNode(form) {
-    return form?.querySelector("[data-chat-editor-bytes]") || null;
+  function workspaceEditorPreviewBackgroundButtons(form) {
+    return Array.from(form?.querySelectorAll("[data-chat-action=\"set-image-preview-background\"]") || []).filter((node) => node instanceof HTMLButtonElement);
   }
 
   function workspaceEditorDirtyNode(form) {
@@ -166,6 +202,36 @@
     return null;
   }
 
+  function normalizeImagePreviewBackground(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized === "light" || normalized === "dark") {
+      return normalized;
+    }
+    return "grid";
+  }
+
+  function readImagePreviewBackgroundPreference() {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return "grid";
+    }
+    try {
+      return normalizeImagePreviewBackground(window.localStorage.getItem(imagePreviewBackgroundPreferenceKey));
+    } catch (_error) {
+      return "grid";
+    }
+  }
+
+  function writeImagePreviewBackgroundPreference() {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(imagePreviewBackgroundPreferenceKey, workspaceImagePreviewBackground);
+    } catch (_error) {
+      // Ignore storage write failures and keep the in-page selection.
+    }
+  }
+
   function normalizeSidebarWidth(value) {
     const numeric = Number.parseInt(String(value || ""), 10);
     const candidate = Number.isFinite(numeric) ? numeric : sidebarDefaultWidth;
@@ -178,6 +244,22 @@
     const candidate = Number.isFinite(numeric) ? numeric : editorDefaultWidth;
     const viewportCap = Math.max(editorMinWidth, Math.floor(window.innerWidth * 0.56));
     return Math.min(viewportCap, Math.max(editorMinWidth, candidate));
+  }
+
+  function applyImagePreviewBackground(form, background, persist = false) {
+    const nextBackground = normalizeImagePreviewBackground(background);
+    workspaceImagePreviewBackground = nextBackground;
+    if (form instanceof HTMLFormElement) {
+      form.dataset.chatImagePreviewBackground = nextBackground;
+      workspaceEditorPreviewBackgroundButtons(form).forEach((button) => {
+        const active = String(button.dataset.chatPreviewBackground || "").trim() === nextBackground;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+    }
+    if (persist) {
+      writeImagePreviewBackgroundPreference();
+    }
   }
 
   function readPixelSize(value, fallback = 0) {
@@ -232,14 +314,15 @@
   function reservedWorkbenchWidth(form) {
     const activitybarWidth = desktopActivitybarWidth(form);
     const sidebarGap = desktopSidebarGap(form);
+    const editorVisible = workspaceEditorVisible();
     let total = activitybarWidth;
     if (!layoutState.sidebarCollapsed) {
       total += sidebarGap + layoutState.sidebarWidth;
-      if (layoutState.editorOpen || layoutState.chatOpen) {
+      if (editorVisible || layoutState.chatOpen) {
         total += desktopDividerWidth(form, "sidebar");
       }
     }
-    if (layoutState.editorOpen) {
+    if (editorVisible) {
       total += layoutState.editorWidth;
       if (layoutState.chatOpen) {
         total += desktopDividerWidth(form, "editor");
@@ -252,6 +335,7 @@
     if (!(form instanceof HTMLFormElement) || !layoutState.chatOpen || window.innerWidth <= workspaceDesktopBreakpoint) {
       return;
     }
+    const editorVisible = workspaceEditorVisible();
     const availableWidth = desktopWorkbenchWidth(form);
     if (availableWidth <= 0) {
       return;
@@ -262,7 +346,7 @@
       return;
     }
 
-    if (layoutState.editorOpen) {
+    if (editorVisible) {
       const nextWidth = Math.max(editorMinWidth, layoutState.editorWidth - overflow);
       overflow -= layoutState.editorWidth - nextWidth;
       layoutState.editorWidth = nextWidth;
@@ -274,7 +358,7 @@
       layoutState.sidebarWidth = nextWidth;
     }
 
-    if (overflow > 0 && layoutState.editorOpen) {
+    if (overflow > 0 && editorVisible) {
       overflow -= layoutState.editorWidth + desktopDividerWidth(form, "editor");
       layoutState.editorOpen = false;
       layoutState.editorWidth = normalizeEditorWidth(layoutState.editorWidth);
@@ -289,7 +373,7 @@
     const parsed = raw && typeof raw === "object" ? raw : {};
     const sidebarPreference = readSidebarPreference();
     return {
-      sidebarCollapsed: sidebarPreference == null ? Boolean(parsed.sidebarCollapsed) : sidebarPreference,
+      sidebarCollapsed: sidebarPreference == null ? true : sidebarPreference,
       editorOpen: ownProperty.call(parsed, "editorOpen") ? parsed.editorOpen === true : false,
       chatOpen: !ownProperty.call(parsed, "chatOpen") || parsed.chatOpen !== false,
       sidebarView: parsed.sidebarView === "sessions" ? "sessions" : "files",
@@ -363,37 +447,12 @@
     };
   }
 
-  function workspaceLanguageLabel(path) {
-    const fileName = String(path || "").split("/").pop() || "";
-    const dot = fileName.lastIndexOf(".");
-    const ext = dot >= 0 ? fileName.slice(dot + 1).toLowerCase() : "";
-    switch (ext) {
-      case "go":
-        return "Go";
-      case "js":
-        return "JavaScript";
-      case "ts":
-        return "TypeScript";
-      case "json":
-        return "JSON";
-      case "md":
-        return "Markdown";
-      case "yaml":
-      case "yml":
-        return "YAML";
-      case "html":
-        return "HTML";
-      case "css":
-        return "CSS";
-      case "sh":
-        return "Shell";
-      default:
-        return t("纯文本", "Plain text");
-    }
+  function workspaceEditorVisible() {
+    return layoutState.editorOpen && workspaceActiveFilePath !== "";
   }
 
   function ensureVisiblePane() {
-    if (layoutState.sidebarCollapsed && !layoutState.editorOpen && !layoutState.chatOpen) {
+    if (layoutState.sidebarCollapsed && !workspaceEditorVisible() && !layoutState.chatOpen) {
       layoutState.chatOpen = true;
     }
   }
@@ -406,18 +465,19 @@
     layoutState.editorWidth = normalizeEditorWidth(layoutState.editorWidth);
     ensureVisiblePane();
     rebalanceDesktopLayout(form);
+    const editorVisible = workspaceEditorVisible();
     form.classList.toggle("is-sidebar-collapsed", layoutState.sidebarCollapsed);
-    form.classList.toggle("is-editor-collapsed", !layoutState.editorOpen);
+    form.classList.toggle("is-editor-collapsed", !editorVisible);
     form.classList.toggle("is-chat-collapsed", !layoutState.chatOpen);
     form.style.setProperty("--chat-sidebar-width", layoutState.sidebarCollapsed ? "0px" : `${layoutState.sidebarWidth}px`);
-    form.style.setProperty("--chat-editor-width", layoutState.editorOpen ? `${layoutState.editorWidth}px` : "0px");
+    form.style.setProperty("--chat-editor-width", editorVisible ? `${layoutState.editorWidth}px` : "0px");
     const sidebarDivider = form.querySelector("[data-chat-pane-divider=\"sidebar\"]");
     const editorDivider = form.querySelector("[data-chat-pane-divider=\"editor\"]");
     if (sidebarDivider instanceof HTMLElement) {
-      sidebarDivider.hidden = layoutState.sidebarCollapsed || (!layoutState.editorOpen && !layoutState.chatOpen);
+      sidebarDivider.hidden = layoutState.sidebarCollapsed || (!editorVisible && !layoutState.chatOpen);
     }
     if (editorDivider instanceof HTMLElement) {
-      editorDivider.hidden = !layoutState.editorOpen || !layoutState.chatOpen;
+      editorDivider.hidden = !editorVisible || !layoutState.chatOpen;
     }
     paneToggleButtons(form).forEach((button) => {
       const pane = String(button.dataset.chatPane || "").trim();
@@ -425,7 +485,7 @@
       if (pane === "sidebar") {
         active = !layoutState.sidebarCollapsed;
       } else if (pane === "editor") {
-        active = layoutState.editorOpen;
+        active = editorVisible;
       } else if (pane === "chat") {
         active = layoutState.chatOpen;
       }
@@ -458,11 +518,21 @@
 
   function resetWorkspaceState(nextKey) {
     workspaceSessionKey = nextKey;
+    attachmentTreeRootLabel = "";
+    attachmentTreeCache = new Map();
+    attachmentOpenPaths = new Set([""]);
+    attachmentLoadingPaths = new Set();
+    attachmentActiveFilePath = "";
+    attachmentTreeStatusMessage = "";
+    attachmentTreeStatusError = false;
     workspaceRootPath = "";
     workspaceTreeCache = new Map();
     workspaceOpenPaths = new Set([""]);
     workspaceLoadingPaths = new Set();
     workspaceActiveFilePath = "";
+    workspaceEditorKind = "text";
+    workspaceEditorMediaType = "";
+    workspaceEditorPreviewURL = "";
     workspaceEditorContent = "";
     workspaceEditorSavedContent = "";
     workspaceEditorSize = 0;
@@ -478,13 +548,90 @@
     workspaceTreeStatusError = Boolean(isError);
   }
 
+  function setAttachmentTreeStatus(message, isError = false) {
+    attachmentTreeStatusMessage = String(message || "").trim();
+    attachmentTreeStatusError = Boolean(isError);
+  }
+
   function setWorkspaceEditorStatus(message, isError = false) {
     workspaceEditorStatusMessage = String(message || "").trim();
     workspaceEditorStatusError = Boolean(isError);
   }
 
   function editorIsDirty() {
-    return workspaceActiveFilePath !== "" && workspaceEditorContent !== workspaceEditorSavedContent;
+    return workspaceActiveFilePath !== "" && workspaceEditorKind !== "image" && workspaceEditorContent !== workspaceEditorSavedContent;
+  }
+
+  function workspaceEditorIsImage() {
+    return workspaceActiveFilePath !== "" && workspaceEditorKind === "image";
+  }
+
+  function attachmentImageMediaType(path, url) {
+    const candidates = [path, url];
+    for (const candidate of candidates) {
+      const value = String(candidate || "").trim();
+      if (value === "") {
+        continue;
+      }
+      const dataMatch = value.match(/^data:(image\/[^;,]+)/i);
+      if (dataMatch) {
+        return String(dataMatch[1] || "").trim().toLowerCase();
+      }
+      const clean = value.split("#")[0].split("?")[0];
+      const extension = clean.includes(".") ? clean.slice(clean.lastIndexOf(".") + 1).toLowerCase() : "";
+      switch (extension) {
+        case "png":
+          return "image/png";
+        case "jpg":
+        case "jpeg":
+          return "image/jpeg";
+        case "gif":
+          return "image/gif";
+        case "webp":
+          return "image/webp";
+        case "bmp":
+          return "image/bmp";
+        case "svg":
+          return "image/svg+xml";
+        case "avif":
+          return "image/avif";
+        default:
+          break;
+      }
+    }
+    return "";
+  }
+
+  function syncWorkspaceEditorSurface(input, previewHost, previewImage, options = {}) {
+    const mode = String(options.mode || "text").trim() === "image" ? "image" : "text";
+    if (previewHost instanceof HTMLElement) {
+      previewHost.hidden = mode !== "image";
+    }
+    if (previewImage instanceof HTMLImageElement) {
+      const nextSrc = mode === "image" ? String(options.src || "").trim() : "";
+      if (nextSrc === "") {
+        previewImage.removeAttribute("src");
+      } else if (previewImage.getAttribute("src") !== nextSrc) {
+        previewImage.setAttribute("src", nextSrc);
+      }
+      previewImage.alt = mode === "image" ? String(options.alt || "").trim() : "";
+    }
+    if (!(input instanceof HTMLTextAreaElement)) {
+      return;
+    }
+    input.hidden = mode === "image";
+    if (mode === "image") {
+      if (input.value !== "") {
+        input.value = "";
+      }
+      input.disabled = true;
+      return;
+    }
+    const nextValue = String(options.value || "");
+    if (input.value !== nextValue) {
+      input.value = nextValue;
+    }
+    input.disabled = Boolean(options.disabled);
   }
 
   function normalizeWorkspaceEntry(entry) {
@@ -501,6 +648,8 @@
       name: name || pathValue.split("/").pop() || t("未命名", "Untitled"),
       path: pathValue,
       type,
+      url: String(entry.url || "").trim(),
+      modifiedAt: String(entry.modifiedAt || "").trim(),
       size: Number.isFinite(Number(entry.size)) ? Number(entry.size) : 0,
       hasChildren: Boolean(entry.hasChildren),
     };
@@ -540,6 +689,129 @@
         workspaceOpenPaths.delete(value);
       }
     });
+  }
+
+  function expandAttachmentAncestors(path) {
+    const segments = String(path || "").split("/").filter(Boolean);
+    if (segments.length <= 1) {
+      attachmentOpenPaths.add("");
+      return;
+    }
+    let current = "";
+    attachmentOpenPaths.add("");
+    segments.slice(0, -1).forEach((segment) => {
+      current = current ? `${current}/${segment}` : segment;
+      attachmentOpenPaths.add(current);
+    });
+  }
+
+  function collapseAttachmentDescendants(path) {
+    Array.from(attachmentOpenPaths).forEach((value) => {
+      if (value !== path && value.startsWith(`${path}/`)) {
+        attachmentOpenPaths.delete(value);
+      }
+    });
+  }
+
+  function renderAttachmentEntries(container, entries, depth) {
+    entries.forEach((entry) => {
+      const item = document.createElement("div");
+      item.className = "chat-workspace-item";
+
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "chat-workspace-row";
+      row.style.setProperty("--chat-workspace-depth", String(depth));
+      row.dataset.chatAction = entry.type === "directory" ? "toggle-attachment-directory" : "open-attachment-file";
+      row.dataset.chatAttachmentPath = entry.path;
+      row.dataset.chatWorkspaceType = entry.type;
+      if (entry.url) {
+        row.dataset.chatAttachmentUrl = entry.url;
+      }
+      row.classList.toggle("is-active", attachmentActiveFilePath === entry.path);
+
+      const caret = document.createElement("span");
+      caret.className = "chat-workspace-row-caret";
+      caret.textContent = entry.type === "directory" ? (attachmentOpenPaths.has(entry.path) ? "v" : ">") : "";
+
+      const kind = document.createElement("span");
+      kind.className = "chat-workspace-row-kind";
+      kind.textContent = entry.type === "directory" ? "DIR" : "TXT";
+
+      const name = document.createElement("span");
+      name.className = "chat-workspace-row-name";
+      name.textContent = entry.name;
+
+      const meta = document.createElement("span");
+      meta.className = "chat-workspace-row-meta";
+      meta.textContent = entryMeta(entry);
+
+      row.appendChild(caret);
+      row.appendChild(kind);
+      row.appendChild(name);
+      row.appendChild(meta);
+      item.appendChild(row);
+
+      if (entry.type === "directory" && attachmentOpenPaths.has(entry.path)) {
+        const children = document.createElement("div");
+        children.className = "chat-workspace-children";
+        const childEntries = attachmentTreeCache.get(entry.path);
+        if (Array.isArray(childEntries)) {
+          if (childEntries.length === 0) {
+            renderWorkspacePlaceholder(children, t("这个目录当前为空。", "This directory is empty."));
+          } else {
+            renderAttachmentEntries(children, childEntries, depth + 1);
+          }
+        } else if (attachmentLoadingPaths.has(entry.path)) {
+          renderWorkspacePlaceholder(children, t("正在加载目录…", "Loading directory..."));
+        } else {
+          renderWorkspacePlaceholder(children, t("展开目录后将在这里显示子项。", "Expand the folder to show its children."));
+        }
+        item.appendChild(children);
+      }
+
+      container.appendChild(item);
+    });
+  }
+
+  function renderAttachmentTree(form) {
+    const host = attachmentTreeHost(form);
+    const rootCopy = attachmentRootCopyNode(form);
+    const status = attachmentStatusNode(form);
+    if (!(host instanceof HTMLElement) || !(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const enabled = attachmentTreeEnabled(form);
+    if (rootCopy instanceof HTMLElement) {
+      rootCopy.textContent = attachmentTreeRootLabel || t("等待加载附件目录", "Waiting for the attachment tree");
+    }
+    if (status instanceof HTMLElement) {
+      const fallback = enabled
+        ? (attachmentTreeRootLabel === "" ? t("对象存储目录加载后，这里会显示 chat 附件 bucket 的内容。", "The chat attachment bucket will appear here after the directory tree loads.") : t("对象存储目录已连接。", "Chat attachment storage connected."))
+        : t("当前没有配置可浏览的 chat 附件目录。", "Chat attachment browsing is not configured.");
+      status.textContent = attachmentTreeStatusMessage || fallback;
+      status.classList.toggle("is-error", attachmentTreeStatusError);
+    }
+    if (!enabled) {
+      renderWorkspacePlaceholder(host, t("当前没有配置可浏览 chat 附件目录的对象存储。", "Chat attachment storage is not configured for directory browsing."));
+      return;
+    }
+    const rootEntries = attachmentTreeCache.get("");
+    if (!Array.isArray(rootEntries)) {
+      if (attachmentLoadingPaths.has("")) {
+        renderWorkspacePlaceholder(host, t("正在加载附件目录…", "Loading attachment tree..."));
+      } else {
+        renderWorkspacePlaceholder(host, t("打开文件资源管理器后，这里会显示 chat 附件 bucket 的目录树。", "Open the file explorer to load the chat attachment bucket tree here."));
+      }
+      return;
+    }
+    if (rootEntries.length === 0) {
+      renderWorkspacePlaceholder(host, t("当前附件目录为空。", "The current attachment directory is empty."));
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    renderAttachmentEntries(fragment, rootEntries, 0);
+    host.replaceChildren(fragment);
   }
 
   function renderWorkspaceEntries(container, entries, depth) {
@@ -608,7 +880,11 @@
       return;
     }
     const environment = currentSelectedEnvironment(form);
+    const section = workspaceSection(form);
     const sessionID = readClientSessionID(form);
+    if (section instanceof HTMLElement) {
+      section.hidden = !isCloudAgentEnvironment(environment);
+    }
     if (rootCopy instanceof HTMLElement) {
       rootCopy.textContent = isCloudAgentEnvironment(environment)
         ? (workspaceRootPath || t("等待 Cloud Agent 工作区", "Waiting for the Cloud Agent workspace"))
@@ -652,16 +928,16 @@
     const tabNameNode = workspaceEditorTabNameNode(form);
     const directoryNode = workspaceEditorDirectoryNode(form);
     const statusNode = workspaceEditorStatusNode(form);
-    const stateNode = workspaceEditorStateNode(form);
-    const languageNode = workspaceEditorLanguageNode(form);
-    const bytesNode = workspaceEditorBytesNode(form);
+    const previewHost = workspaceEditorPreviewHost(form);
+    const previewImage = workspaceEditorPreviewImage(form);
     const dirtyNode = workspaceEditorDirtyNode(form);
     const input = workspaceEditorInput(form);
     const saveButton = workspaceSaveButton(form);
     if (!(form instanceof HTMLFormElement) || !(pathNode instanceof HTMLElement) || !(statusNode instanceof HTMLElement) || !(input instanceof HTMLTextAreaElement)) {
       return;
     }
-    const setEditorChrome = (name, directory, state) => {
+    applyImagePreviewBackground(form, workspaceImagePreviewBackground, false);
+    const setEditorChrome = (name, directory) => {
       pathNode.textContent = name;
       if (tabNameNode instanceof HTMLElement) {
         tabNameNode.textContent = name;
@@ -669,49 +945,38 @@
       if (directoryNode instanceof HTMLElement) {
         directoryNode.textContent = directory;
       }
-      if (stateNode instanceof HTMLElement) {
-        stateNode.textContent = state;
-      }
-      if (languageNode instanceof HTMLElement) {
-        languageNode.textContent = workspaceActiveFilePath === "" ? t("纯文本", "Plain text") : workspaceLanguageLabel(workspaceActiveFilePath);
-      }
-      if (bytesNode instanceof HTMLElement) {
-        bytesNode.textContent = formatBytes(workspaceEditorSize);
-      }
       if (dirtyNode instanceof HTMLElement) {
         dirtyNode.hidden = !editorIsDirty();
       }
     };
+    const setEditorMode = (mode) => {
+      form.dataset.chatEditorMode = mode;
+    };
     const environment = currentSelectedEnvironment(form);
-    if (!isCloudAgentEnvironment(environment)) {
+    const imagePreviewActive = workspaceEditorIsImage() && workspaceEditorPreviewURL !== "";
+    if (!isCloudAgentEnvironment(environment) && !imagePreviewActive) {
+      setEditorMode("empty");
       setEditorChrome(
         t("尚未打开文件", "No file open"),
-        t("切换到 Cloud Agent 环境后，可在这里编辑容器里的文本文件。", "Switch to a Cloud Agent environment to edit container files here."),
-        t("本地环境", "Local environment")
+        t("切换到 Cloud Agent 环境后，可在这里编辑文本或预览容器里的图片。", "Switch to a Cloud Agent environment to edit text or preview container images here.")
       );
-      statusNode.textContent = t("切换到 Cloud Agent 环境后，可在这里编辑容器里的文本文件。", "Switch to a Cloud Agent environment to edit container files here.");
+      statusNode.textContent = t("切换到 Cloud Agent 环境后，可在这里编辑文本或预览容器里的图片。", "Switch to a Cloud Agent environment to edit text or preview container images here.");
       statusNode.classList.remove("is-error");
-      if (input.value !== "") {
-        input.value = "";
-      }
-      input.disabled = true;
+      syncWorkspaceEditorSurface(input, previewHost, previewImage, { mode: "text", value: "", disabled: true });
       if (saveButton instanceof HTMLButtonElement) {
         saveButton.disabled = true;
       }
       return;
     }
     if (workspaceActiveFilePath === "") {
+      setEditorMode("empty");
       setEditorChrome(
         t("尚未打开文件", "No file open"),
-        t("从左侧目录树选择一个文本文件开始编辑。", "Choose a text file from the left tree to start editing."),
-        t("未选择文件", "No file selected")
+        t("从左侧目录树选择一个文件开始浏览。", "Choose a file from the left tree to start browsing.")
       );
-      statusNode.textContent = t("从左侧目录树选择一个文本文件开始编辑。", "Choose a text file from the left tree to start editing.");
+      statusNode.textContent = t("从左侧目录树选择一个文件开始浏览。", "Choose a file from the left tree to start browsing.");
       statusNode.classList.remove("is-error");
-      if (input.value !== "") {
-        input.value = "";
-      }
-      input.disabled = true;
+      syncWorkspaceEditorSurface(input, previewHost, previewImage, { mode: "text", value: "", disabled: true });
       if (saveButton instanceof HTMLButtonElement) {
         saveButton.disabled = true;
       }
@@ -719,15 +984,14 @@
     }
     const pathInfo = workspacePathParts(workspaceActiveFilePath);
     const dirty = editorIsDirty();
-    if (input.value !== workspaceEditorContent) {
-      input.value = workspaceEditorContent;
-    }
-    input.disabled = workspaceEditorBusy !== "";
+    setEditorMode(imagePreviewActive ? "image" : "text");
+    syncWorkspaceEditorSurface(input, previewHost, previewImage, imagePreviewActive
+      ? { mode: "image", src: workspaceEditorPreviewURL, alt: pathInfo.name }
+      : { mode: "text", value: workspaceEditorContent, disabled: workspaceEditorBusy !== "" });
     if (workspaceEditorBusy !== "") {
       setEditorChrome(
         pathInfo.name,
-        pathInfo.directory,
-        workspaceEditorBusy === "save" ? t("正在保存", "Saving") : t("正在打开", "Opening")
+        pathInfo.directory
       );
       statusNode.textContent = workspaceEditorBusy === "save"
         ? t("正在保存文件…", "Saving file...")
@@ -736,16 +1000,28 @@
     } else if (workspaceEditorStatusMessage !== "") {
       setEditorChrome(
         pathInfo.name,
-        pathInfo.directory,
-        workspaceEditorStatusError ? t("需要处理", "Needs attention") : (dirty ? t("未保存更改", "Unsaved changes") : t("已同步", "Synced"))
+        pathInfo.directory
       );
       statusNode.textContent = workspaceEditorSize > 0 ? `${workspaceEditorStatusMessage} · ${formatBytes(workspaceEditorSize)}` : workspaceEditorStatusMessage;
       statusNode.classList.toggle("is-error", workspaceEditorStatusError);
+    } else if (workspaceEditorIsImage()) {
+      const statusParts = [t("图片预览", "Image preview")];
+      if (workspaceEditorMediaType !== "") {
+        statusParts.push(workspaceEditorMediaType);
+      }
+      if (workspaceEditorSize > 0) {
+        statusParts.push(formatBytes(workspaceEditorSize));
+      }
+      setEditorChrome(
+        pathInfo.name,
+        pathInfo.directory
+      );
+      statusNode.textContent = statusParts.join(" · ");
+      statusNode.classList.remove("is-error");
     } else {
       setEditorChrome(
         pathInfo.name,
-        pathInfo.directory,
-        dirty ? t("未保存更改", "Unsaved changes") : t("已同步", "Synced")
+        pathInfo.directory
       );
       statusNode.textContent = dirty
         ? `${t("已修改，尚未保存", "Unsaved changes")} · ${formatBytes(workspaceEditorSize)}`
@@ -753,7 +1029,7 @@
       statusNode.classList.remove("is-error");
     }
     if (saveButton instanceof HTMLButtonElement) {
-      saveButton.disabled = workspaceEditorBusy !== "" || !dirty;
+      saveButton.disabled = workspaceEditorBusy !== "" || workspaceEditorIsImage() || !dirty;
     }
   }
 
@@ -770,6 +1046,54 @@
       throw new Error(String(parsed?.error || t("工作区请求失败。", "Workspace request failed.")));
     }
     return parsed;
+  }
+
+  async function loadAttachmentTree(form, path = "", force = false) {
+    if (!(form instanceof HTMLFormElement) || !attachmentTreeEnabled(form)) {
+      return null;
+    }
+    const relativePath = String(path || "").trim();
+    if (!force && attachmentTreeCache.has(relativePath)) {
+      renderAttachmentTree(form);
+      return attachmentTreeCache.get(relativePath);
+    }
+    const endpoint = attachmentTreeURL(form);
+    if (endpoint === "") {
+      return null;
+    }
+    attachmentLoadingPaths.add(relativePath);
+    if (relativePath === "") {
+      setAttachmentTreeStatus(t("正在加载附件目录…", "Loading attachment tree..."), false);
+    }
+    renderAttachmentTree(form);
+    const requestKey = currentWorkspaceKey(form);
+    try {
+      const url = new URL(endpoint, window.location.href);
+      if (relativePath !== "") {
+        url.searchParams.set("path", relativePath);
+      }
+      const parsed = await fetchWorkspaceJSON(url.toString());
+      if (requestKey !== workspaceSessionKey || requestKey !== currentWorkspaceKey(form)) {
+        return null;
+      }
+      const nextPath = String(parsed.path || relativePath || "").trim();
+      const entries = Array.isArray(parsed.entries) ? parsed.entries.map(normalizeWorkspaceEntry).filter(Boolean) : [];
+      attachmentTreeCache.set(nextPath, entries);
+      attachmentOpenPaths.add(nextPath);
+      attachmentTreeRootLabel = String(parsed.rootLabel || attachmentTreeRootLabel || "").trim();
+      setAttachmentTreeStatus("", false);
+      return entries;
+    } catch (error) {
+      if (requestKey === workspaceSessionKey) {
+        setAttachmentTreeStatus(String(error?.message || t("加载附件目录失败。", "Failed to load the attachment tree.")), true);
+      }
+      return null;
+    } finally {
+      attachmentLoadingPaths.delete(relativePath);
+      if (requestKey === workspaceSessionKey) {
+        renderAttachmentTree(form);
+      }
+    }
   }
 
   async function loadWorkspaceTree(form, path = "", force = false) {
@@ -826,6 +1150,45 @@
     }
   }
 
+  function openAttachmentFile(form, path, url) {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const nextPath = String(path || "").trim();
+    const targetURL = String(url || "").trim();
+    const mediaType = attachmentImageMediaType(nextPath, targetURL);
+    attachmentActiveFilePath = nextPath;
+    expandAttachmentAncestors(nextPath);
+    if (targetURL === "") {
+      setAttachmentTreeStatus(t("这个对象目前没有可用的访问地址。", "This object does not have a usable URL right now."), true);
+      renderAttachmentTree(form);
+      return;
+    }
+    if (mediaType !== "") {
+      const shouldRevealEditor = !workspaceEditorVisible();
+      workspaceActiveFilePath = nextPath;
+      workspaceEditorKind = "image";
+      workspaceEditorMediaType = mediaType;
+      workspaceEditorPreviewURL = targetURL;
+      workspaceEditorContent = "";
+      workspaceEditorSavedContent = "";
+      workspaceEditorSize = 0;
+      workspaceEditorBusy = "";
+      setWorkspaceEditorStatus("", false);
+      if (shouldRevealEditor) {
+        layoutState.editorOpen = true;
+        applyLayout(form, true);
+      }
+      setAttachmentTreeStatus("", false);
+      renderAttachmentTree(form);
+      renderWorkspaceEditor(form);
+      return;
+    }
+    setAttachmentTreeStatus("", false);
+    renderAttachmentTree(form);
+    window.open(targetURL, "_blank", "noopener,noreferrer");
+  }
+
   async function openWorkspaceFile(form, path, force = false) {
     if (!(form instanceof HTMLFormElement) || !isCloudAgentEnvironment(currentSelectedEnvironment(form))) {
       return;
@@ -843,12 +1206,13 @@
     if (endpoint === "") {
       return;
     }
-    if (!layoutState.editorOpen) {
+    const shouldRevealEditor = !workspaceEditorVisible();
+    workspaceActiveFilePath = relativePath;
+    if (shouldRevealEditor) {
       layoutState.editorOpen = true;
       applyLayout(form, true);
     }
     workspaceEditorBusy = "open";
-    workspaceActiveFilePath = relativePath;
     expandWorkspaceAncestors(relativePath);
     setWorkspaceEditorStatus("", false);
     renderWorkspaceTree(form);
@@ -864,10 +1228,17 @@
       }
       workspaceRootPath = String(parsed.workspacePath || workspaceRootPath || "").trim();
       workspaceActiveFilePath = String(parsed.path || relativePath).trim();
-      workspaceEditorContent = String(parsed.content || "");
+      workspaceEditorKind = String(parsed.kind || "").trim() === "image" ? "image" : "text";
+      workspaceEditorMediaType = String(parsed.mediaType || "").trim();
+      workspaceEditorPreviewURL = workspaceEditorKind === "image" ? String(parsed.previewURL || "").trim() : "";
+      workspaceEditorContent = workspaceEditorKind === "image" ? "" : String(parsed.content || "");
       workspaceEditorSavedContent = workspaceEditorContent;
-      workspaceEditorSize = Number.isFinite(Number(parsed.size)) ? Number(parsed.size) : measureTextBytes(workspaceEditorContent);
-      setWorkspaceEditorStatus("", false);
+      workspaceEditorSize = Number.isFinite(Number(parsed.size)) ? Number(parsed.size) : (workspaceEditorKind === "image" ? 0 : measureTextBytes(workspaceEditorContent));
+      if (workspaceEditorKind === "image" && workspaceEditorPreviewURL === "") {
+        setWorkspaceEditorStatus(t("图片预览不可用。", "Image preview unavailable."), true);
+      } else {
+        setWorkspaceEditorStatus("", false);
+      }
       applySidebarView(form, "files", true);
     } catch (error) {
       if (requestKey === workspaceSessionKey) {
@@ -929,8 +1300,12 @@
     const nextKey = currentWorkspaceKey(form);
     resetWorkspaceState(nextKey);
     applySidebarView(form, layoutState.sidebarView, false);
+    renderAttachmentTree(form);
     renderWorkspaceTree(form);
     renderWorkspaceEditor(form);
+    if (attachmentTreeEnabled(form)) {
+      await loadAttachmentTree(form, "", true);
+    }
     if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || readClientSessionID(form) === "") {
       return;
     }
@@ -950,10 +1325,16 @@
     }
     applyLayout(form, false);
     applySidebarView(form, layoutState.sidebarView, false);
+    renderAttachmentTree(form);
     renderWorkspaceTree(form);
     renderWorkspaceEditor(form);
-    if (layoutState.sidebarView === "files" && isCloudAgentEnvironment(currentSelectedEnvironment(form)) && readClientSessionID(form) !== "" && !workspaceTreeCache.has("")) {
-      void loadWorkspaceTree(form, "", Boolean(options.force));
+    if (!layoutState.sidebarCollapsed && layoutState.sidebarView === "files") {
+      if (attachmentTreeEnabled(form) && !attachmentTreeCache.has("")) {
+        void loadAttachmentTree(form, "", Boolean(options.force));
+      }
+      if (isCloudAgentEnvironment(currentSelectedEnvironment(form)) && readClientSessionID(form) !== "" && !workspaceTreeCache.has("")) {
+        void loadWorkspaceTree(form, "", Boolean(options.force));
+      }
     }
   }
 
@@ -992,6 +1373,27 @@
         void refreshWorkspace(form);
         return;
       }
+      case "toggle-attachment-directory": {
+        event.preventDefault();
+        const path = String(target.dataset.chatAttachmentPath || "").trim();
+        if (attachmentOpenPaths.has(path)) {
+          attachmentOpenPaths.delete(path);
+          collapseAttachmentDescendants(path);
+          renderAttachmentTree(form);
+          return;
+        }
+        attachmentOpenPaths.add(path);
+        renderAttachmentTree(form);
+        if (!attachmentTreeCache.has(path)) {
+          void loadAttachmentTree(form, path, false);
+        }
+        return;
+      }
+      case "open-attachment-file": {
+        event.preventDefault();
+        openAttachmentFile(form, String(target.dataset.chatAttachmentPath || "").trim(), String(target.dataset.chatAttachmentUrl || "").trim());
+        return;
+      }
       case "toggle-workspace-directory": {
         event.preventDefault();
         const path = String(target.dataset.chatWorkspacePath || "").trim();
@@ -1016,6 +1418,11 @@
       case "save-workspace-file": {
         event.preventDefault();
         void saveWorkspaceFile(form);
+        return;
+      }
+      case "set-image-preview-background": {
+        event.preventDefault();
+        applyImagePreviewBackground(form, String(target.dataset.chatPreviewBackground || "").trim(), true);
         return;
       }
       default:
@@ -1069,7 +1476,7 @@
     if (pane === "sidebar" && layoutState.sidebarCollapsed) {
       return;
     }
-    if (pane === "editor" && !layoutState.editorOpen) {
+    if (pane === "editor" && !workspaceEditorVisible()) {
       return;
     }
     event.preventDefault();

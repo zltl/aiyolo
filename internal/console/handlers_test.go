@@ -1679,7 +1679,7 @@ func TestConsoleChatPageOmitsAdvancedSettings(t *testing.T) {
 	if !strings.Contains(html, `data-chat-primary-start`) || !strings.Contains(html, `data-chat-primary-stop`) {
 		t.Fatalf("chat page should render start and stop icons for the primary composer action: %s", html)
 	}
-	if !strings.Contains(html, `https://unpkg.com/lucide@1.16.0/dist/umd/lucide.min.js`) {
+	if !strings.Contains(html, `https://cdn.jsdmirror.com/npm/lucide@1.16.0/dist/umd/lucide.min.js`) {
 		t.Fatalf("chat page should load lucide for chat control icons: %s", html)
 	}
 	if !strings.Contains(html, `data-lucide="send-horizontal"`) || !strings.Contains(html, `data-lucide="square"`) {

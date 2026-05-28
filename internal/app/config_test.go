@@ -26,6 +26,11 @@ func TestLoadConfigFromYAML(t *testing.T) {
 		"  admin_email: yaml-admin@example.com",
 		"  admin_password: yaml-password",
 		"",
+		"artifacts:",
+		"  public_base_url: https://aiyolo.quant67.com",
+		"  public_via_proxy: true",
+		"  proxy_base_path: /artifacts",
+		"",
 		"database:",
 		"  host_external: db.example.com",
 		"  username: yaml-user",
@@ -63,6 +68,9 @@ func TestLoadConfigFromYAML(t *testing.T) {
 	}
 	if cfg.SeedAPIKey != "yaml-seed-key" {
 		t.Fatalf("SeedAPIKey=%q", cfg.SeedAPIKey)
+	}
+	if !cfg.Artifacts.PublicViaProxy || cfg.Artifacts.PublicBaseURL != "https://aiyolo.quant67.com" {
+		t.Fatalf("unexpected artifacts config: %+v", cfg.Artifacts)
 	}
 
 	t.Setenv("AIYOLO_HTTP_ADDR", ":20000")

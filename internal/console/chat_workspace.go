@@ -58,10 +58,13 @@ type consoleChatWorkspaceTreeResponse struct {
 }
 
 type consoleChatWorkspaceFileResult struct {
-	Path    string `json:"path,omitempty"`
-	Size    int64  `json:"size,omitempty"`
-	Content string `json:"content,omitempty"`
-	Bytes   int64  `json:"bytes,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	MediaType  string `json:"mediaType,omitempty"`
+	Content    string `json:"content,omitempty"`
+	PreviewURL string `json:"previewURL,omitempty"`
+	Bytes      int64  `json:"bytes,omitempty"`
 }
 
 type consoleChatWorkspaceFileResponse struct {
@@ -73,8 +76,11 @@ type consoleChatWorkspaceFileResponse struct {
 	WorkspacePath string `json:"workspacePath,omitempty"`
 	Path          string `json:"path,omitempty"`
 	Size          int64  `json:"size,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	MediaType     string `json:"mediaType,omitempty"`
 	Bytes         int64  `json:"bytes,omitempty"`
 	Content       string `json:"content,omitempty"`
+	PreviewURL    string `json:"previewURL,omitempty"`
 	Notice        string `json:"notice,omitempty"`
 	Error         string `json:"error,omitempty"`
 }
@@ -205,7 +211,10 @@ func (handler *Handler) chatWorkspaceFile(w http.ResponseWriter, r *http.Request
 		WorkspacePath: target.WorkspacePath,
 		Path:          result.Path,
 		Size:          result.Size,
+		Kind:          result.Kind,
+		MediaType:     result.MediaType,
 		Content:       result.Content,
+		PreviewURL:    result.PreviewURL,
 	})
 }
 
@@ -305,7 +314,11 @@ func (handler *Handler) readConsoleChatWorkspaceFile(ctx context.Context, target
 	if err != nil {
 		return consoleChatWorkspaceFileResult{}, err
 	}
-	return consoleChatWorkspaceFileResult{Path: result.Path, Size: result.Size, Content: result.Content}, nil
+	kind := strings.TrimSpace(result.Kind)
+	if kind == "" {
+		kind = "text"
+	}
+	return consoleChatWorkspaceFileResult{Path: result.Path, Size: result.Size, Kind: kind, MediaType: strings.TrimSpace(result.MediaType), Content: result.Content, PreviewURL: strings.TrimSpace(result.PreviewURL)}, nil
 }
 
 func (handler *Handler) writeConsoleChatWorkspaceFile(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string, content string) (consoleChatWorkspaceFileResult, error) {

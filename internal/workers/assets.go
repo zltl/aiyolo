@@ -5,7 +5,7 @@ import "embed"
 //go:embed ansible
 var ansibleAssets embed.FS
 
-//go:embed cloud-agent/aiyolo-ass
+//go:embed cloud-agent/*
 var cloudAgentAssets embed.FS
 
 func cloudAgentAssetString(path string) string {

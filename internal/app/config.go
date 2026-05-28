@@ -70,8 +70,9 @@ func LoadConfig(v *viper.Viper) (Config, error) {
 
 func loadArtifactsConfig(v *viper.Viper, prefix string) artifacts.Config {
 	return artifacts.Config{
-		PublicBaseURL: strings.TrimSpace(v.GetString(prefix + ".public_base_url")),
-		ProxyBasePath: strings.TrimSpace(v.GetString(prefix + ".proxy_base_path")),
+		PublicBaseURL:  strings.TrimSpace(v.GetString(prefix + ".public_base_url")),
+		ProxyBasePath:  strings.TrimSpace(v.GetString(prefix + ".proxy_base_path")),
+		PublicViaProxy: v.GetBool(prefix + ".public_via_proxy"),
 		S3: artifacts.S3Config{
 			Endpoint:         strings.TrimSpace(v.GetString(prefix + ".s3.endpoint")),
 			InternalEndpoint: strings.TrimSpace(v.GetString(prefix + ".s3.internal_endpoint")),
@@ -90,6 +91,9 @@ func loadArtifactsConfig(v *viper.Viper, prefix string) artifacts.Config {
 func validateArtifactsConfig(prefix string, cfg artifacts.Config) error {
 	if err := validateBrowserEntryURL(cfg.PublicBaseURL); err != nil {
 		return fmt.Errorf("%s.public_base_url: %w", prefix, err)
+	}
+	if cfg.PublicViaProxy && strings.TrimSpace(cfg.PublicBaseURL) == "" {
+		return fmt.Errorf("%s.public_base_url is required when %s.public_via_proxy is true", prefix, prefix)
 	}
 	if err := validateAbsoluteHTTPURL(cfg.S3.Endpoint); err != nil {
 		return fmt.Errorf("%s.s3.endpoint: %w", prefix, err)

@@ -152,6 +152,15 @@ func consoleChatCloudAgentBaseURL(baseURL string, worker domain.WorkerServer) st
 	return strings.TrimRight(parsed.String(), "/")
 }
 
+func (handler *Handler) consoleChatCloudAgentASSArtifactURLs(baseURL string) (string, string) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if handler == nil || baseURL == "" || !handler.cfg.Artifacts.Enabled() {
+		return "", ""
+	}
+	objectKey := workerops.CloudAgentASSArtifactObjectKey
+	return baseURL + handler.cfg.Artifacts.ProxyObjectURL(objectKey), baseURL + handler.cfg.Artifacts.ProxyObjectURL(objectKey+".sha256")
+}
+
 func (handler *Handler) chatEnvironmentOptions(ctx context.Context, r *http.Request) ([]consoleChatEnvironmentOption, error) {
 	workers, err := handler.store.ListWorkerServers(ctx)
 	if err != nil {
@@ -165,7 +174,7 @@ func (handler *Handler) chatEnvironmentOptions(ctx context.Context, r *http.Requ
 	})
 	options := []consoleChatEnvironmentOption{{
 		Value: consoleChatEnvironmentLocal,
-		Label: handler.requestText(r, "本地 Chat", "Local chat"),
+		Label: handler.requestText(r, "本地", "Local"),
 	}}
 	for _, worker := range workers {
 		workerID := strings.TrimSpace(worker.ID)
@@ -324,7 +333,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 			Status:      "local",
 			SessionID:   strings.TrimSpace(state.Form.ClientSessionID),
 			Environment: consoleChatEnvironmentLocal,
-			Notice:      handler.requestText(r, "已切回本地 Chat 环境", "Switched back to the local chat environment"),
+			Notice:      handler.requestText(r, "已切回本地环境", "Switched back to the local environment"),
 		}, nil
 	}
 	workerID := consoleChatEnvironmentWorkerID(state.Form.Environment)
@@ -346,6 +355,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 		return consoleChatEnvironmentEnsureResponse{}, errors.New(handler.requestText(r, "无法解析当前 AIYolo 访问地址", "Unable to resolve the current AIYolo public URL"))
 	}
 	allowedModels := consoleChatRoutePublicNames(state.Routes)
+	assDownloadURL, assSHA256URL := handler.consoleChatCloudAgentASSArtifactURLs(baseURL)
 	accountID := consoleChatCloudAgentAccountID(workerID)
 	now := time.Now().UTC()
 	account, err := handler.store.GetCloudAgentAccount(ctx, userID, accountID)
@@ -385,6 +395,8 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 		DefaultModel:   account.ModelPublicName,
 		AllowedModels:  allowedModels,
 		OpenURL:        strings.TrimRight(baseURL, "/") + "/console/chat?session=" + url.QueryEscape(state.Form.ClientSessionID),
+		ASSDownloadURL: assDownloadURL,
+		ASSSHA256URL:   assSHA256URL,
 	})
 	if err != nil {
 		account.Status = domain.CloudAgentStatusError

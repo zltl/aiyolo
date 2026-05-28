@@ -13,6 +13,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestWorkersHandlersCreateProbeAndInitialize(t *testing.T) {
 	handler.buildWorkerBootstrap = func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan {
 		return workerops.BootstrapPlan{
 			Summary: "bootstrap plan ready",
-			Script:  "#!/usr/bin/env bash\ninstall -d /var/lib/aiyolo-agent\n",
+			Script:  mustReadWorkersTestAsset(t, "bootstrap-install-data-root.sh"),
 			ProxyEnv: map[string]string{
 				"HTTPS_PROXY": proxy.Endpoint,
 			},
@@ -222,7 +223,7 @@ func TestWorkersHandlerInitializeFailureMarksJobFailed(t *testing.T) {
 		return workerops.ProbeResult{OSName: "Ubuntu 26.04 LTS", UbuntuVersion: "26.04", DockerInstalled: false, ProxyReachable: true, DataRootWritable: true, CheckedAt: time.Now().UTC()}, nil
 	}
 	handler.buildWorkerBootstrap = func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan {
-		return workerops.BootstrapPlan{Summary: "bootstrap plan ready", Script: "#!/usr/bin/env bash\nexit 1\n"}
+		return workerops.BootstrapPlan{Summary: "bootstrap plan ready", Script: mustReadWorkersTestAsset(t, "bootstrap-exit-1.sh")}
 	}
 	handler.executeWorkerBootstrap = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error) {
 		return "apt-get failed", errors.New("exit status 100")
@@ -302,7 +303,7 @@ func TestWorkersHandlerInitializeHealthFailureMarksJobFailed(t *testing.T) {
 		return workerops.ProbeResult{OSName: "Ubuntu 26.04 LTS", UbuntuVersion: "26.04", DockerInstalled: true, ProxyReachable: true, DataRootWritable: true, CheckedAt: time.Now().UTC()}, nil
 	}
 	handler.buildWorkerBootstrap = func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan {
-		return workerops.BootstrapPlan{Summary: "bootstrap plan ready", Script: "# ansible preview\nruntime=aiyolo-workerd\n"}
+		return workerops.BootstrapPlan{Summary: "bootstrap plan ready", Script: mustReadWorkersTestAsset(t, "bootstrap-ansible-preview.txt")}
 	}
 	handler.executeWorkerBootstrap = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error) {
 		return "runtime installed", nil
@@ -516,6 +517,15 @@ func TestWorkersHandlerShowsHTMXValidationErrorOnInvalidWorkerForm(t *testing.T)
 	if _, err := store.GetWorkerServer(context.Background(), "worker-1"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected worker not to be saved, err=%v", err)
 	}
+}
+
+func mustReadWorkersTestAsset(t *testing.T, name string) string {
+	t.Helper()
+	payload, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatalf("read workers test asset %s: %v", name, err)
+	}
+	return string(payload)
 }
 
 func TestWorkersHandlerEditsRegisteredWorker(t *testing.T) {

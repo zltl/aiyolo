@@ -1,6 +1,9 @@
 package workers
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -116,14 +119,37 @@ func TestBuildCloudAgentASSRemoteCommandUsesUnixSocket(t *testing.T) {
 }
 
 func TestCloudAgentDockerfileInstallsASS(t *testing.T) {
-	if !strings.Contains(cloudAgentDockerfile, "COPY aiyolo-ass /usr/local/bin/aiyolo-ass") {
-		t.Fatalf("cloud-agent Dockerfile should copy aiyolo-ass: %s", cloudAgentDockerfile)
+	dockerfile := cloudAgentAssetString("cloud-agent/Dockerfile")
+	if !strings.Contains(dockerfile, "COPY aiyolo-ass /usr/local/bin/aiyolo-ass") {
+		t.Fatalf("cloud-agent Dockerfile should copy aiyolo-ass: %s", dockerfile)
 	}
-	if !strings.Contains(cloudAgentStartServicesScript, "/usr/local/bin/aiyolo-ass") {
-		t.Fatalf("cloud-agent services should start aiyolo-ass: %s", cloudAgentStartServicesScript)
+	if !strings.Contains(dockerfile, cloudAgentImageASSSHA256Label) || !strings.Contains(dockerfile, cloudAgentImageBuildRevisionLabel) {
+		t.Fatalf("cloud-agent Dockerfile should label aiyolo-ass builds: %s", dockerfile)
 	}
-	if !strings.Contains(cloudAgentAssetString("cloud-agent/aiyolo-ass"), "SERVICE = \"aiyolo-ass\"") {
-		t.Fatal("embedded cloud-agent build context should include the aiyolo-ass fallback script")
+	startServicesScript := cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-services")
+	if !strings.Contains(startServicesScript, "/usr/local/bin/aiyolo-ass") {
+		t.Fatalf("cloud-agent services should start aiyolo-ass: %s", startServicesScript)
+	}
+	if _, ok := cloudAgentBuildContextFiles["aiyolo-ass"]; ok {
+		t.Fatal("cloud-agent build context should no longer embed the aiyolo-ass fallback script")
+	}
+}
+
+func TestResolveCloudAgentASSSHA256(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/linux-amd64/aiyolo-ass.sha256" {
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  aiyolo-ass\n"))
+	}))
+	defer server.Close()
+
+	checksum, err := resolveCloudAgentASSSHA256(context.Background(), server.URL+"/linux-amd64/aiyolo-ass.sha256")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checksum != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
+		t.Fatalf("checksum=%q", checksum)
 	}
 }
 
@@ -158,6 +184,8 @@ func TestNormalizeCloudAgentStartOptionsSanitizesEmailContainerNames(t *testing.
 		APIBaseURL:     "https://aiyolo.quant67.com/v1",
 		ConsoleBaseURL: "https://aiyolo.quant67.com",
 		APIKey:         "test-key",
+		ASSDownloadURL: "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass",
+		ASSSHA256URL:   "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass.sha256",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -183,6 +211,8 @@ func TestNormalizeCloudAgentStartOptionsKeepsValidCustomContainerName(t *testing
 		APIBaseURL:     "https://aiyolo.quant67.com/v1",
 		ConsoleBaseURL: "https://aiyolo.quant67.com",
 		APIKey:         "test-key",
+		ASSDownloadURL: "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass",
+		ASSSHA256URL:   "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass.sha256",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -255,6 +285,9 @@ func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
 func TestBuildCloudAgentRemoteCommandSerializesContainerEnsure(t *testing.T) {
 	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user"}`)
 
+	if strings.Contains(script, "\t") {
+		t.Fatal("remote Python command must not contain tab indentation")
+	}
 	if !strings.Contains(script, "import fcntl") {
 		t.Fatalf("remote script should import fcntl for container locking: %s", script)
 	}
@@ -269,5 +302,36 @@ func TestBuildCloudAgentRemoteCommandSerializesContainerEnsure(t *testing.T) {
 	}
 	if !strings.Contains(script, `lock_handle = acquire_container_lock()`) {
 		t.Fatalf("remote script should hold the container lock around ensure_image and ensure_container: %s", script)
+	}
+}
+
+func TestBuildCloudAgentRemoteCommandWaitsForReusedContainerRuntime(t *testing.T) {
+	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user"}`)
+
+	if !strings.Contains(script, `def wait_for_container_runtime():`) {
+		t.Fatalf("remote script should factor runtime readiness checks into a helper: %s", script)
+	}
+	if !regexp.MustCompile(`if inspected is not None and inspected.get\("State", \{\}\).get\("Running"\) and container_matches\(inspected\):\n            wait_for_container_runtime\(\)\n            return container_summary\(inspect_container\(\)\)`).MatchString(script) {
+		t.Fatalf("reused containers should wait for runtime readiness before returning: %s", script)
+	}
+	if !strings.Contains(script, `wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "test -S ${AIYOLO_ASS_SOCKET_PATH:-/run/aiyolo/ass.sock}"], 30)`) {
+		t.Fatalf("remote script should wait for the aiyolo-ass socket: %s", script)
+	}
+}
+
+func TestBuildCloudAgentRemoteCommandDownloadsPublishedASSBinary(t *testing.T) {
+	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user","ass_download_url":"https://files.example.com/linux-amd64/aiyolo-ass","ass_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","build_revision":"sha256:abc"}`)
+
+	if !strings.Contains(script, `urllib.request.urlopen(payload["ass_download_url"], timeout=60)`) {
+		t.Fatalf("remote script should download the published aiyolo-ass binary: %s", script)
+	}
+	if !strings.Contains(script, `downloaded aiyolo-ass checksum mismatch`) {
+		t.Fatalf("remote script should verify the downloaded aiyolo-ass checksum: %s", script)
+	}
+	if !strings.Contains(script, `AIYOLO_ASS_SHA256=`) || !strings.Contains(script, `AIYOLO_CLOUD_AGENT_BUILD_REVISION=`) {
+		t.Fatalf("remote script should pass build metadata into docker build args: %s", script)
+	}
+	if !strings.Contains(script, cloudAgentImageASSSHA256Label) || !strings.Contains(script, cloudAgentImageBuildRevisionLabel) {
+		t.Fatalf("remote script should compare and propagate image/container revision labels: %s", script)
 	}
 }

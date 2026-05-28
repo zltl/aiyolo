@@ -149,6 +149,7 @@ type consoleChatPageState struct {
 	SelectedRoute           consoleChatRouteView
 	Result                  *consoleChatResultView
 	Error                   string
+	AttachmentTreeEnabled   bool
 	AttachmentUploadURL     string
 	AttachmentUploadEnabled bool
 	AttachmentMaxBytes      int64
@@ -163,6 +164,8 @@ func (state consoleChatPageState) data() map[string]any {
 		"ChatRoutes":                  state.Routes,
 		"ChatShellPageURL":            consoleChatShellPagePath,
 		"ChatShellSocketURL":          consoleChatShellSocketPath,
+		"ChatAttachmentTreeURL":      consoleChatAttachmentTreePath,
+		"ChatAttachmentTreeEnabled":  state.AttachmentTreeEnabled,
 		"ChatWorkspaceTreeURL":       consoleChatWorkspaceTreePath,
 		"ChatWorkspaceFileURL":       consoleChatWorkspaceFilePath,
 		"ChatMessages":                state.Messages,
@@ -590,6 +593,7 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 		Routes:                  consoleChatRoutes(routes, providers),
 		Messages:                parseConsoleChatMessages(r, locale, handler.cfg.ChatAttachments),
 		Presets:                 defaultConsoleChatPrompts(locale),
+		AttachmentTreeEnabled:   handler.cfg.ChatAttachments.CanList(),
 		AttachmentUploadURL:     consoleChatAttachmentUploadPath,
 		AttachmentUploadEnabled: handler.cfg.ChatAttachments.CanUpload(),
 		AttachmentMaxBytes:      consoleChatAttachmentMaxBytes,

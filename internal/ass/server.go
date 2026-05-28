@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -200,17 +202,12 @@ func (server *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		server.writeError(w, r, newAPIError(http.StatusBadRequest, "path_not_file", "workspace path is not a file"))
 		return
 	}
-	payload, apiErr := server.readTextFile(realPath, info)
+	payload, apiErr := server.readWorkspaceFile(relativePath, realPath, info)
 	if apiErr != nil {
 		server.writeError(w, r, apiErr)
 		return
 	}
-	server.writeOK(w, r, fsFileData{
-		Path:     relativePath,
-		Size:     int64(len(payload)),
-		Revision: revision(payload),
-		Content:  string(payload),
-	})
+	server.writeOK(w, r, payload)
 }
 
 func (server *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
@@ -275,10 +272,13 @@ type fsTreeData struct {
 }
 
 type fsFileData struct {
-	Path     string `json:"path"`
-	Size     int64  `json:"size"`
-	Revision string `json:"revision"`
-	Content  string `json:"content"`
+	Path       string `json:"path"`
+	Size       int64  `json:"size"`
+	Revision   string `json:"revision"`
+	Kind       string `json:"kind,omitempty"`
+	MediaType  string `json:"media_type,omitempty"`
+	Content    string `json:"content,omitempty"`
+	PreviewURL string `json:"preview_url,omitempty"`
 }
 
 type fsWriteRequest struct {
@@ -385,6 +385,47 @@ func (server *Server) listDirectory(realPath string, relativePath string, limit 
 	return entries, truncated, nil
 }
 
+func (server *Server) readWorkspaceFile(relativePath string, realPath string, info os.FileInfo) (fsFileData, *apiError) {
+	if info.Size() > server.maxFileBytes {
+		return fsFileData{}, newAPIError(http.StatusRequestEntityTooLarge, "file_too_large", "workspace file exceeds the editable size limit")
+	}
+	payload, err := os.ReadFile(realPath)
+	if err != nil {
+		return fsFileData{}, newAPIError(http.StatusInternalServerError, "internal_error", "read workspace file failed")
+	}
+	if int64(len(payload)) > server.maxFileBytes {
+		return fsFileData{}, newAPIError(http.StatusRequestEntityTooLarge, "file_too_large", "workspace file exceeds the editable size limit")
+	}
+	mediaType := detectWorkspaceMediaType(relativePath, payload)
+	if strings.HasPrefix(mediaType, "image/") {
+		return fsFileData{
+			Path:       relativePath,
+			Size:       int64(len(payload)),
+			Revision:   revision(payload),
+			Kind:       "image",
+			MediaType:  mediaType,
+			PreviewURL: workspacePreviewDataURL(mediaType, payload),
+		}, nil
+	}
+	if bytes.Contains(payload, []byte{0}) {
+		return fsFileData{}, newAPIError(http.StatusUnsupportedMediaType, "file_binary", "workspace file is binary and cannot be edited")
+	}
+	if !utf8.Valid(payload) {
+		return fsFileData{}, newAPIError(http.StatusUnsupportedMediaType, "encoding_invalid", "workspace file is not valid UTF-8")
+	}
+	if mediaType == "" {
+		mediaType = "text/plain"
+	}
+	return fsFileData{
+		Path:      relativePath,
+		Size:      int64(len(payload)),
+		Revision:  revision(payload),
+		Kind:      "text",
+		MediaType: mediaType,
+		Content:   string(payload),
+	}, nil
+}
+
 func (server *Server) readTextFile(realPath string, info os.FileInfo) ([]byte, *apiError) {
 	if info.Size() > server.maxFileBytes {
 		return nil, newAPIError(http.StatusRequestEntityTooLarge, "file_too_large", "workspace file exceeds the editable size limit")
@@ -403,6 +444,39 @@ func (server *Server) readTextFile(realPath string, info os.FileInfo) ([]byte, *
 		return nil, newAPIError(http.StatusUnsupportedMediaType, "encoding_invalid", "workspace file is not valid UTF-8")
 	}
 	return payload, nil
+}
+
+func detectWorkspaceMediaType(relativePath string, payload []byte) string {
+	extType := normalizeMediaType(mime.TypeByExtension(strings.ToLower(filepath.Ext(relativePath))))
+	if extType == "image/svg+xml" {
+		return extType
+	}
+	detected := normalizeMediaType(http.DetectContentType(payload))
+	if strings.HasPrefix(detected, "image/") {
+		return detected
+	}
+	if strings.HasPrefix(extType, "image/") {
+		return extType
+	}
+	if extType != "" {
+		return extType
+	}
+	return detected
+}
+
+func normalizeMediaType(raw string) string {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(raw))
+	if err != nil {
+		return strings.TrimSpace(raw)
+	}
+	return mediaType
+}
+
+func workspacePreviewDataURL(mediaType string, payload []byte) string {
+	if strings.TrimSpace(mediaType) == "" || len(payload) == 0 {
+		return ""
+	}
+	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(payload)
 }
 
 func (server *Server) writeTextFile(relativePath string, payload []byte, expectedRevision string, create bool, mkdirP bool) (fsWriteData, *apiError) {

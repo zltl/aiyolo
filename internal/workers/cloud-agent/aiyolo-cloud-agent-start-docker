@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_path=/etc/docker/daemon.json
+data_root="${AIYOLO_DOCKER_DATA_ROOT:-/var/lib/docker}"
+storage_driver="${AIYOLO_DOCKER_STORAGE_DRIVER:-vfs}"
+registry_mirror="${AIYOLO_DOCKER_REGISTRY_MIRROR:-}"
+dns_servers="${AIYOLO_DOCKER_DNS_SERVERS:-}"
+host="${AIYOLO_DOCKER_HOST:-unix:///var/run/docker.sock}"
+
+install -d -m 0755 /etc/docker "$data_root" /var/run
+
+CONFIG_PATH="$config_path" \
+REGISTRY_MIRROR="$registry_mirror" \
+DNS_SERVERS="$dns_servers" \
+STORAGE_DRIVER="$storage_driver" \
+python3 <<'PY'
+import json
+import os
+
+payload = {
+    "features": {"buildkit": True},
+    "iptables": True,
+    "storage-driver": os.environ["STORAGE_DRIVER"],
+}
+
+registry_mirror = os.environ.get("REGISTRY_MIRROR", "").strip()
+if registry_mirror:
+    payload["registry-mirrors"] = [registry_mirror]
+
+dns_servers = [item.strip() for item in os.environ.get("DNS_SERVERS", "").split(",") if item.strip()]
+if dns_servers:
+    payload["dns"] = dns_servers
+
+with open(os.environ["CONFIG_PATH"], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, ensure_ascii=True, indent=2)
+    handle.write("\n")
+PY
+
+exec dockerd --host "$host" --data-root "$data_root" --exec-root /var/run/docker --pidfile /var/run/docker.pid

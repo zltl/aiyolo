@@ -29,11 +29,14 @@ type CloudAgentWorkspaceTree struct {
 }
 
 type CloudAgentWorkspaceFile struct {
-	Path     string `json:"path"`
-	Size     int64  `json:"size"`
-	Revision string `json:"revision"`
-	Content  string `json:"content"`
-	Bytes    int64  `json:"bytes"`
+	Path       string `json:"path"`
+	Size       int64  `json:"size"`
+	Revision   string `json:"revision"`
+	Kind       string `json:"kind"`
+	MediaType  string `json:"media_type,omitempty"`
+	Content    string `json:"content"`
+	PreviewURL string `json:"preview_url,omitempty"`
+	Bytes      int64  `json:"bytes"`
 }
 
 type CloudAgentShellExecRequest struct {

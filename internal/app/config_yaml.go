@@ -38,6 +38,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"app.seed_from_env":                     "AIYOLO_SEED_FROM_ENV",
 		"app.seed_api_key":                      "AIYOLO_SEED_API_KEY",
 		"artifacts.public_base_url":             "AIYOLO_ARTIFACTS_PUBLIC_BASE_URL",
+		"artifacts.public_via_proxy":            "AIYOLO_ARTIFACTS_PUBLIC_VIA_PROXY",
 		"artifacts.proxy_base_path":             "AIYOLO_ARTIFACTS_PROXY_BASE_PATH",
 		"artifacts.s3.endpoint":                 "AIYOLO_ARTIFACTS_S3_ENDPOINT",
 		"artifacts.s3.internal_endpoint":        "AIYOLO_ARTIFACTS_S3_INTERNAL_ENDPOINT",
@@ -50,6 +51,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"artifacts.s3.cname_domain":             "AIYOLO_ARTIFACTS_S3_CNAME_DOMAIN",
 		"artifacts.s3.use_internal":             "AIYOLO_ARTIFACTS_S3_USE_INTERNAL",
 		"chat.attachments.public_base_url":      "AIYOLO_CHAT_ATTACHMENTS_PUBLIC_BASE_URL",
+		"chat.attachments.public_via_proxy":     "AIYOLO_CHAT_ATTACHMENTS_PUBLIC_VIA_PROXY",
 		"chat.attachments.proxy_base_path":      "AIYOLO_CHAT_ATTACHMENTS_PROXY_BASE_PATH",
 		"chat.attachments.s3.endpoint":          "AIYOLO_CHAT_ATTACHMENTS_S3_ENDPOINT",
 		"chat.attachments.s3.internal_endpoint": "AIYOLO_CHAT_ATTACHMENTS_S3_INTERNAL_ENDPOINT",
@@ -153,7 +155,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("app.write_timeout", "0s")
 	v.SetDefault("app.idle_timeout", "120s")
 	v.SetDefault("artifacts.proxy_base_path", "/artifacts")
+	v.SetDefault("artifacts.public_via_proxy", false)
 	v.SetDefault("chat.attachments.proxy_base_path", "/console/chat/attachments/files")
+	v.SetDefault("chat.attachments.public_via_proxy", false)
 	v.SetDefault("codex.install_token_ttl", "15m")
 	v.SetDefault("codex.windows_wrapper_url", "/console/codex/artifacts/aiyolo.exe")
 	v.SetDefault("database.name", "bbflow")

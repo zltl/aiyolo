@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/net/websocket"
 
+	"github.com/zltl/aiyolo/internal/artifacts"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
 	workerops "github.com/zltl/aiyolo/internal/workers"
@@ -38,6 +39,7 @@ func TestChatEnvironmentEnsureEndpointStartsCloudAgent(t *testing.T) {
 		SecretKey:          "test-secret",
 		AdminEmail:         "admin@example.com",
 		AdminPassword:      "password",
+		Artifacts:          artifacts.Config{PublicBaseURL: "https://files.example.com"},
 		CodexPublicBaseURL: "https://aiyolo.quant67.com",
 	}, store)
 	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
@@ -97,6 +99,9 @@ func TestChatEnvironmentEnsureEndpointStartsCloudAgent(t *testing.T) {
 	}
 	if ensured.DefaultModel != "gpt-5.4" || len(ensured.AllowedModels) != 1 || ensured.AllowedModels[0] != "gpt-5.4" {
 		t.Fatalf("unexpected ensured model options: %+v", ensured)
+	}
+	if ensured.ASSDownloadURL != "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass" || ensured.ASSSHA256URL != "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass.sha256" {
+		t.Fatalf("unexpected ensured aiyolo-ass artifact urls: %+v", ensured)
 	}
 
 	account, err := store.GetCloudAgentAccount(ctx, "admin@example.com", consoleChatCloudAgentAccountID("worker-0"))
@@ -254,6 +259,16 @@ func TestChatEnvironmentEnsureRewritesLoopbackBaseURLForWorker(t *testing.T) {
 		SecretKey:     "test-secret",
 		AdminEmail:    "admin@example.com",
 		AdminPassword: "password",
+		ChatAttachments: artifacts.Config{
+			ProxyBasePath: "/console/chat/attachments/files",
+			S3: artifacts.S3Config{
+				Endpoint:        "https://s3.example.com",
+				Bucket:          "aiyolo-chat-assets",
+				Prefix:          "chat",
+				AccessKeyID:     "key",
+				AccessKeySecret: "secret",
+			},
+		},
 	}, store)
 	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
 		ensured = options
@@ -739,6 +754,16 @@ func TestChatPageRestoresCloudAgentEnvironment(t *testing.T) {
 		SecretKey:     "test-secret",
 		AdminEmail:    "admin@example.com",
 		AdminPassword: "password",
+		ChatAttachments: artifacts.Config{
+			ProxyBasePath: "/console/chat/attachments/files",
+			S3: artifacts.S3Config{
+				Endpoint:        "https://s3.example.com",
+				Bucket:          "aiyolo-chat-assets",
+				Prefix:          "chat",
+				AccessKeyID:     "key",
+				AccessKeySecret: "secret",
+			},
+		},
 	}, store)
 	server := mountedConsoleTestServer(handler)
 	defer server.Close()
@@ -773,6 +798,12 @@ func TestChatPageRestoresCloudAgentEnvironment(t *testing.T) {
 	if !strings.Contains(html, "data-chat-shell-socket-url=\"/console/chat/shell/ws\"") {
 		t.Fatalf("chat page is missing embedded shell socket wiring: %s", html)
 	}
+	if !strings.Contains(html, "data-chat-attachment-tree-url=\"/console/chat/attachments/tree\"") {
+		t.Fatalf("chat page is missing attachment tree wiring: %s", html)
+	}
+	if !strings.Contains(html, "data-chat-attachment-tree-enabled=\"true\"") {
+		t.Fatalf("chat page did not enable attachment tree browsing: %s", html)
+	}
 	if !strings.Contains(html, "data-chat-workspace-tree-url=\"/console/chat/workspace/tree\"") {
 		t.Fatalf("chat page is missing workspace tree wiring: %s", html)
 	}
@@ -790,7 +821,13 @@ func TestChatPageRestoresCloudAgentEnvironment(t *testing.T) {
 		"data-chat-action=\"toggle-pane\" data-chat-pane=\"sidebar\"",
 		"data-chat-action=\"toggle-pane\" data-chat-pane=\"editor\"",
 		"data-chat-action=\"toggle-pane\" data-chat-pane=\"chat\"",
+		"data-chat-attachment-tree",
+		"data-chat-workspace-section",
 		"data-chat-workspace-tree",
+		"data-chat-editor-preview",
+		"data-chat-action=\"set-image-preview-background\" data-chat-preview-background=\"grid\"",
+		"data-chat-action=\"set-image-preview-background\" data-chat-preview-background=\"light\"",
+		"data-chat-action=\"set-image-preview-background\" data-chat-preview-background=\"dark\"",
 		"data-chat-editor-input",
 	} {
 		if !strings.Contains(html, marker) {
@@ -812,6 +849,46 @@ func TestChatPageRestoresCloudAgentEnvironment(t *testing.T) {
 	}
 	if footerIndex, dockIndex := strings.Index(html, "class=\"chat-footer\""), strings.Index(html, "data-chat-shell-dock"); footerIndex < 0 || dockIndex < 0 || dockIndex < footerIndex {
 		t.Fatalf("chat page should render the shell dock below the composer footer: %s", html)
+	}
+}
+
+func TestChatPageHidesShellLaunchButtonForLocalChat(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+
+	handler := NewHandler(Config{
+		SecretKey:     "test-secret",
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "password",
+	}, store)
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Get(server.URL + "/console/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat page status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	html := string(body)
+	if !strings.Contains(html, "name=\"chat_environment\" value=\"local\" data-chat-environment-input") {
+		t.Fatalf("chat page should default to local chat: %s", html)
+	}
+	if !strings.Contains(html, "data-chat-action=\"open-shell\" hidden disabled") {
+		t.Fatalf("chat page should hide the shell launch button for local chat: %s", html)
 	}
 }
 
@@ -1142,7 +1219,7 @@ func TestChatWorkspaceFileEndpointReadsFile(t *testing.T) {
 		if relativePath != "README.md" {
 			t.Fatalf("workspace file did not target README.md: %q", relativePath)
 		}
-		return workerops.CloudAgentWorkspaceFile{Path: "README.md", Size: 42, Content: "hello from workspace\n"}, nil
+		return workerops.CloudAgentWorkspaceFile{Path: "README.md", Size: 42, Kind: "text", MediaType: "text/plain", Content: "hello from workspace\n"}, nil
 	}
 
 	server := mountedConsoleTestServer(handler)
@@ -1168,8 +1245,105 @@ func TestChatWorkspaceFileEndpointReadsFile(t *testing.T) {
 	if payload.Status != "ready" || payload.Path != "README.md" || payload.Size != 42 {
 		t.Fatalf("unexpected workspace file payload: %+v", payload)
 	}
+	if payload.Kind != "text" || payload.MediaType != "text/plain" {
+		t.Fatalf("unexpected workspace file metadata: %+v", payload)
+	}
 	if payload.Content != "hello from workspace\n" {
 		t.Fatalf("unexpected workspace file content: %+v", payload)
+	}
+}
+
+func TestChatWorkspaceFileEndpointReturnsImagePreview(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+
+	now := time.Now().UTC()
+	accountID := consoleChatCloudAgentAccountID("worker-0")
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{
+		ID:              accountID,
+		UserID:          "admin@example.com",
+		WorkerID:        "worker-0",
+		AgentType:       domain.CloudAgentTypeClaudeCode,
+		ModelPublicName: "gpt-5.4",
+		ContainerName:   "aiyolo-cloud-agent-worker-0",
+		WorkspacePath:   "/srv/aiyolo/workspace/session-shell",
+		Credential:      "aiyolo_live_test",
+		Status:          domain.CloudAgentStatusRunning,
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
+		ID:            consoleChatCloudAgentSessionID("session-shell"),
+		UserID:        "admin@example.com",
+		WorkerID:      "worker-0",
+		AccountID:     accountID,
+		AgentType:     domain.CloudAgentTypeClaudeCode,
+		ChatSessionID: "session-shell",
+		WorkspacePath: "/srv/aiyolo/workspace/session-shell",
+		Status:        domain.CloudAgentSessionStatusActive,
+		CreatedAt:     now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(Config{
+		SecretKey:     "test-secret",
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "password",
+	}, store)
+	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
+		return workerops.CloudAgentInstance{
+			Status:        domain.CloudAgentStatusRunning,
+			WorkerID:      worker.ID,
+			ContainerID:   "container-workspace-file",
+			ContainerName: options.ContainerName,
+			WorkspacePath: options.WorkspacePath,
+		}, nil
+	}
+	handler.readCloudAgentWorkspaceFile = func(_ context.Context, _ domain.WorkerServer, _ domain.WorkerSSHKey, _ domain.CloudAgentAccount, _ domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceFile, error) {
+		if relativePath != "assets/diagram.png" {
+			t.Fatalf("workspace file did not target assets/diagram.png: %q", relativePath)
+		}
+		return workerops.CloudAgentWorkspaceFile{
+			Path:       "assets/diagram.png",
+			Size:       128,
+			Kind:       "image",
+			MediaType:  "image/png",
+			PreviewURL: "data:image/png;base64,cG5n",
+		}, nil
+	}
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Get(server.URL + "/console/chat/workspace/file?session=session-shell&path=assets/diagram.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat workspace image status=%d body=%s", response.StatusCode, body)
+	}
+	var payload consoleChatWorkspaceFileResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Status != "ready" || payload.Path != "assets/diagram.png" || payload.Kind != "image" || payload.MediaType != "image/png" {
+		t.Fatalf("unexpected workspace image payload: %+v", payload)
+	}
+	if payload.PreviewURL != "data:image/png;base64,cG5n" || payload.Content != "" {
+		t.Fatalf("unexpected workspace image preview data: %+v", payload)
 	}
 }
 
