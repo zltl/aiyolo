@@ -65,6 +65,48 @@ func TestFSTreeReadAndWriteFile(t *testing.T) {
 	}
 }
 
+func TestFSTreePrefetchesChildDirectories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "cmd"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "internal"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cmd", "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "server.go"), []byte("package internal\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServer(t, root)
+
+	response := performRequest(server, http.MethodGet, "/v1/fs/tree?prefetch=children&child_limit=10&prefetch_limit=1", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("tree status=%d body=%s", response.Code, response.Body.String())
+	}
+	var tree struct {
+		Status string     `json:"status"`
+		Data   fsTreeData `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &tree); err != nil {
+		t.Fatal(err)
+	}
+	if tree.Status != "ok" || len(tree.Data.Entries) != 2 || tree.Data.Entries[0].Name != "cmd" {
+		t.Fatalf("unexpected tree response: %+v", tree)
+	}
+	if len(tree.Data.Children) != 1 {
+		t.Fatalf("unexpected prefetched children: %+v", tree.Data.Children)
+	}
+	cmdEntries := tree.Data.Children["cmd"]
+	if len(cmdEntries) != 1 || cmdEntries[0].Path != "cmd/main.go" {
+		t.Fatalf("unexpected cmd children: %+v", cmdEntries)
+	}
+	if _, ok := tree.Data.Children["internal"]; ok {
+		t.Fatalf("prefetch limit should cap child directories: %+v", tree.Data.Children)
+	}
+}
+
 func TestWriteFileRejectsStaleRevision(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello\n"), 0644); err != nil {

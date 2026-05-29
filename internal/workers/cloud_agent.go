@@ -28,7 +28,9 @@ const (
 	defaultCloudAgentRootFSIndexURL      = "https://mirrors.aliyun.com/ubuntu-cdimage/ubuntu-base/releases/24.04/release"
 	defaultCloudAgentContainerVNCPort    = 5900
 	defaultCloudAgentContainerChromePort = 9222
+	defaultCloudAgentContainerASSPort    = 17811
 	defaultCloudAgentHostVNCBasePort     = 15000
+	defaultCloudAgentHostASSBasePort     = 18000
 	defaultCloudAgentHostChromeBasePort  = 19000
 	defaultCloudAgentHostPortSpan        = 1000
 	defaultCloudAgentDisplay             = ":99"
@@ -64,6 +66,8 @@ type CloudAgentStartOptions struct {
 	HostVNCPort          int
 	ContainerChromePort  int
 	HostChromePort       int
+	ContainerASSPort     int
+	HostASSPort          int
 	SHMSize              string
 	DockerRegistryMirror string
 	DockerStorageDriver  string
@@ -88,6 +92,7 @@ type CloudAgentInstance struct {
 	DockerDataRoot    string   `json:"docker_data_root"`
 	VNCAddress        string   `json:"vnc,omitempty"`
 	ChromeDevtoolsURL string   `json:"chrome_devtools,omitempty"`
+	ASSBaseURL        string   `json:"ass_base_url,omitempty"`
 	DefaultModel      string   `json:"default_model,omitempty"`
 	AllowedModels     []string `json:"allowed_models,omitempty"`
 	ConsoleURL        string   `json:"console_url,omitempty"`
@@ -117,6 +122,8 @@ type cloudAgentRemotePayload struct {
 	HostVNCPort          int               `json:"host_vnc_port"`
 	ContainerChromePort  int               `json:"container_chrome_port"`
 	HostChromePort       int               `json:"host_chrome_port"`
+	ContainerASSPort     int               `json:"container_ass_port"`
+	HostASSPort          int               `json:"host_ass_port"`
 	SHMSize              string            `json:"shm_size"`
 	DockerStorageDriver  string            `json:"docker_storage_driver"`
 	DockerRegistryMirror string            `json:"docker_registry_mirror,omitempty"`
@@ -188,6 +195,8 @@ func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 		HostVNCPort:          options.HostVNCPort,
 		ContainerChromePort:  options.ContainerChromePort,
 		HostChromePort:       options.HostChromePort,
+		ContainerASSPort:     options.ContainerASSPort,
+		HostASSPort:          options.HostASSPort,
 		SHMSize:              options.SHMSize,
 		DockerStorageDriver:  options.DockerStorageDriver,
 		DockerRegistryMirror: options.DockerRegistryMirror,
@@ -295,11 +304,17 @@ func normalizeCloudAgentStartOptions(worker domain.WorkerServer, options CloudAg
 	if options.ContainerChromePort <= 0 {
 		options.ContainerChromePort = defaultCloudAgentContainerChromePort
 	}
+	if options.ContainerASSPort <= 0 {
+		options.ContainerASSPort = defaultCloudAgentContainerASSPort
+	}
 	if options.HostVNCPort <= 0 {
 		options.HostVNCPort = cloudAgentHostPort(options.UserID, worker.ID, defaultCloudAgentHostVNCBasePort)
 	}
 	if options.HostChromePort <= 0 {
 		options.HostChromePort = cloudAgentHostPort(options.UserID, worker.ID+"-chrome", defaultCloudAgentHostChromeBasePort)
+	}
+	if options.HostASSPort <= 0 {
+		options.HostASSPort = cloudAgentHostPort(options.UserID, worker.ID+"-ass", defaultCloudAgentHostASSBasePort)
 	}
 	if strings.TrimSpace(options.SHMSize) == "" {
 		options.SHMSize = defaultCloudAgentSHMSize
@@ -460,6 +475,10 @@ func cloudAgentHostPort(userID, discriminator string, base int) int {
 func cloudAgentContainerEnv(options CloudAgentStartOptions) map[string]string {
 	apiRoot := strings.TrimRight(options.ConsoleBaseURL, "/")
 	defaultModel := strings.TrimSpace(options.DefaultModel)
+	containerASSPort := options.ContainerASSPort
+	if containerASSPort <= 0 {
+		containerASSPort = defaultCloudAgentContainerASSPort
+	}
 	env := map[string]string{
 		"AIYOLO_USER_ID":                       options.UserID,
 		"AIYOLO_AGENT_TYPE":                    options.AgentType,
@@ -483,6 +502,7 @@ func cloudAgentContainerEnv(options CloudAgentStartOptions) map[string]string {
 		"AIYOLO_ASS_USER":                      defaultCloudAgentClaudeUser,
 		"AIYOLO_ASS_HOME":                      defaultCloudAgentClaudeHome,
 		"AIYOLO_ASS_SOCKET_PATH":               cloudAgentASSSocketPath,
+		"AIYOLO_ASS_HTTP_ADDR":                 fmt.Sprintf("0.0.0.0:%d", containerASSPort),
 		"AIYOLO_DISPLAY":                       options.Display,
 		"AIYOLO_VNC_PORT":                      strconv.Itoa(options.ContainerVNCPort),
 		"AIYOLO_CHROME_REMOTE_DEBUGGING_PORT":  strconv.Itoa(options.ContainerChromePort),
@@ -561,4 +581,3 @@ func cloudAgentBuildRevision(options CloudAgentStartOptions, files map[string]st
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
-

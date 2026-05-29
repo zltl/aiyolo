@@ -5,13 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/zltl/aiyolo/internal/domain"
 )
 
 const cloudAgentASSSocketPath = "/run/aiyolo/ass.sock"
+
+const (
+	cloudAgentWorkspaceTreeChildLimit    = "80"
+	cloudAgentWorkspaceTreePrefetchLimit = "32"
+)
 
 type CloudAgentWorkspaceEntry struct {
 	Name        string `json:"name"`
@@ -23,9 +32,10 @@ type CloudAgentWorkspaceEntry struct {
 }
 
 type CloudAgentWorkspaceTree struct {
-	Path      string                     `json:"path"`
-	Entries   []CloudAgentWorkspaceEntry `json:"entries"`
-	Truncated bool                       `json:"truncated"`
+	Path      string                                `json:"path"`
+	Entries   []CloudAgentWorkspaceEntry            `json:"entries"`
+	Truncated bool                                  `json:"truncated"`
+	Children  map[string][]CloudAgentWorkspaceEntry `json:"children,omitempty"`
 }
 
 type CloudAgentWorkspaceFile struct {
@@ -78,6 +88,9 @@ func ListCloudAgentWorkspaceTree(ctx context.Context, worker domain.WorkerServer
 	if strings.TrimSpace(relativePath) != "" {
 		query.Set("path", relativePath)
 	}
+	query.Set("prefetch", "children")
+	query.Set("child_limit", cloudAgentWorkspaceTreeChildLimit)
+	query.Set("prefetch_limit", cloudAgentWorkspaceTreePrefetchLimit)
 	var result CloudAgentWorkspaceTree
 	if err := runCloudAgentASSJSON(ctx, worker, key, account, cloudSession, "GET", "/v1/fs/tree", query, nil, &result); err != nil {
 		return CloudAgentWorkspaceTree{}, err
@@ -136,45 +149,42 @@ func runCloudAgentASSJSON(ctx context.Context, worker domain.WorkerServer, key d
 			return err
 		}
 	}
-	client, err := dialSSH(target.worker, target.key)
+	sshClient, err := dialSSH(target.worker, target.key)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-
-	session, err := client.NewSession()
-	if err != nil {
-		return err
+	defer sshClient.Close()
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
+			return dialCloudAgentASS(ctx, sshClient, target)
+		},
 	}
-	defer session.Close()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	session.Stdout = &stdout
-	session.Stderr = &stderr
+	defer transport.CloseIdleConnections()
+	var bodyReader io.Reader
 	if body != nil {
-		session.Stdin = bytes.NewReader(requestBody)
+		bodyReader = bytes.NewReader(requestBody)
 	}
-	if err := session.Start(buildCloudAgentASSRemoteCommand(target.containerName, method, endpoint.String(), body != nil)); err != nil {
-		return fmt.Errorf("start aiyolo-ass request: %w", err)
+	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), bodyReader)
+	if err != nil {
+		return err
 	}
-	go func() {
-		<-ctx.Done()
-		_ = session.Close()
-		_ = client.Close()
-	}()
-	if err := session.Wait(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = strings.TrimSpace(stdout.String())
-		}
-		if detail == "" {
-			return fmt.Errorf("call aiyolo-ass: %w", err)
-		}
-		return fmt.Errorf("call aiyolo-ass: %w: %s", err, detail)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	request.Header.Set("Accept", "application/json")
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	if err != nil {
+		return fmt.Errorf("call aiyolo-ass direct %s: %w", cloudAgentASSWorkerAddress(target), err)
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(response.Body)
+	if err != nil {
+		return fmt.Errorf("read aiyolo-ass response: %w", err)
 	}
 	var envelope cloudAgentASSEnvelope
-	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
-		return fmt.Errorf("parse aiyolo-ass response: %w: %s", err, strings.TrimSpace(stdout.String()))
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return fmt.Errorf("parse aiyolo-ass response: %w: %s", err, strings.TrimSpace(string(payload)))
 	}
 	if envelope.Status != "ok" {
 		if envelope.Error != nil {
@@ -197,37 +207,43 @@ func runCloudAgentASSJSON(ctx context.Context, worker domain.WorkerServer, key d
 	return nil
 }
 
-func buildCloudAgentASSRemoteCommand(containerName, method, endpoint string, hasBody bool) string {
-	hasBodyValue := "0"
-	if hasBody {
-		hasBodyValue = "1"
+func dialCloudAgentASS(ctx context.Context, client sshDialer, target cloudAgentTarget) (net.Conn, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
 	}
-	return fmt.Sprintf(`set -euo pipefail
+	resultCh := make(chan struct {
+		conn net.Conn
+		err  error
+	}, 1)
+	go func() {
+		conn, err := client.Dial("tcp", cloudAgentASSWorkerAddress(target))
+		resultCh <- struct {
+			conn net.Conn
+			err  error
+		}{conn: conn, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.err != nil {
+			return nil, fmt.Errorf("connect aiyolo-ass: %w", result.err)
+		}
+		return result.conn, nil
+	}
+}
 
-container_name=%s
-method=%s
-endpoint=%s
-has_body=%s
-socket_path=%s
+type sshDialer interface {
+	Dial(network string, addr string) (net.Conn, error)
+}
 
-if ! command -v docker >/dev/null 2>&1; then
-  printf 'docker is not installed on this worker\n' >&2
-  exit 127
-fi
-if ! docker inspect --type container "$container_name" >/dev/null 2>&1; then
-  printf 'cloud agent container %%s is not available\n' "$container_name" >&2
-  exit 1
-fi
-if ! docker exec "$container_name" test -S "$socket_path" >/dev/null 2>&1; then
-  printf 'aiyolo-ass socket %%s is not available in container %%s\n' "$socket_path" "$container_name" >&2
-  exit 1
-fi
+func cloudAgentASSWorkerAddress(target cloudAgentTarget) string {
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(cloudAgentASSHostPort(target)))
+}
 
-curl_args=(curl -sS --unix-socket "$socket_path" -X "$method")
-if [[ "$has_body" == "1" ]]; then
-  curl_args+=(-H 'Content-Type: application/json' --data-binary @-)
-fi
-curl_args+=("$endpoint")
-exec docker exec -i "$container_name" "${curl_args[@]}"
-`, shellQuote(containerName), shellQuote(method), shellQuote(endpoint), shellQuote(hasBodyValue), shellQuote(cloudAgentASSSocketPath))
+func cloudAgentASSHostPort(target cloudAgentTarget) int {
+	userID := firstNonEmpty(target.account.UserID, target.cloudSession.UserID)
+	return cloudAgentHostPort(userID, target.worker.ID+"-ass", defaultCloudAgentHostASSBasePort)
 }

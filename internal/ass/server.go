@@ -38,6 +38,9 @@ const (
 	DefaultMaxExecOutputBytes = int64(1024 * 1024)
 	DefaultShellTimeout       = 30 * time.Second
 	DefaultShellOutputBytes   = int64(256 * 1024)
+	DefaultTreeLimit          = 200
+	DefaultTreeChildLimit     = 80
+	DefaultTreePrefetchLimit  = 32
 )
 
 type Config struct {
@@ -162,17 +165,20 @@ func (server *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (server *Server) handleFSTree(w http.ResponseWriter, r *http.Request) {
-	limit := 200
-	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
-		parsed, err := strconv.Atoi(rawLimit)
-		if err != nil || parsed <= 0 {
-			server.writeError(w, r, newAPIError(http.StatusBadRequest, "path_invalid", "tree limit must be a positive integer"))
-			return
-		}
-		limit = parsed
+	limit, apiErr := parseFSTreeLimit(r.URL.Query().Get("limit"), DefaultTreeLimit, server.maxTreeEntries, "tree limit must be a positive integer")
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
 	}
-	if limit > server.maxTreeEntries {
-		limit = server.maxTreeEntries
+	childLimit, apiErr := parseFSTreeLimit(r.URL.Query().Get("child_limit"), DefaultTreeChildLimit, server.maxTreeEntries, "tree child limit must be a positive integer")
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	prefetchLimit, apiErr := parseFSTreeLimit(r.URL.Query().Get("prefetch_limit"), DefaultTreePrefetchLimit, server.maxTreeEntries, "tree prefetch limit must be a positive integer")
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
 	}
 	includeHidden := parseBool(r.URL.Query().Get("include_hidden"))
 	relativePath, realPath, info, apiErr := server.resolveExisting(r.URL.Query().Get("path"), true)
@@ -189,7 +195,11 @@ func (server *Server) handleFSTree(w http.ResponseWriter, r *http.Request) {
 		server.writeError(w, r, apiErr)
 		return
 	}
-	server.writeOK(w, r, fsTreeData{Path: relativePath, Entries: entries, Truncated: truncated})
+	var children map[string][]fsEntry
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("prefetch")), "children") || parseBool(r.URL.Query().Get("prefetch_children")) {
+		children = server.prefetchDirectoryChildren(realPath, entries, childLimit, prefetchLimit, includeHidden)
+	}
+	server.writeOK(w, r, fsTreeData{Path: relativePath, Entries: entries, Truncated: truncated, Children: children})
 }
 
 func (server *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
@@ -266,9 +276,10 @@ type fsEntry struct {
 }
 
 type fsTreeData struct {
-	Path      string    `json:"path"`
-	Entries   []fsEntry `json:"entries"`
-	Truncated bool      `json:"truncated"`
+	Path      string               `json:"path"`
+	Entries   []fsEntry            `json:"entries"`
+	Truncated bool                 `json:"truncated"`
+	Children  map[string][]fsEntry `json:"children,omitempty"`
 }
 
 type fsFileData struct {
@@ -383,6 +394,33 @@ func (server *Server) listDirectory(realPath string, relativePath string, limit 
 		truncated = true
 	}
 	return entries, truncated, nil
+}
+
+func (server *Server) prefetchDirectoryChildren(realPath string, entries []fsEntry, childLimit int, prefetchLimit int, includeHidden bool) map[string][]fsEntry {
+	if childLimit <= 0 || prefetchLimit <= 0 || len(entries) == 0 {
+		return nil
+	}
+	children := make(map[string][]fsEntry)
+	prefetched := 0
+	for _, entry := range entries {
+		if prefetched >= prefetchLimit {
+			break
+		}
+		if entry.Type != "directory" || !entry.HasChildren || entry.Path == "" {
+			continue
+		}
+		childRealPath := filepath.Join(realPath, entry.Name)
+		childEntries, _, apiErr := server.listDirectory(childRealPath, entry.Path, childLimit, includeHidden)
+		if apiErr != nil {
+			continue
+		}
+		children[entry.Path] = childEntries
+		prefetched++
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	return children
 }
 
 func (server *Server) readWorkspaceFile(relativePath string, realPath string, info os.FileInfo) (fsFileData, *apiError) {
@@ -935,6 +973,21 @@ func parseBool(raw string) bool {
 	default:
 		return false
 	}
+}
+
+func parseFSTreeLimit(raw string, fallback int, max int, message string) (int, *apiError) {
+	limit := fallback
+	if strings.TrimSpace(raw) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || parsed <= 0 {
+			return 0, newAPIError(http.StatusBadRequest, "path_invalid", message)
+		}
+		limit = parsed
+	}
+	if max > 0 && limit > max {
+		limit = max
+	}
+	return limit, nil
 }
 
 func envString(key string, fallback string) string {

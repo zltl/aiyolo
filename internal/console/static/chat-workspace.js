@@ -148,6 +148,10 @@
     return form?.querySelector("[data-chat-editor-tab-name]") || null;
   }
 
+  function workspaceEditorTabIconNode(form) {
+    return form?.querySelector("[data-chat-editor-tab-icon]") || form?.querySelector(".chat-editor-tab-icon") || null;
+  }
+
   function workspaceEditorDirectoryNode(form) {
     return form?.querySelector("[data-chat-editor-directory]") || null;
   }
@@ -655,6 +659,72 @@
     };
   }
 
+  function basenameForIcon(path) {
+    const cleanPath = String(path || "").trim().split("#")[0].split("?")[0].replace(/\/+$/, "");
+    if (cleanPath === "") {
+      return "";
+    }
+    const segments = cleanPath.split("/").filter(Boolean);
+    return segments.length > 0 ? segments[segments.length - 1] : cleanPath;
+  }
+
+  function fileIconLookupName(entry) {
+    const explicitName = String(entry?.name || "").trim();
+    return explicitName || basenameForIcon(entry?.path);
+  }
+
+  function fileIconClassName(entry) {
+    if (!entry || entry.type === "directory") {
+      return "";
+    }
+    const icons = window.FileIcons;
+    if (!icons || typeof icons.getClassWithColor !== "function") {
+      return "";
+    }
+    const lookupName = fileIconLookupName(entry);
+    if (lookupName === "") {
+      return "";
+    }
+    const className = String(icons.getClassWithColor(lookupName) || "").trim();
+    return className || "text-icon medium-blue";
+  }
+
+  function applyWorkspaceEntryIcon(node, entry) {
+    if (!(node instanceof HTMLElement)) {
+      return;
+    }
+    const type = entry?.type === "directory" ? "directory" : "file";
+    node.classList.remove("has-file-icon");
+    node.replaceChildren();
+    node.textContent = type === "directory" ? "DIR" : "TXT";
+    if (type !== "file") {
+      return;
+    }
+    const iconClassName = fileIconClassName(entry);
+    if (iconClassName === "") {
+      return;
+    }
+    const icon = document.createElement("i");
+    icon.className = `icon ${iconClassName}`;
+    icon.setAttribute("aria-hidden", "true");
+    node.classList.add("has-file-icon");
+    node.replaceChildren(icon);
+  }
+
+  function cacheWorkspaceChildTrees(children) {
+    if (!children || typeof children !== "object") {
+      return;
+    }
+    Object.entries(children).forEach(([path, entries]) => {
+      const childPath = String(path || "").trim();
+      if (childPath === "" || !Array.isArray(entries)) {
+        return;
+      }
+      workspaceTreeCache.set(childPath, entries.map(normalizeWorkspaceEntry).filter(Boolean));
+      workspaceLoadingPaths.delete(childPath);
+    });
+  }
+
   function renderWorkspacePlaceholder(host, message) {
     if (!(host instanceof HTMLElement)) {
       return;
@@ -736,7 +806,7 @@
 
       const kind = document.createElement("span");
       kind.className = "chat-workspace-row-kind";
-      kind.textContent = entry.type === "directory" ? "DIR" : "TXT";
+      applyWorkspaceEntryIcon(kind, entry);
 
       const name = document.createElement("span");
       name.className = "chat-workspace-row-name";
@@ -834,7 +904,7 @@
 
       const kind = document.createElement("span");
       kind.className = "chat-workspace-row-kind";
-      kind.textContent = entry.type === "directory" ? "DIR" : "TXT";
+      applyWorkspaceEntryIcon(kind, entry);
 
       const name = document.createElement("span");
       name.className = "chat-workspace-row-name";
@@ -925,6 +995,7 @@
 
   function renderWorkspaceEditor(form) {
     const pathNode = workspaceEditorPathNode(form);
+    const tabIconNode = workspaceEditorTabIconNode(form);
     const tabNameNode = workspaceEditorTabNameNode(form);
     const directoryNode = workspaceEditorDirectoryNode(form);
     const statusNode = workspaceEditorStatusNode(form);
@@ -941,6 +1012,10 @@
       pathNode.textContent = name;
       if (tabNameNode instanceof HTMLElement) {
         tabNameNode.textContent = name;
+      }
+      if (tabIconNode instanceof HTMLElement) {
+        const iconName = workspaceActiveFilePath === "" ? name : basenameForIcon(workspaceActiveFilePath);
+        applyWorkspaceEntryIcon(tabIconNode, { name: iconName, path: workspaceActiveFilePath || iconName, type: "file" });
       }
       if (directoryNode instanceof HTMLElement) {
         directoryNode.textContent = directory;
@@ -1133,6 +1208,7 @@
       const nextPath = String(parsed.path || relativePath || "").trim();
       const entries = Array.isArray(parsed.entries) ? parsed.entries.map(normalizeWorkspaceEntry).filter(Boolean) : [];
       workspaceTreeCache.set(nextPath, entries);
+      cacheWorkspaceChildTrees(parsed.children);
       workspaceOpenPaths.add(nextPath);
       workspaceRootPath = String(parsed.workspacePath || workspaceRootPath || "").trim();
       setWorkspaceTreeStatus("", false);
@@ -1207,7 +1283,18 @@
       return;
     }
     const shouldRevealEditor = !workspaceEditorVisible();
+    if (attachmentActiveFilePath !== "") {
+      attachmentActiveFilePath = "";
+      setAttachmentTreeStatus("", false);
+      renderAttachmentTree(form);
+    }
     workspaceActiveFilePath = relativePath;
+    workspaceEditorKind = "text";
+    workspaceEditorMediaType = "";
+    workspaceEditorPreviewURL = "";
+    workspaceEditorContent = "";
+    workspaceEditorSavedContent = "";
+    workspaceEditorSize = 0;
     if (shouldRevealEditor) {
       layoutState.editorOpen = true;
       applyLayout(form, true);

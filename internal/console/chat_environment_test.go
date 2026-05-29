@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -1090,12 +1091,7 @@ func TestChatWorkspaceTreeEndpointLoadsCloudAgentSession(t *testing.T) {
 	var ensureCalls atomic.Int32
 	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
 		ensureCalls.Add(1)
-		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || proxy.ID != domain.ProxyTypeDirect {
-			t.Fatalf("unexpected workspace ensure inputs worker=%+v key=%+v proxy=%+v", worker, key, proxy)
-		}
-		if options.ContainerName != "aiyolo-cloud-agent-worker-0" || options.WorkspacePath != "/srv/aiyolo/workspace/session-shell" {
-			t.Fatalf("unexpected workspace ensure options: %+v", options)
-		}
+		t.Fatalf("workspace tree should use the active session fast path without ensuring runtime worker=%+v key=%+v proxy=%+v options=%+v", worker, key, proxy, options)
 		return workerops.CloudAgentInstance{
 			Status:        domain.CloudAgentStatusRunning,
 			WorkerID:      worker.ID,
@@ -1108,13 +1104,19 @@ func TestChatWorkspaceTreeEndpointLoadsCloudAgentSession(t *testing.T) {
 		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
 			t.Fatalf("unexpected workspace tree bridge inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
 		}
-		if ensureCalls.Load() == 0 {
-			t.Fatal("workspace tree command ran before ensuring cloud agent runtime")
+		if ensureCalls.Load() != 0 {
+			t.Fatal("workspace tree command should not run a full runtime ensure on the fast path")
 		}
 		if relativePath != "" {
 			t.Fatalf("workspace tree did not target the workspace root: %q", relativePath)
 		}
-		return workerops.CloudAgentWorkspaceTree{Path: "", Entries: []workerops.CloudAgentWorkspaceEntry{{Name: "cmd", Path: "cmd", Type: "directory", HasChildren: true}, {Name: "README.md", Path: "README.md", Type: "file", Size: 128, ModifiedAt: "2026-05-27T03:10:00Z"}}}, nil
+		return workerops.CloudAgentWorkspaceTree{
+			Path:    "",
+			Entries: []workerops.CloudAgentWorkspaceEntry{{Name: "cmd", Path: "cmd", Type: "directory", HasChildren: true}, {Name: "README.md", Path: "README.md", Type: "file", Size: 128, ModifiedAt: "2026-05-27T03:10:00Z"}},
+			Children: map[string][]workerops.CloudAgentWorkspaceEntry{
+				"cmd": {{Name: "main.go", Path: "cmd/main.go", Type: "file", Size: 64}},
+			},
+		}, nil
 	}
 
 	server := mountedConsoleTestServer(handler)
@@ -1145,6 +1147,112 @@ func TestChatWorkspaceTreeEndpointLoadsCloudAgentSession(t *testing.T) {
 	}
 	if len(payload.Entries) != 2 || payload.Entries[0].Name != "cmd" || payload.Entries[1].Path != "README.md" {
 		t.Fatalf("unexpected workspace tree entries: %+v", payload.Entries)
+	}
+	if ensureCalls.Load() != 0 {
+		t.Fatalf("ensure calls=%d, want 0", ensureCalls.Load())
+	}
+	if len(payload.Children["cmd"]) != 1 || payload.Children["cmd"][0].Path != "cmd/main.go" {
+		t.Fatalf("unexpected prefetched workspace children: %+v", payload.Children)
+	}
+}
+
+func TestChatWorkspaceTreeRestoresRuntimeWhenBridgeContainerMissing(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+
+	now := time.Now().UTC()
+	accountID := consoleChatCloudAgentAccountID("worker-0")
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{
+		ID:              accountID,
+		UserID:          "admin@example.com",
+		WorkerID:        "worker-0",
+		AgentType:       domain.CloudAgentTypeClaudeCode,
+		ModelPublicName: "gpt-5.4",
+		ContainerName:   "aiyolo-cloud-agent-worker-0",
+		WorkspacePath:   "/srv/aiyolo/workspace/session-shell",
+		Credential:      "aiyolo_live_test",
+		Status:          domain.CloudAgentStatusRunning,
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
+		ID:            consoleChatCloudAgentSessionID("session-shell"),
+		UserID:        "admin@example.com",
+		WorkerID:      "worker-0",
+		AccountID:     accountID,
+		AgentType:     domain.CloudAgentTypeClaudeCode,
+		ChatSessionID: "session-shell",
+		WorkspacePath: "/srv/aiyolo/workspace/session-shell",
+		Status:        domain.CloudAgentSessionStatusActive,
+		CreatedAt:     now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(Config{
+		SecretKey:     "test-secret",
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "password",
+	}, store)
+	var ensureCalls atomic.Int32
+	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
+		ensureCalls.Add(1)
+		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || proxy.ID != domain.ProxyTypeDirect {
+			t.Fatalf("unexpected workspace restore inputs worker=%+v key=%+v proxy=%+v", worker, key, proxy)
+		}
+		return workerops.CloudAgentInstance{
+			Status:        domain.CloudAgentStatusRunning,
+			WorkerID:      worker.ID,
+			ContainerID:   "container-workspace-restored",
+			ContainerName: options.ContainerName,
+			WorkspacePath: options.WorkspacePath,
+		}, nil
+	}
+	var listCalls atomic.Int32
+	handler.listCloudAgentWorkspaceTree = func(_ context.Context, _ domain.WorkerServer, _ domain.WorkerSSHKey, _ domain.CloudAgentAccount, _ domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceTree, error) {
+		if relativePath != "" {
+			t.Fatalf("workspace tree did not target the workspace root: %q", relativePath)
+		}
+		if listCalls.Add(1) == 1 {
+			return workerops.CloudAgentWorkspaceTree{}, errors.New("call aiyolo-ass: cloud agent container aiyolo-cloud-agent-worker-0 is not available")
+		}
+		if ensureCalls.Load() != 1 {
+			t.Fatalf("workspace restore should ensure runtime once before retry, got %d", ensureCalls.Load())
+		}
+		return workerops.CloudAgentWorkspaceTree{Path: "", Entries: []workerops.CloudAgentWorkspaceEntry{{Name: "README.md", Path: "README.md", Type: "file", Size: 128}}}, nil
+	}
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Get(server.URL + "/console/chat/workspace/tree?session=session-shell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat workspace tree status=%d body=%s", response.StatusCode, body)
+	}
+	var payload consoleChatWorkspaceTreeResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Status != "ready" || len(payload.Entries) != 1 || payload.Entries[0].Path != "README.md" {
+		t.Fatalf("unexpected restored workspace tree payload: %+v", payload)
+	}
+	if ensureCalls.Load() != 1 || listCalls.Load() != 2 {
+		t.Fatalf("ensure calls=%d list calls=%d, want 1 and 2", ensureCalls.Load(), listCalls.Load())
 	}
 }
 
@@ -1195,12 +1303,7 @@ func TestChatWorkspaceFileEndpointReadsFile(t *testing.T) {
 	var ensureCalls atomic.Int32
 	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
 		ensureCalls.Add(1)
-		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || proxy.ID != domain.ProxyTypeDirect {
-			t.Fatalf("unexpected workspace ensure inputs worker=%+v key=%+v proxy=%+v", worker, key, proxy)
-		}
-		if options.ContainerName != "aiyolo-cloud-agent-worker-0" || options.WorkspacePath != "/srv/aiyolo/workspace/session-shell" {
-			t.Fatalf("unexpected workspace ensure options: %+v", options)
-		}
+		t.Fatalf("workspace file read should use the active session fast path without ensuring runtime worker=%+v key=%+v proxy=%+v options=%+v", worker, key, proxy, options)
 		return workerops.CloudAgentInstance{
 			Status:        domain.CloudAgentStatusRunning,
 			WorkerID:      worker.ID,
@@ -1213,8 +1316,8 @@ func TestChatWorkspaceFileEndpointReadsFile(t *testing.T) {
 		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
 			t.Fatalf("unexpected workspace file bridge inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
 		}
-		if ensureCalls.Load() == 0 {
-			t.Fatal("workspace file command ran before ensuring cloud agent runtime")
+		if ensureCalls.Load() != 0 {
+			t.Fatal("workspace file command should not run a full runtime ensure on the fast path")
 		}
 		if relativePath != "README.md" {
 			t.Fatalf("workspace file did not target README.md: %q", relativePath)
@@ -1250,6 +1353,9 @@ func TestChatWorkspaceFileEndpointReadsFile(t *testing.T) {
 	}
 	if payload.Content != "hello from workspace\n" {
 		t.Fatalf("unexpected workspace file content: %+v", payload)
+	}
+	if ensureCalls.Load() != 0 {
+		t.Fatalf("ensure calls=%d, want 0", ensureCalls.Load())
 	}
 }
 
@@ -1394,12 +1500,7 @@ func TestSaveChatWorkspaceFilePersistsChanges(t *testing.T) {
 	var ensureCalls atomic.Int32
 	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
 		ensureCalls.Add(1)
-		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || proxy.ID != domain.ProxyTypeDirect {
-			t.Fatalf("unexpected workspace ensure inputs worker=%+v key=%+v proxy=%+v", worker, key, proxy)
-		}
-		if options.ContainerName != "aiyolo-cloud-agent-worker-0" || options.WorkspacePath != "/srv/aiyolo/workspace/session-shell" {
-			t.Fatalf("unexpected workspace ensure options: %+v", options)
-		}
+		t.Fatalf("workspace save should use the active session fast path without ensuring runtime worker=%+v key=%+v proxy=%+v options=%+v", worker, key, proxy, options)
 		return workerops.CloudAgentInstance{
 			Status:        domain.CloudAgentStatusRunning,
 			WorkerID:      worker.ID,
@@ -1412,8 +1513,8 @@ func TestSaveChatWorkspaceFilePersistsChanges(t *testing.T) {
 		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
 			t.Fatalf("unexpected workspace save bridge inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
 		}
-		if ensureCalls.Load() == 0 {
-			t.Fatal("workspace save command ran before ensuring cloud agent runtime")
+		if ensureCalls.Load() != 0 {
+			t.Fatal("workspace save command should not run a full runtime ensure on the fast path")
 		}
 		if relativePath != "cmd/main.go" {
 			t.Fatalf("workspace save did not target cmd/main.go: %q", relativePath)
@@ -1450,6 +1551,9 @@ func TestSaveChatWorkspaceFilePersistsChanges(t *testing.T) {
 	}
 	if payload.Notice != "文件已保存。" {
 		t.Fatalf("unexpected workspace save notice: %+v", payload)
+	}
+	if ensureCalls.Load() != 0 {
+		t.Fatalf("ensure calls=%d, want 0", ensureCalls.Load())
 	}
 }
 

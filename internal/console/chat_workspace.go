@@ -41,20 +41,22 @@ type consoleChatWorkspaceEntry struct {
 }
 
 type consoleChatWorkspaceTreeResult struct {
-	Path    string                      `json:"path,omitempty"`
-	Entries []consoleChatWorkspaceEntry `json:"entries,omitempty"`
+	Path     string                                 `json:"path,omitempty"`
+	Entries  []consoleChatWorkspaceEntry            `json:"entries,omitempty"`
+	Children map[string][]consoleChatWorkspaceEntry `json:"children,omitempty"`
 }
 
 type consoleChatWorkspaceTreeResponse struct {
-	Status        string                      `json:"status"`
-	SessionID     string                      `json:"sessionId,omitempty"`
-	Environment   string                      `json:"environment,omitempty"`
-	WorkerID      string                      `json:"workerId,omitempty"`
-	ContainerName string                      `json:"containerName,omitempty"`
-	WorkspacePath string                      `json:"workspacePath,omitempty"`
-	Path          string                      `json:"path,omitempty"`
-	Entries       []consoleChatWorkspaceEntry `json:"entries,omitempty"`
-	Error         string                      `json:"error,omitempty"`
+	Status        string                                 `json:"status"`
+	SessionID     string                                 `json:"sessionId,omitempty"`
+	Environment   string                                 `json:"environment,omitempty"`
+	WorkerID      string                                 `json:"workerId,omitempty"`
+	ContainerName string                                 `json:"containerName,omitempty"`
+	WorkspacePath string                                 `json:"workspacePath,omitempty"`
+	Path          string                                 `json:"path,omitempty"`
+	Entries       []consoleChatWorkspaceEntry            `json:"entries,omitempty"`
+	Children      map[string][]consoleChatWorkspaceEntry `json:"children,omitempty"`
+	Error         string                                 `json:"error,omitempty"`
 }
 
 type consoleChatWorkspaceFileResult struct {
@@ -90,8 +92,17 @@ type consoleChatWorkspaceFileSaveRequest struct {
 	Content string `json:"content"`
 }
 
-func (handler *Handler) resolveConsoleChatWorkspaceTarget(ctx context.Context, r *http.Request) (consoleChatWorkspaceTarget, error) {
-	worker, key, account, cloudSession, err := handler.resolveConsoleChatCloudAgentRuntimeTarget(ctx, r, r.URL.Query().Get("session"))
+func (handler *Handler) resolveConsoleChatWorkspaceTarget(ctx context.Context, r *http.Request, ensureRuntime bool) (consoleChatWorkspaceTarget, error) {
+	var worker domain.WorkerServer
+	var key domain.WorkerSSHKey
+	var account domain.CloudAgentAccount
+	var cloudSession domain.CloudAgentSession
+	var err error
+	if ensureRuntime {
+		worker, key, account, cloudSession, err = handler.resolveConsoleChatCloudAgentRuntimeTarget(ctx, r, r.URL.Query().Get("session"))
+	} else {
+		worker, key, account, cloudSession, err = handler.resolveConsoleChatCloudAgentTarget(ctx, r, r.URL.Query().Get("session"))
+	}
 	if err != nil {
 		return consoleChatWorkspaceTarget{}, err
 	}
@@ -111,7 +122,7 @@ func (handler *Handler) resolveConsoleChatWorkspaceTarget(ctx context.Context, r
 }
 
 func (handler *Handler) chatWorkspaceTree(w http.ResponseWriter, r *http.Request) {
-	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r)
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err != nil {
 		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
@@ -137,6 +148,14 @@ func (handler *Handler) chatWorkspaceTree(w http.ResponseWriter, r *http.Request
 	}
 	result, err := handler.listConsoleChatWorkspace(r.Context(), target, relativePath)
 	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			result, err = handler.listConsoleChatWorkspace(r.Context(), target, relativePath)
+		}
+	}
+	if err != nil {
 		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
 		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceTreeResponse{
 			Status:        "error",
@@ -159,11 +178,12 @@ func (handler *Handler) chatWorkspaceTree(w http.ResponseWriter, r *http.Request
 		WorkspacePath: target.WorkspacePath,
 		Path:          result.Path,
 		Entries:       result.Entries,
+		Children:      result.Children,
 	})
 }
 
 func (handler *Handler) chatWorkspaceFile(w http.ResponseWriter, r *http.Request) {
-	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r)
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err != nil {
 		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
@@ -188,6 +208,14 @@ func (handler *Handler) chatWorkspaceFile(w http.ResponseWriter, r *http.Request
 		return
 	}
 	result, err := handler.readConsoleChatWorkspaceFile(r.Context(), target, relativePath)
+	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			result, err = handler.readConsoleChatWorkspaceFile(r.Context(), target, relativePath)
+		}
+	}
 	if err != nil {
 		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
 		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{
@@ -219,7 +247,7 @@ func (handler *Handler) chatWorkspaceFile(w http.ResponseWriter, r *http.Request
 }
 
 func (handler *Handler) saveChatWorkspaceFile(w http.ResponseWriter, r *http.Request) {
-	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r)
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err != nil {
 		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
@@ -275,6 +303,14 @@ func (handler *Handler) saveChatWorkspaceFile(w http.ResponseWriter, r *http.Req
 	}
 	result, err := handler.writeConsoleChatWorkspaceFile(r.Context(), target, relativePath, request.Content)
 	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			result, err = handler.writeConsoleChatWorkspaceFile(r.Context(), target, relativePath, request.Content)
+		}
+	}
+	if err != nil {
 		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
 		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{
 			Status:        "error",
@@ -306,7 +342,7 @@ func (handler *Handler) listConsoleChatWorkspace(ctx context.Context, target con
 	if err != nil {
 		return consoleChatWorkspaceTreeResult{}, err
 	}
-	return consoleChatWorkspaceTreeResult{Path: result.Path, Entries: consoleChatWorkspaceEntries(result.Entries)}, nil
+	return consoleChatWorkspaceTreeResult{Path: result.Path, Entries: consoleChatWorkspaceEntries(result.Entries), Children: consoleChatWorkspaceChildren(result.Children)}, nil
 }
 
 func (handler *Handler) readConsoleChatWorkspaceFile(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string) (consoleChatWorkspaceFileResult, error) {
@@ -329,6 +365,17 @@ func (handler *Handler) writeConsoleChatWorkspaceFile(ctx context.Context, targe
 	return consoleChatWorkspaceFileResult{Path: result.Path, Bytes: result.Bytes}, nil
 }
 
+func (handler *Handler) restoreConsoleChatWorkspaceRuntime(ctx context.Context, r *http.Request, target consoleChatWorkspaceTarget, cause error) (consoleChatWorkspaceTarget, bool, error) {
+	if !consoleChatWorkspaceRuntimeUnavailable(cause) {
+		return target, false, nil
+	}
+	refreshed, err := handler.resolveConsoleChatWorkspaceTarget(ctx, r, true)
+	if err != nil {
+		return target, false, err
+	}
+	return refreshed, true, nil
+}
+
 func consoleChatWorkspaceEntries(entries []workerops.CloudAgentWorkspaceEntry) []consoleChatWorkspaceEntry {
 	if len(entries) == 0 {
 		return nil
@@ -345,6 +392,36 @@ func consoleChatWorkspaceEntries(entries []workerops.CloudAgentWorkspaceEntry) [
 		})
 	}
 	return result
+}
+
+func consoleChatWorkspaceChildren(children map[string][]workerops.CloudAgentWorkspaceEntry) map[string][]consoleChatWorkspaceEntry {
+	if len(children) == 0 {
+		return nil
+	}
+	result := make(map[string][]consoleChatWorkspaceEntry, len(children))
+	for childPath, entries := range children {
+		childPath = strings.TrimSpace(childPath)
+		if childPath == "" {
+			continue
+		}
+		result[childPath] = consoleChatWorkspaceEntries(entries)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func consoleChatWorkspaceRuntimeUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return (strings.Contains(message, "cloud agent container") && strings.Contains(message, "not available")) ||
+		(strings.Contains(message, "aiyolo-ass socket") && strings.Contains(message, "not available")) ||
+		strings.Contains(message, "no such container") ||
+		strings.Contains(message, "connect aiyolo-ass") ||
+		(strings.Contains(message, "could not connect") && strings.Contains(message, "aiyolo-ass"))
 }
 
 func (handler *Handler) consoleChatWorkspaceRelativePath(r *http.Request, raw string, allowRoot bool) (string, error) {

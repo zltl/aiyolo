@@ -102,19 +102,22 @@ func TestCloudAgentContainerEnvUsesConsoleBaseURLAndCustomModel(t *testing.T) {
 	if env["AIYOLO_ASS_WORKSPACE_ROOT"] != "/workspace" || env["AIYOLO_ASS_USER"] != "aiyolo" || env["AIYOLO_ASS_SOCKET_PATH"] != cloudAgentASSSocketPath {
 		t.Fatalf("missing aiyolo-ass container env: %+v", env)
 	}
+	if env["AIYOLO_ASS_HTTP_ADDR"] != "0.0.0.0:17811" {
+		t.Fatalf("unexpected aiyolo-ass http addr: %+v", env)
+	}
 }
 
-func TestBuildCloudAgentASSRemoteCommandUsesUnixSocket(t *testing.T) {
-	script := buildCloudAgentASSRemoteCommand("aiyolo-cloud-agent-user", "POST", "http://aiyolo-ass/v1/shell/exec", true)
+func TestCloudAgentRemoteEnsurePublishesASSOnWorkerLoopback(t *testing.T) {
+	script := cloudAgentAssetString("cloud-agent/remote_ensure.py.tmpl")
 
-	if !strings.Contains(script, "--unix-socket") || !strings.Contains(script, cloudAgentASSSocketPath) {
-		t.Fatalf("ass remote command should call the Unix socket: %s", script)
+	if !strings.Contains(script, `"ass_base_url"`) || !strings.Contains(script, `payload['host_ass_port']`) {
+		t.Fatalf("cloud-agent summary should report the ASS loopback URL: %s", script)
 	}
-	if !strings.Contains(script, "--data-binary @-") {
-		t.Fatalf("ass remote command should stream request bodies over stdin: %s", script)
+	if !strings.Contains(script, `"-p", f"127.0.0.1:{payload['host_ass_port']}:{payload['container_ass_port']}"`) {
+		t.Fatalf("cloud-agent container should publish ASS only on worker loopback: %s", script)
 	}
-	if !strings.Contains(script, "docker exec -i") {
-		t.Fatalf("ass remote command should run curl inside the cloud-agent container: %s", script)
+	if !strings.Contains(script, `wait_for_tcp("127.0.0.1", payload["host_ass_port"], 30)`) {
+		t.Fatalf("cloud-agent ensure should wait for the ASS loopback listener: %s", script)
 	}
 }
 
@@ -195,6 +198,9 @@ func TestNormalizeCloudAgentStartOptionsSanitizesEmailContainerNames(t *testing.
 	}
 	if !strings.Contains(options.WorkspaceRoot, "/cloud-agents/i-quant67-com/workspace") {
 		t.Fatalf("WorkspaceRoot should use sanitized user segment, got %q", options.WorkspaceRoot)
+	}
+	if options.ContainerASSPort != defaultCloudAgentContainerASSPort || options.HostASSPort != cloudAgentHostPort("i@quant67.com", "worker-0-ass", defaultCloudAgentHostASSBasePort) {
+		t.Fatalf("unexpected ASS ports container=%d host=%d", options.ContainerASSPort, options.HostASSPort)
 	}
 }
 

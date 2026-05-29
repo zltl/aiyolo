@@ -5,6 +5,7 @@ import os
 import pathlib
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import urllib.request
@@ -164,6 +165,7 @@ def container_summary(inspected):
         summary["vnc"] = f"127.0.0.1:{payload['host_vnc_port']}"
     if payload.get("enable_display") and payload.get("auto_start_chrome"):
         summary["chrome_devtools"] = f"http://127.0.0.1:{payload['host_chrome_port']}/json/version"
+    summary["ass_base_url"] = f"http://127.0.0.1:{payload['host_ass_port']}"
     return summary
 
 
@@ -196,6 +198,10 @@ def container_matches(inspected):
         return False
     if labels.get("aiyolo.ass.sha256") != payload.get("ass_sha256", ""):
         return False
+    if labels.get("aiyolo.ass.container_port") != str(payload.get("container_ass_port", "")):
+        return False
+    if labels.get("aiyolo.ass.host_port") != str(payload.get("host_ass_port", "")):
+        return False
     if inspected.get("Config", {}).get("Image") != payload["image"]:
         return False
     if mount_source(inspected, payload["workspace_path"]) != payload["workspace_root"]:
@@ -218,6 +224,18 @@ def wait_for(command, timeout_seconds):
         except subprocess.CalledProcessError:
             time.sleep(1)
     raise SystemExit("timed out waiting for container service")
+
+
+def wait_for_tcp(host, port, timeout_seconds):
+    deadline = time.time() + timeout_seconds
+    port = int(port)
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=2):
+                return
+        except OSError:
+            time.sleep(1)
+    raise SystemExit(f"timed out waiting for TCP service {host}:{port}")
 
 
 def remove_container():
@@ -255,6 +273,7 @@ def wait_for_container_runtime():
     if payload.get("enable_display"):
         wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", f"nc -z 127.0.0.1 {payload['container_vnc_port']}"], 30)
     wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "test -S ${AIYOLO_ASS_SOCKET_PATH:-/run/aiyolo/ass.sock}"], 30)
+    wait_for_tcp("127.0.0.1", payload["host_ass_port"], 30)
     if payload.get("enable_dockerd"):
         wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "docker info >/dev/null 2>&1"], 60)
     if payload.get("enable_display") and payload.get("auto_start_chrome"):
@@ -285,6 +304,8 @@ def ensure_container():
         "--label", f"aiyolo.workspace_path={payload['workspace_path']}",
         "--label", f"aiyolo.cloud_agent.build_revision={payload.get('build_revision', '')}",
         "--label", f"aiyolo.ass.sha256={payload.get('ass_sha256', '')}",
+        "--label", f"aiyolo.ass.container_port={payload['container_ass_port']}",
+        "--label", f"aiyolo.ass.host_port={payload['host_ass_port']}",
     ]
     for key in sorted((payload.get("container_env") or {}).keys()):
         args.extend(["-e", f"{key}={payload['container_env'][key]}"])
@@ -295,6 +316,7 @@ def ensure_container():
         args.extend(["-p", f"127.0.0.1:{payload['host_vnc_port']}:{payload['container_vnc_port']}"])
     if payload.get("enable_display") and payload.get("auto_start_chrome"):
         args.extend(["-p", f"127.0.0.1:{payload['host_chrome_port']}:{payload['container_chrome_port']}"])
+    args.extend(["-p", f"127.0.0.1:{payload['host_ass_port']}:{payload['container_ass_port']}"])
     args.append(payload["image"])
     run(args)
     wait_for_container_runtime()
