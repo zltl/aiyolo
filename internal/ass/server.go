@@ -34,6 +34,7 @@ const (
 	DefaultExecUser           = "aiyolo"
 	DefaultExecHome           = "/workspace"
 	DefaultMaxFileBytes       = int64(512 * 1024)
+	DefaultMaxUploadBytes     = int64(20 * 1024 * 1024)
 	DefaultMaxTreeEntries     = 1000
 	DefaultMaxExecOutputBytes = int64(1024 * 1024)
 	DefaultShellTimeout       = 30 * time.Second
@@ -48,6 +49,7 @@ type Config struct {
 	ExecUser          string
 	ExecHome          string
 	MaxFileBytes      int64
+	MaxUploadBytes    int64
 	MaxTreeEntries    int
 	MaxExecOutputByte int64
 }
@@ -58,6 +60,7 @@ type Server struct {
 	execUser          string
 	execHome          string
 	maxFileBytes      int64
+	maxUploadBytes    int64
 	maxTreeEntries    int
 	maxExecOutputByte int64
 }
@@ -93,6 +96,7 @@ func ConfigFromEnv() Config {
 		ExecUser:          envString("AIYOLO_ASS_USER", DefaultExecUser),
 		ExecHome:          envString("AIYOLO_ASS_HOME", DefaultExecHome),
 		MaxFileBytes:      envInt64("AIYOLO_ASS_MAX_FILE_BYTES", DefaultMaxFileBytes),
+		MaxUploadBytes:    envInt64("AIYOLO_ASS_MAX_UPLOAD_BYTES", DefaultMaxUploadBytes),
 		MaxTreeEntries:    envInt("AIYOLO_ASS_MAX_TREE_ENTRIES", DefaultMaxTreeEntries),
 		MaxExecOutputByte: envInt64("AIYOLO_ASS_MAX_EXEC_OUTPUT_BYTES", DefaultMaxExecOutputBytes),
 	}
@@ -123,6 +127,10 @@ func NewServer(cfg Config) (*Server, error) {
 	if maxFileBytes <= 0 {
 		maxFileBytes = DefaultMaxFileBytes
 	}
+	maxUploadBytes := cfg.MaxUploadBytes
+	if maxUploadBytes <= 0 {
+		maxUploadBytes = DefaultMaxUploadBytes
+	}
 	maxTreeEntries := cfg.MaxTreeEntries
 	if maxTreeEntries <= 0 {
 		maxTreeEntries = DefaultMaxTreeEntries
@@ -137,6 +145,7 @@ func NewServer(cfg Config) (*Server, error) {
 		execUser:          execUser,
 		execHome:          execHome,
 		maxFileBytes:      maxFileBytes,
+		maxUploadBytes:    maxUploadBytes,
 		maxTreeEntries:    maxTreeEntries,
 		maxExecOutputByte: maxExecOutputBytes,
 	}, nil
@@ -148,6 +157,8 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/fs/tree", server.handleFSTree)
 	mux.HandleFunc("GET /v1/fs/file", server.handleReadFile)
 	mux.HandleFunc("PUT /v1/fs/file", server.handleWriteFile)
+	mux.HandleFunc("PUT /v1/fs/upload", server.handleUploadFile)
+	mux.HandleFunc("PUT /v1/fs/directory", server.handleCreateDirectory)
 	mux.HandleFunc("POST /v1/shell/exec", server.handleShellExec)
 	return mux
 }
@@ -252,6 +263,48 @@ func (server *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 	server.writeOK(w, r, result)
 }
 
+func (server *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
+	var request fsUploadRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, server.maxUploadBytes*2+1024*64)).Decode(&request); err != nil {
+		server.writeError(w, r, newAPIError(http.StatusBadRequest, "encoding_invalid", "file upload request is invalid"))
+		return
+	}
+	if int64(len(request.Content)) > server.maxUploadBytes {
+		server.writeError(w, r, newAPIError(http.StatusRequestEntityTooLarge, "file_too_large", "workspace upload exceeds the size limit"))
+		return
+	}
+	relativePath, apiErr := server.normalizeWorkspacePath(request.Path, false)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	result, apiErr := server.writeBinaryFile(relativePath, request.Content, request.MkdirP, request.Overwrite)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	server.writeOK(w, r, result)
+}
+
+func (server *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Request) {
+	var request fsDirectoryRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&request); err != nil {
+		server.writeError(w, r, newAPIError(http.StatusBadRequest, "encoding_invalid", "directory create request is invalid"))
+		return
+	}
+	relativePath, apiErr := server.normalizeWorkspacePath(request.Path, false)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	result, apiErr := server.createDirectory(relativePath, request.MkdirP)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	server.writeOK(w, r, result)
+}
+
 func (server *Server) handleShellExec(w http.ResponseWriter, r *http.Request) {
 	var request shellExecRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024)).Decode(&request); err != nil {
@@ -300,10 +353,26 @@ type fsWriteRequest struct {
 	MkdirP           bool   `json:"mkdir_p"`
 }
 
+type fsUploadRequest struct {
+	Path      string `json:"path"`
+	Content   []byte `json:"content"`
+	MkdirP    bool   `json:"mkdir_p"`
+	Overwrite bool   `json:"overwrite"`
+}
+
 type fsWriteData struct {
 	Path     string `json:"path"`
 	Bytes    int64  `json:"bytes"`
 	Revision string `json:"revision"`
+}
+
+type fsDirectoryRequest struct {
+	Path   string `json:"path"`
+	MkdirP bool   `json:"mkdir_p"`
+}
+
+type fsDirectoryData struct {
+	Path string `json:"path"`
 }
 
 type shellExecRequest struct {
@@ -561,6 +630,43 @@ func (server *Server) writeTextFile(relativePath string, payload []byte, expecte
 	return server.atomicWrite(relativePath, evaluated, payload, info.Mode().Perm(), info)
 }
 
+func (server *Server) writeBinaryFile(relativePath string, payload []byte, mkdirP bool, overwrite bool) (fsWriteData, *apiError) {
+	realPath := filepath.Join(server.workspaceRootReal, filepath.FromSlash(relativePath))
+	info, statErr := os.Stat(realPath)
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return fsWriteData{}, newAPIError(http.StatusInternalServerError, "internal_error", "inspect workspace file failed")
+	}
+	if errors.Is(statErr, os.ErrNotExist) {
+		parentReal, apiErr := server.resolveWritableParent(relativePath, mkdirP)
+		if apiErr != nil {
+			return fsWriteData{}, apiErr
+		}
+		realPath = filepath.Join(parentReal, filepath.Base(filepath.FromSlash(relativePath)))
+		if !server.pathWithinRoot(realPath) {
+			return fsWriteData{}, newAPIError(http.StatusBadRequest, "path_invalid", "workspace path escapes root")
+		}
+		return server.atomicWrite(relativePath, realPath, payload, 0644, nil)
+	}
+	if !overwrite {
+		return fsWriteData{}, newAPIError(http.StatusConflict, "path_exists", "workspace file already exists")
+	}
+	evaluated, err := filepath.EvalSymlinks(realPath)
+	if err != nil {
+		return fsWriteData{}, newAPIError(http.StatusInternalServerError, "internal_error", "resolve workspace file failed")
+	}
+	if !server.pathWithinRoot(evaluated) {
+		return fsWriteData{}, newAPIError(http.StatusBadRequest, "path_invalid", "workspace path escapes root")
+	}
+	info, err = os.Stat(evaluated)
+	if err != nil {
+		return fsWriteData{}, newAPIError(http.StatusInternalServerError, "internal_error", "inspect workspace file failed")
+	}
+	if !info.Mode().IsRegular() {
+		return fsWriteData{}, newAPIError(http.StatusBadRequest, "path_not_file", "workspace path is not a file")
+	}
+	return server.atomicWrite(relativePath, evaluated, payload, info.Mode().Perm(), info)
+}
+
 func (server *Server) atomicWrite(relativePath string, realPath string, payload []byte, mode os.FileMode, ownerFrom os.FileInfo) (fsWriteData, *apiError) {
 	dir := filepath.Dir(realPath)
 	tmpFile, err := os.CreateTemp(dir, ".aiyolo-ass-*")
@@ -620,6 +726,33 @@ func (server *Server) resolveWritableParent(relativePath string, mkdirP bool) (s
 		return "", newAPIError(http.StatusBadRequest, "path_not_directory", "workspace parent path is not a directory")
 	}
 	return parentReal, nil
+}
+
+func (server *Server) createDirectory(relativePath string, mkdirP bool) (fsDirectoryData, *apiError) {
+	realPath := filepath.Join(server.workspaceRootReal, filepath.FromSlash(relativePath))
+	if info, err := os.Stat(realPath); err == nil {
+		if info.IsDir() {
+			return fsDirectoryData{}, newAPIError(http.StatusConflict, "path_exists", "workspace directory already exists")
+		}
+		return fsDirectoryData{}, newAPIError(http.StatusConflict, "path_exists", "workspace path already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fsDirectoryData{}, newAPIError(http.StatusInternalServerError, "internal_error", "inspect workspace directory failed")
+	}
+	parentReal, apiErr := server.resolveWritableParent(relativePath, mkdirP)
+	if apiErr != nil {
+		return fsDirectoryData{}, apiErr
+	}
+	realPath = filepath.Join(parentReal, filepath.Base(filepath.FromSlash(relativePath)))
+	if !server.pathWithinRoot(realPath) {
+		return fsDirectoryData{}, newAPIError(http.StatusBadRequest, "path_invalid", "workspace path escapes root")
+	}
+	if err := os.Mkdir(realPath, 0755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fsDirectoryData{}, newAPIError(http.StatusConflict, "path_exists", "workspace directory already exists")
+		}
+		return fsDirectoryData{}, newAPIError(http.StatusInternalServerError, "internal_error", "create workspace directory failed")
+	}
+	return fsDirectoryData{Path: relativePath}, nil
 }
 
 func (server *Server) resolveExisting(raw string, allowRoot bool) (string, string, os.FileInfo, *apiError) {

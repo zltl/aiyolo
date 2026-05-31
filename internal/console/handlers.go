@@ -45,24 +45,28 @@ type consoleChatAttachmentObjectReader interface {
 }
 
 type Handler struct {
-	cfg                          Config
-	store                        storage.Store
-	tmpl                         *template.Template
-	cloudAgentRuns               *consoleCloudAgentRunRegistry
-	newChatAttachmentPublisher   func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error)
-	newChatAttachmentReader      func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error)
+	cfg                            Config
+	store                          storage.Store
+	tmpl                           *template.Template
+	cloudAgentRuns                 *consoleCloudAgentRunRegistry
+	chatShells                     *consoleChatShellRegistry
+	newChatAttachmentPublisher     func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error)
+	newChatAttachmentReader        func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error)
 	newChatAttachmentCatalogReader func(cfg artifacts.Config) (artifacts.CatalogReader, error)
-	probeWorker                  func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (workerops.ProbeResult, error)
-	buildWorkerBootstrap         func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan
-	executeWorkerBootstrap       func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error)
-	verifyWorkerBootstrap        func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error)
-	ensureCloudAgent             func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error)
-	openCloudAgentShell          func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error)
-	runCloudAgentCommand         func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, script string) (string, error)
-	listCloudAgentWorkspaceTree  func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceTree, error)
-	readCloudAgentWorkspaceFile  func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceFile, error)
-	writeCloudAgentWorkspaceFile func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content string) (workerops.CloudAgentWorkspaceFile, error)
-	runCloudAgentChat            func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error)
+	probeWorker                    func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (workerops.ProbeResult, error)
+	buildWorkerBootstrap           func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan
+	executeWorkerBootstrap         func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error)
+	verifyWorkerBootstrap          func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error)
+	ensureCloudAgent               func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error)
+	openCloudAgentShell            func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error)
+	runCloudAgentCommand           func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, script string) (string, error)
+	listCloudAgentWorkspaceTree    func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceTree, error)
+	readCloudAgentWorkspaceFile    func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceFile, error)
+	writeCloudAgentWorkspaceFile   func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content string) (workerops.CloudAgentWorkspaceFile, error)
+	createCloudAgentWorkspaceFile  func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content string, mkdirP bool) (workerops.CloudAgentWorkspaceFile, error)
+	uploadCloudAgentWorkspaceFile  func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content []byte, mkdirP bool, overwrite bool) (workerops.CloudAgentWorkspaceFile, error)
+	createCloudAgentWorkspaceDir   func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, mkdirP bool) (workerops.CloudAgentWorkspaceDirectory, error)
+	runCloudAgentChat              func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error)
 }
 
 func NewHandler(cfg Config, store storage.Store) *Handler {
@@ -75,13 +79,13 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 	if strings.TrimSpace(cfg.ChatAttachments.ProxyBasePath) == "" {
 		cfg.ChatAttachments.ProxyBasePath = "/console/chat/attachments/files"
 	}
-	return &Handler{cfg: cfg, store: store, tmpl: template.Must(template.New("console").Funcs(templateFuncs()).ParseFS(consoleAssets, "templates/*.html")), cloudAgentRuns: newConsoleCloudAgentRunRegistry(), newChatAttachmentPublisher: func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error) {
+	return &Handler{cfg: cfg, store: store, tmpl: template.Must(template.New("console").Funcs(templateFuncs()).ParseFS(consoleAssets, "templates/*.html")), cloudAgentRuns: newConsoleCloudAgentRunRegistry(), chatShells: newConsoleChatShellRegistry(), newChatAttachmentPublisher: func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error) {
 		return artifacts.NewPublisher(cfg)
 	}, newChatAttachmentReader: func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error) {
 		return artifacts.NewObjectReader(cfg)
 	}, newChatAttachmentCatalogReader: func(cfg artifacts.Config) (artifacts.CatalogReader, error) {
 		return artifacts.NewCatalogReader(cfg)
-	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentCommand: workerops.RunCloudAgentCommand, listCloudAgentWorkspaceTree: workerops.ListCloudAgentWorkspaceTree, readCloudAgentWorkspaceFile: workerops.ReadCloudAgentWorkspaceFile, writeCloudAgentWorkspaceFile: workerops.WriteCloudAgentWorkspaceFile, runCloudAgentChat: runConsoleCloudAgentChat}
+	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentCommand: workerops.RunCloudAgentCommand, listCloudAgentWorkspaceTree: workerops.ListCloudAgentWorkspaceTree, readCloudAgentWorkspaceFile: workerops.ReadCloudAgentWorkspaceFile, writeCloudAgentWorkspaceFile: workerops.WriteCloudAgentWorkspaceFile, createCloudAgentWorkspaceFile: workerops.CreateCloudAgentWorkspaceFile, uploadCloudAgentWorkspaceFile: workerops.UploadCloudAgentWorkspaceFile, createCloudAgentWorkspaceDir: workerops.CreateCloudAgentWorkspaceDirectory, runCloudAgentChat: runConsoleCloudAgentChat}
 }
 
 func (handler *Handler) Routes() http.Handler {
@@ -107,6 +111,8 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Get("/chat/workspace/tree", handler.chatWorkspaceTree)
 		protected.Get("/chat/workspace/file", handler.chatWorkspaceFile)
 		protected.Post("/chat/workspace/file", handler.saveChatWorkspaceFile)
+		protected.Post("/chat/workspace/upload", handler.uploadChatWorkspaceFile)
+		protected.Post("/chat/workspace/directory", handler.createChatWorkspaceDirectory)
 		protected.Post("/chat/environment/ensure", handler.chatEnvironmentEnsure)
 		protected.Post("/chat/session", handler.saveChatSession)
 		protected.Delete("/chat/session/{sessionID}", handler.deleteChatSession)

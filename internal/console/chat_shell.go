@@ -24,12 +24,14 @@ import (
 const (
 	consoleChatShellPagePath   = "/console/chat/shell"
 	consoleChatShellSocketPath = "/console/chat/shell/ws"
+	consoleChatShellDefaultID  = "default"
 	consoleChatShellCols       = 120
 	consoleChatShellRows       = 32
 )
 
 type consoleChatShellPageState struct {
 	SessionID     string
+	TerminalID    string
 	WorkerID      string
 	ContainerName string
 	WorkspacePath string
@@ -54,6 +56,7 @@ type consoleChatShellSocketEvent struct {
 type consoleChatShellReadyResponse struct {
 	Status        string `json:"status"`
 	SessionID     string `json:"sessionId,omitempty"`
+	TerminalID    string `json:"terminalId,omitempty"`
 	Environment   string `json:"environment,omitempty"`
 	WorkerID      string `json:"workerId,omitempty"`
 	ContainerName string `json:"containerName,omitempty"`
@@ -68,6 +71,38 @@ func (state consoleChatShellPageState) data() map[string]any {
 		"ChatShell":      state,
 		"ChatShellError": state.Error,
 	}
+}
+
+func normalizeConsoleChatShellTerminalID(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return consoleChatShellDefaultID
+	}
+	var builder strings.Builder
+	for _, r := range trimmed {
+		if r <= 32 || strings.ContainsRune("/?#&=\\", r) {
+			continue
+		}
+		builder.WriteRune(r)
+		if builder.Len() >= 80 {
+			break
+		}
+	}
+	if builder.Len() == 0 {
+		return consoleChatShellDefaultID
+	}
+	return builder.String()
+}
+
+func consoleChatShellTerminalID(r *http.Request) string {
+	return normalizeConsoleChatShellTerminalID(r.URL.Query().Get("terminal"))
+}
+
+func consoleChatShellSocketURL(chatSessionID, terminalID string) string {
+	query := url.Values{}
+	query.Set("session", strings.TrimSpace(chatSessionID))
+	query.Set("terminal", normalizeConsoleChatShellTerminalID(terminalID))
+	return consoleChatShellSocketPath + "?" + query.Encode()
 }
 
 func (handler *Handler) resolveConsoleChatCloudAgentTarget(ctx context.Context, r *http.Request, chatSessionID string) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
@@ -218,12 +253,14 @@ func (handler *Handler) chatShellPageStateForSession(ctx context.Context, r *htt
 		return consoleChatShellPageState{}, err
 	}
 	chatSessionID = firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(chatSessionID))
+	terminalID := consoleChatShellTerminalID(r)
 	return consoleChatShellPageState{
 		SessionID:     chatSessionID,
+		TerminalID:    terminalID,
 		WorkerID:      worker.ID,
 		ContainerName: account.ContainerName,
 		WorkspacePath: firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath),
-		SocketURL:     consoleChatShellSocketPath + "?session=" + url.QueryEscape(chatSessionID),
+		SocketURL:     consoleChatShellSocketURL(chatSessionID, terminalID),
 		ChatURL:       consoleChatEndpoint + "?session=" + url.QueryEscape(chatSessionID),
 	}, nil
 }
@@ -250,15 +287,17 @@ func (handler *Handler) chatShellReady(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(consoleChatShellErrorStatus(err))
 		_ = json.NewEncoder(w).Encode(consoleChatShellReadyResponse{
-			Status:    "error",
-			SessionID: sessionID,
-			Error:     err.Error(),
+			Status:     "error",
+			SessionID:  sessionID,
+			TerminalID: consoleChatShellTerminalID(r),
+			Error:      err.Error(),
 		})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(consoleChatShellReadyResponse{
 		Status:        "ready",
 		SessionID:     state.SessionID,
+		TerminalID:    state.TerminalID,
 		Environment:   consoleChatEnvironmentValue(state.WorkerID),
 		WorkerID:      state.WorkerID,
 		ContainerName: state.ContainerName,
@@ -284,13 +323,20 @@ func (handler *Handler) chatShellSocket(w http.ResponseWriter, r *http.Request) 
 
 func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession) {
 	defer ws.Close()
-	shell, err := handler.openCloudAgentShell(context.Background(), worker, key, account, cloudSession, consoleChatShellCols, consoleChatShellRows)
+	if handler.chatShells == nil {
+		handler.chatShells = newConsoleChatShellRegistry()
+	}
+	chatSessionID := firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(strings.TrimPrefix(cloudSession.ID, "chat-env-")))
+	terminalID := consoleChatShellTerminalID(r)
+	registryKey := consoleChatShellRegistryKey(currentConsoleSessionSubject(r, handler.cfg.SecretKey), chatSessionID, terminalID)
+	shellSession, err := handler.chatShells.getOrCreate(registryKey, func(ctx context.Context) (workerops.InteractiveShell, error) {
+		return handler.openCloudAgentShell(ctx, worker, key, account, cloudSession, consoleChatShellCols, consoleChatShellRows)
+	})
 	if err != nil {
-		log.Printf("console chat shell open failed session_id=%s worker_id=%s container=%s err=%v", cloudSession.ChatSessionID, worker.ID, account.ContainerName, err)
+		log.Printf("console chat shell open failed session_id=%s terminal_id=%s worker_id=%s container=%s err=%v", chatSessionID, terminalID, worker.ID, account.ContainerName, err)
 		_ = websocket.JSON.Send(ws, consoleChatShellSocketEvent{Type: "error", Message: err.Error()})
 		return
 	}
-	defer shell.Close()
 
 	var sendMu sync.Mutex
 	send := func(event consoleChatShellSocketEvent) error {
@@ -299,48 +345,60 @@ func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request
 		return websocket.JSON.Send(ws, event)
 	}
 	_ = send(consoleChatShellSocketEvent{Type: "ready", Message: handler.requestText(r, "终端已连接", "Terminal connected")})
+	subscriberID, events, replay, done, closedMessage := shellSession.subscribe()
+	defer shellSession.unsubscribe(subscriberID)
+	if replay != "" {
+		if err := send(consoleChatShellSocketEvent{Type: "output", Data: replay}); err != nil {
+			return
+		}
+	}
+	if done {
+		_ = send(consoleChatShellSocketEvent{Type: "closed", Message: firstNonEmpty(closedMessage, handler.requestText(r, "终端已断开", "Terminal disconnected"))})
+		return
+	}
 
-	shellDone := make(chan error, 1)
+	eventDone := make(chan error, 1)
+	stopEvents := make(chan struct{})
 	go func() {
-		shellDone <- streamConsoleChatShellOutput(shell, send)
+		for {
+			select {
+			case event, ok := <-events:
+				if !ok {
+					eventDone <- nil
+					return
+				}
+				if err := send(event); err != nil {
+					eventDone <- err
+					return
+				}
+				if event.Type == "closed" {
+					eventDone <- nil
+					return
+				}
+			case <-stopEvents:
+				eventDone <- nil
+				return
+			}
+		}
 	}()
 
 	clientDone := make(chan error, 1)
 	go func() {
-		clientDone <- receiveConsoleChatShellInput(ws, shell)
+		clientDone <- receiveConsoleChatShellInput(ws, shellSession, handler.requestText(r, "终端已关闭", "Terminal closed"))
 	}()
 
 	var finalErr error
 	select {
-	case finalErr = <-shellDone:
+	case finalErr = <-eventDone:
 	case finalErr = <-clientDone:
 	}
-	_ = shell.Close()
-	closedMessage := handler.requestText(r, "终端已断开", "Terminal disconnected")
+	close(stopEvents)
 	if finalErr != nil && !consoleChatShellIgnorableError(finalErr) {
-		log.Printf("console chat shell disconnected session_id=%s worker_id=%s container=%s err=%v", cloudSession.ChatSessionID, worker.ID, account.ContainerName, finalErr)
-		_ = send(consoleChatShellSocketEvent{Type: "error", Message: finalErr.Error()})
-		closedMessage = finalErr.Error()
-	}
-	_ = send(consoleChatShellSocketEvent{Type: "closed", Message: closedMessage})
-}
-
-func streamConsoleChatShellOutput(shell workerops.InteractiveShell, send func(consoleChatShellSocketEvent) error) error {
-	buffer := make([]byte, 4096)
-	for {
-		count, err := shell.Read(buffer)
-		if count > 0 {
-			if sendErr := send(consoleChatShellSocketEvent{Type: "output", Data: string(buffer[:count])}); sendErr != nil {
-				return sendErr
-			}
-		}
-		if err != nil {
-			return err
-		}
+		log.Printf("console chat shell websocket disconnected session_id=%s terminal_id=%s worker_id=%s container=%s err=%v", chatSessionID, terminalID, worker.ID, account.ContainerName, finalErr)
 	}
 }
 
-func receiveConsoleChatShellInput(ws *websocket.Conn, shell workerops.InteractiveShell) error {
+func receiveConsoleChatShellInput(ws *websocket.Conn, shell *consoleChatShellSession, closeMessage string) error {
 	for {
 		var payload consoleChatShellSocketRequest
 		if err := websocket.JSON.Receive(ws, &payload); err != nil {
@@ -358,6 +416,9 @@ func receiveConsoleChatShellInput(ws *websocket.Conn, shell workerops.Interactiv
 			if err := shell.Resize(payload.Cols, payload.Rows); err != nil {
 				return err
 			}
+		case "close":
+			shell.close(closeMessage)
+			return nil
 		}
 	}
 }

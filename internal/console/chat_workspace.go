@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"path"
 	"strings"
@@ -14,9 +15,12 @@ import (
 )
 
 const (
-	consoleChatWorkspaceTreePath     = "/console/chat/workspace/tree"
-	consoleChatWorkspaceFilePath     = "/console/chat/workspace/file"
-	consoleChatWorkspaceMaxFileBytes = 512 * 1024
+	consoleChatWorkspaceTreePath       = "/console/chat/workspace/tree"
+	consoleChatWorkspaceFilePath       = "/console/chat/workspace/file"
+	consoleChatWorkspaceUploadPath     = "/console/chat/workspace/upload"
+	consoleChatWorkspaceDirectoryPath  = "/console/chat/workspace/directory"
+	consoleChatWorkspaceMaxFileBytes   = 512 * 1024
+	consoleChatWorkspaceMaxUploadBytes = 20 * 1024 * 1024
 )
 
 type consoleChatWorkspaceTarget struct {
@@ -90,6 +94,25 @@ type consoleChatWorkspaceFileResponse struct {
 type consoleChatWorkspaceFileSaveRequest struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
+	Create  bool   `json:"create"`
+	MkdirP  bool   `json:"mkdir_p"`
+}
+
+type consoleChatWorkspaceDirectoryCreateRequest struct {
+	Path   string `json:"path"`
+	MkdirP bool   `json:"mkdir_p"`
+}
+
+type consoleChatWorkspaceDirectoryResponse struct {
+	Status        string `json:"status"`
+	SessionID     string `json:"sessionId,omitempty"`
+	Environment   string `json:"environment,omitempty"`
+	WorkerID      string `json:"workerId,omitempty"`
+	ContainerName string `json:"containerName,omitempty"`
+	WorkspacePath string `json:"workspacePath,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Notice        string `json:"notice,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 func (handler *Handler) resolveConsoleChatWorkspaceTarget(ctx context.Context, r *http.Request, ensureRuntime bool) (consoleChatWorkspaceTarget, error) {
@@ -301,13 +324,138 @@ func (handler *Handler) saveChatWorkspaceFile(w http.ResponseWriter, r *http.Req
 		})
 		return
 	}
-	result, err := handler.writeConsoleChatWorkspaceFile(r.Context(), target, relativePath, request.Content)
+	writeFile := func(target consoleChatWorkspaceTarget) (consoleChatWorkspaceFileResult, error) {
+		if request.Create {
+			return handler.createConsoleChatWorkspaceFile(r.Context(), target, relativePath, request.Content, request.MkdirP)
+		}
+		return handler.writeConsoleChatWorkspaceFile(r.Context(), target, relativePath, request.Content)
+	}
+	result, err := writeFile(target)
 	if err != nil {
 		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
 			err = retryErr
 		} else if retried {
 			target = retryTarget
-			result, err = handler.writeConsoleChatWorkspaceFile(r.Context(), target, relativePath, request.Content)
+			result, err = writeFile(target)
+		}
+	}
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			Path:          relativePath,
+			Error:         err.Error(),
+		})
+		return
+	}
+	status := "saved"
+	notice := handler.requestText(r, "文件已保存。", "File saved.")
+	if request.Create {
+		status = "created"
+		notice = handler.requestText(r, "文件已创建。", "File created.")
+	}
+	_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{
+		Status:        status,
+		SessionID:     target.SessionID,
+		Environment:   target.Environment,
+		WorkerID:      target.WorkerID,
+		ContainerName: target.ContainerName,
+		WorkspacePath: target.WorkspacePath,
+		Path:          result.Path,
+		Bytes:         result.Bytes,
+		Notice:        notice,
+	})
+}
+
+func (handler *Handler) uploadChatWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{Status: "error", Error: err.Error()})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, consoleChatWorkspaceMaxUploadBytes+1024*1024)
+	if err := r.ParseMultipartForm(consoleChatWorkspaceMaxUploadBytes); err != nil {
+		message := handler.requestText(r, "工作区上传请求无效。", "The workspace upload request is invalid.")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			Error:         message,
+		})
+		return
+	}
+	relativePath, err := handler.consoleChatWorkspaceRelativePath(r, r.FormValue("path"), false)
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			Error:         err.Error(),
+		})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		message := handler.requestText(r, "请选择要上传的文件。", "Choose a file to upload.")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			Path:          relativePath,
+			Error:         message,
+		})
+		return
+	}
+	defer file.Close()
+	if header != nil && header.Size > consoleChatWorkspaceMaxUploadBytes {
+		message := handler.requestText(r, "上传文件超过大小上限。", "The uploaded file exceeds the size limit.")
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Path: relativePath, Error: message})
+		return
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, consoleChatWorkspaceMaxUploadBytes+1))
+	if err != nil {
+		message := handler.requestText(r, "读取上传文件失败。", "Failed to read the uploaded file.")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Path: relativePath, Error: message})
+		return
+	}
+	if len(payload) > consoleChatWorkspaceMaxUploadBytes {
+		message := handler.requestText(r, "上传文件超过大小上限。", "The uploaded file exceeds the size limit.")
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Path: relativePath, Error: message})
+		return
+	}
+	overwrite := strings.EqualFold(strings.TrimSpace(r.FormValue("overwrite")), "true") || strings.TrimSpace(r.FormValue("overwrite")) == "1"
+	uploadFile := func(target consoleChatWorkspaceTarget) (consoleChatWorkspaceFileResult, error) {
+		return handler.uploadConsoleChatWorkspaceFile(r.Context(), target, relativePath, payload, true, overwrite)
+	}
+	result, err := uploadFile(target)
+	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			result, err = uploadFile(target)
 		}
 	}
 	if err != nil {
@@ -325,7 +473,7 @@ func (handler *Handler) saveChatWorkspaceFile(w http.ResponseWriter, r *http.Req
 		return
 	}
 	_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{
-		Status:        "saved",
+		Status:        "uploaded",
 		SessionID:     target.SessionID,
 		Environment:   target.Environment,
 		WorkerID:      target.WorkerID,
@@ -333,7 +481,79 @@ func (handler *Handler) saveChatWorkspaceFile(w http.ResponseWriter, r *http.Req
 		WorkspacePath: target.WorkspacePath,
 		Path:          result.Path,
 		Bytes:         result.Bytes,
-		Notice:        handler.requestText(r, "文件已保存。", "File saved."),
+		Notice:        handler.requestText(r, "文件已上传。", "File uploaded."),
+	})
+}
+
+func (handler *Handler) createChatWorkspaceDirectory(w http.ResponseWriter, r *http.Request) {
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDirectoryResponse{Status: "error", Error: err.Error()})
+		return
+	}
+	var request consoleChatWorkspaceDirectoryCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		message := handler.requestText(r, "工作区目录创建请求无效。", "The workspace directory create request is invalid.")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDirectoryResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			Error:         message,
+		})
+		return
+	}
+	relativePath, err := handler.consoleChatWorkspaceRelativePath(r, request.Path, false)
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDirectoryResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			Error:         err.Error(),
+		})
+		return
+	}
+	result, err := handler.createConsoleChatWorkspaceDirectory(r.Context(), target, relativePath, request.MkdirP)
+	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			result, err = handler.createConsoleChatWorkspaceDirectory(r.Context(), target, relativePath, request.MkdirP)
+		}
+	}
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDirectoryResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			Path:          relativePath,
+			Error:         err.Error(),
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDirectoryResponse{
+		Status:        "created",
+		SessionID:     target.SessionID,
+		Environment:   target.Environment,
+		WorkerID:      target.WorkerID,
+		ContainerName: target.ContainerName,
+		WorkspacePath: target.WorkspacePath,
+		Path:          result.Path,
+		Notice:        handler.requestText(r, "目录已创建。", "Directory created."),
 	})
 }
 
@@ -363,6 +583,30 @@ func (handler *Handler) writeConsoleChatWorkspaceFile(ctx context.Context, targe
 		return consoleChatWorkspaceFileResult{}, err
 	}
 	return consoleChatWorkspaceFileResult{Path: result.Path, Bytes: result.Bytes}, nil
+}
+
+func (handler *Handler) createConsoleChatWorkspaceFile(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string, content string, mkdirP bool) (consoleChatWorkspaceFileResult, error) {
+	result, err := handler.createCloudAgentWorkspaceFile(ctx, target.Worker, target.Key, target.Account, target.CloudSession, relativePath, content, mkdirP)
+	if err != nil {
+		return consoleChatWorkspaceFileResult{}, err
+	}
+	return consoleChatWorkspaceFileResult{Path: result.Path, Bytes: result.Bytes}, nil
+}
+
+func (handler *Handler) uploadConsoleChatWorkspaceFile(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string, content []byte, mkdirP bool, overwrite bool) (consoleChatWorkspaceFileResult, error) {
+	result, err := handler.uploadCloudAgentWorkspaceFile(ctx, target.Worker, target.Key, target.Account, target.CloudSession, relativePath, content, mkdirP, overwrite)
+	if err != nil {
+		return consoleChatWorkspaceFileResult{}, err
+	}
+	return consoleChatWorkspaceFileResult{Path: result.Path, Bytes: result.Bytes}, nil
+}
+
+func (handler *Handler) createConsoleChatWorkspaceDirectory(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string, mkdirP bool) (consoleChatWorkspaceFileResult, error) {
+	result, err := handler.createCloudAgentWorkspaceDir(ctx, target.Worker, target.Key, target.Account, target.CloudSession, relativePath, mkdirP)
+	if err != nil {
+		return consoleChatWorkspaceFileResult{}, err
+	}
+	return consoleChatWorkspaceFileResult{Path: result.Path}, nil
 }
 
 func (handler *Handler) restoreConsoleChatWorkspaceRuntime(ctx context.Context, r *http.Request, target consoleChatWorkspaceTarget, cause error) (consoleChatWorkspaceTarget, bool, error) {
@@ -460,6 +704,12 @@ func consoleChatWorkspaceErrorStatus(err error) int {
 		return http.StatusNotFound
 	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(message, "path_exists") || strings.Contains(message, "already exists") {
+		return http.StatusConflict
+	}
+	if strings.Contains(message, "file_too_large") || strings.Contains(message, "too large") || strings.Contains(message, "exceeds the size limit") {
+		return http.StatusRequestEntityTooLarge
+	}
 	if strings.Contains(message, "missing chat session") || strings.Contains(message, "workspace") || strings.Contains(message, "choose a file") {
 		return http.StatusBadRequest
 	}

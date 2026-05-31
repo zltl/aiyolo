@@ -49,6 +49,10 @@ type CloudAgentWorkspaceFile struct {
 	Bytes      int64  `json:"bytes"`
 }
 
+type CloudAgentWorkspaceDirectory struct {
+	Path string `json:"path"`
+}
+
 type CloudAgentShellExecRequest struct {
 	Mode           string            `json:"mode"`
 	Script         string            `json:"script,omitempty"`
@@ -109,13 +113,49 @@ func ReadCloudAgentWorkspaceFile(ctx context.Context, worker domain.WorkerServer
 }
 
 func WriteCloudAgentWorkspaceFile(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, relativePath string, content string) (CloudAgentWorkspaceFile, error) {
+	return writeCloudAgentWorkspaceFile(ctx, worker, key, account, cloudSession, relativePath, content, false, false)
+}
+
+func CreateCloudAgentWorkspaceFile(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, relativePath string, content string, mkdirP bool) (CloudAgentWorkspaceFile, error) {
+	return writeCloudAgentWorkspaceFile(ctx, worker, key, account, cloudSession, relativePath, content, true, mkdirP)
+}
+
+func UploadCloudAgentWorkspaceFile(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, relativePath string, content []byte, mkdirP bool, overwrite bool) (CloudAgentWorkspaceFile, error) {
+	request := struct {
+		Path      string `json:"path"`
+		Content   []byte `json:"content"`
+		MkdirP    bool   `json:"mkdir_p"`
+		Overwrite bool   `json:"overwrite"`
+	}{Path: relativePath, Content: content, MkdirP: mkdirP, Overwrite: overwrite}
+	var result CloudAgentWorkspaceFile
+	if err := runCloudAgentASSJSON(ctx, worker, key, account, cloudSession, "PUT", "/v1/fs/upload", nil, request, &result); err != nil {
+		return CloudAgentWorkspaceFile{}, err
+	}
+	return result, nil
+}
+
+func writeCloudAgentWorkspaceFile(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, relativePath string, content string, create bool, mkdirP bool) (CloudAgentWorkspaceFile, error) {
 	request := struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
-	}{Path: relativePath, Content: content}
+		Create  bool   `json:"create"`
+		MkdirP  bool   `json:"mkdir_p"`
+	}{Path: relativePath, Content: content, Create: create, MkdirP: mkdirP}
 	var result CloudAgentWorkspaceFile
 	if err := runCloudAgentASSJSON(ctx, worker, key, account, cloudSession, "PUT", "/v1/fs/file", nil, request, &result); err != nil {
 		return CloudAgentWorkspaceFile{}, err
+	}
+	return result, nil
+}
+
+func CreateCloudAgentWorkspaceDirectory(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, relativePath string, mkdirP bool) (CloudAgentWorkspaceDirectory, error) {
+	request := struct {
+		Path   string `json:"path"`
+		MkdirP bool   `json:"mkdir_p"`
+	}{Path: relativePath, MkdirP: mkdirP}
+	var result CloudAgentWorkspaceDirectory
+	if err := runCloudAgentASSJSON(ctx, worker, key, account, cloudSession, "PUT", "/v1/fs/directory", nil, request, &result); err != nil {
+		return CloudAgentWorkspaceDirectory{}, err
 	}
 	return result, nil
 }

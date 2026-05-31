@@ -124,12 +124,55 @@ func normalizeCloudAgentShellSize(cols, rows int) (int, int) {
 func buildCloudAgentShellCommand(containerName, workspacePath, claudeSessionID, model string) string {
 	innerScript := `set -euo pipefail
 
+export TERM="${TERM:-xterm-256color}"
+export COLORTERM="${COLORTERM:-truecolor}"
+export CLICOLOR=1
+export CLICOLOR_FORCE=1
+export FORCE_COLOR=1
+export npm_config_color=always
+export GCC_COLORS="${GCC_COLORS:-error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01}"
+
 if ! command -v bash >/dev/null 2>&1; then
 	printf 'bash is not installed in this container\n' >&2
 	exit 127
 fi
 
-exec bash -i
+aiyolo_shell_rc_dir="${HOME:-/tmp}/.cache/aiyolo"
+mkdir -p "$aiyolo_shell_rc_dir" 2>/dev/null || aiyolo_shell_rc_dir="${TMPDIR:-/tmp}"
+aiyolo_shell_rc="$aiyolo_shell_rc_dir/chat-shell-bashrc"
+cat >"$aiyolo_shell_rc" <<'AIYOLO_BASHRC'
+force_color_prompt=yes
+
+export TERM="${TERM:-xterm-256color}"
+export COLORTERM="${COLORTERM:-truecolor}"
+export CLICOLOR="${CLICOLOR:-1}"
+export CLICOLOR_FORCE="${CLICOLOR_FORCE:-1}"
+export FORCE_COLOR="${FORCE_COLOR:-1}"
+export npm_config_color="${npm_config_color:-always}"
+export GCC_COLORS="${GCC_COLORS:-error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01}"
+
+if [[ -r "$HOME/.bashrc" ]]; then
+  . "$HOME/.bashrc"
+fi
+
+if command -v dircolors >/dev/null 2>&1; then
+  eval "$(dircolors -b 2>/dev/null || true)"
+fi
+
+alias ls='ls --color=auto'
+alias ll='ls -alF --color=auto'
+alias la='ls -A --color=auto'
+alias l='ls -CF --color=auto'
+alias grep='grep --color=auto'
+alias diff='diff --color=auto'
+
+case "${PS1:-}" in
+  *"\\e["*|*"\\033["*) ;;
+  *) PS1='\[\e[01;32m\]\u@\h\[\e[00m\]:\[\e[01;34m\]\w\[\e[00m\]\$ ' ;;
+esac
+AIYOLO_BASHRC
+
+exec bash --rcfile "$aiyolo_shell_rc" -i
 `
 	script := fmt.Sprintf(`container_name=%s
 workspace_path=%s
@@ -148,6 +191,10 @@ exec docker exec -it \
 	-e USER=%s \
   -e TERM=xterm-256color \
   -e COLORTERM=truecolor \
+	-e CLICOLOR=1 \
+	-e CLICOLOR_FORCE=1 \
+	-e FORCE_COLOR=1 \
+	-e npm_config_color=always \
   -e SHELL=/bin/bash \
   -e LANG=C.UTF-8 \
   -e LC_ALL=C.UTF-8 \

@@ -129,6 +129,59 @@ func TestWriteFileRejectsStaleRevision(t *testing.T) {
 	}
 }
 
+func TestFSCreateFileAndDirectory(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root)
+
+	response := performRequest(server, http.MethodPut, "/v1/fs/file", `{"path":"src/new.txt","content":"hello\n","create":true,"mkdir_p":true}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("create file status=%d body=%s", response.Code, response.Body.String())
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "src", "new.txt")); err != nil || string(content) != "hello\n" {
+		t.Fatalf("created file content=%q err=%v", content, err)
+	}
+
+	response = performRequest(server, http.MethodPut, "/v1/fs/directory", `{"path":"src/assets/icons","mkdir_p":true}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("create directory status=%d body=%s", response.Code, response.Body.String())
+	}
+	if info, err := os.Stat(filepath.Join(root, "src", "assets", "icons")); err != nil || !info.IsDir() {
+		t.Fatalf("created directory info=%+v err=%v", info, err)
+	}
+
+	response = performRequest(server, http.MethodPut, "/v1/fs/directory", `{"path":"src/assets/icons","mkdir_p":true}`)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("duplicate directory status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	uploadBody, err := json.Marshal(fsUploadRequest{Path: "src/assets/blob.bin", Content: []byte{0, 1, 2, 3}, MkdirP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = performRequest(server, http.MethodPut, "/v1/fs/upload", string(uploadBody))
+	if response.Code != http.StatusOK {
+		t.Fatalf("upload file status=%d body=%s", response.Code, response.Body.String())
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "src", "assets", "blob.bin")); err != nil || string(content) != string([]byte{0, 1, 2, 3}) {
+		t.Fatalf("uploaded file content=%v err=%v", content, err)
+	}
+	response = performRequest(server, http.MethodPut, "/v1/fs/upload", string(uploadBody))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("duplicate upload status=%d body=%s", response.Code, response.Body.String())
+	}
+	overwriteBody, err := json.Marshal(fsUploadRequest{Path: "src/assets/blob.bin", Content: []byte{9, 8, 7}, Overwrite: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = performRequest(server, http.MethodPut, "/v1/fs/upload", string(overwriteBody))
+	if response.Code != http.StatusOK {
+		t.Fatalf("overwrite upload status=%d body=%s", response.Code, response.Body.String())
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "src", "assets", "blob.bin")); err != nil || string(content) != string([]byte{9, 8, 7}) {
+		t.Fatalf("overwritten file content=%v err=%v", content, err)
+	}
+}
+
 func TestPathTraversalIsRejected(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello\n"), 0644); err != nil {

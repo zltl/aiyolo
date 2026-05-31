@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultCloudAgentImage               = "aiyolo/local-cloud-agent:ubuntu-24.04-v2"
+	defaultCloudAgentImage               = "aiyolo/local-cloud-agent:ubuntu-24.04-v3"
 	defaultCloudAgentWorkspaceSubdir     = "cloud-agents"
 	defaultCloudAgentUbuntuRelease       = "noble"
 	defaultCloudAgentUbuntuSeries        = "24.04"

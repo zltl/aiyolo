@@ -94,22 +94,32 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 }
 
 func consoleCloudAgentCurrentPrompt(userInput string, attachments []consoleChatAttachmentView) string {
-	return consoleCloudAgentMessageBody(userInput, attachments)
+	sections := consoleCloudAgentInteractivePromptSections()
+	if latest := consoleCloudAgentMessageBody(userInput, attachments); latest != "" {
+		sections = append(sections, "Latest user message:\n"+latest)
+	}
+	return strings.TrimSpace(strings.Join(sections, "\n\n"))
 }
 
 func consoleCloudAgentInitialPrompt(history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) string {
-	sections := []string{
-		"Continue this AIYolo chat session inside Claude Code.",
-		"Treat the following transcript as the full prior conversation, then answer the latest user message.",
-	}
+	sections := consoleCloudAgentInteractivePromptSections()
+	sections = append(sections, "Treat the following transcript as the full prior conversation for this AIYolo chat session.")
 	if transcript := consoleCloudAgentTranscript(history); transcript != "" {
 		sections = append(sections, "Previous conversation:\n"+transcript)
 	}
 	if latest := consoleCloudAgentMessageBody(userInput, attachments); latest != "" {
 		sections = append(sections, "Latest user message:\n"+latest)
 	}
-	sections = append(sections, "Reply to the latest user message and use the current workspace when it helps solve the task.")
 	return strings.TrimSpace(strings.Join(sections, "\n\n"))
+}
+
+func consoleCloudAgentInteractivePromptSections() []string {
+	return []string{
+		"Continue this AIYolo chat session inside Claude Code as an interactive collaboration, not a one-shot completion.",
+		"Work on the latest user message in the current workspace when you have enough information.",
+		"If the request is ambiguous, missing a decision, requires credentials, or could reasonably branch into different implementations, ask a concise clarification question and stop. The user will answer in the AIYolo chat input, and the next turn will resume this same Claude Code session.",
+		"Do not invent missing requirements or mark the task complete while you are waiting for the user's answer.",
+	}
 }
 
 func consoleCloudAgentTranscript(messages []consoleChatMessageView) string {

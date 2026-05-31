@@ -2,6 +2,7 @@ package workers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -136,6 +137,88 @@ func TestCloudAgentDockerfileInstallsASS(t *testing.T) {
 	if _, ok := cloudAgentBuildContextFiles["aiyolo-ass"]; ok {
 		t.Fatal("cloud-agent build context should no longer embed the aiyolo-ass fallback script")
 	}
+}
+
+func TestCloudAgentDockerfileInstallsCommonDeveloperTools(t *testing.T) {
+	dockerfile := cloudAgentAssetString("cloud-agent/Dockerfile")
+	requiredPackages := []string{
+		"build-essential",
+		"cmake",
+		"dnsutils",
+		"fd-find",
+		"gdb",
+		"git",
+		"git-lfs",
+		"gnupg",
+		"htop",
+		"lsof",
+		"nano",
+		"net-tools",
+		"openssh-client",
+		"pkg-config",
+		"ripgrep",
+		"strace",
+		"tmux",
+		"tree",
+		"vim",
+	}
+	for _, packageName := range requiredPackages {
+		if !dockerfileInstallsPackage(dockerfile, packageName) {
+			t.Fatalf("cloud-agent Dockerfile should install %s: %s", packageName, dockerfile)
+		}
+	}
+
+	var manifest struct {
+		Features []string `json:"features"`
+	}
+	if err := json.Unmarshal([]byte(cloudAgentAssetString("cloud-agent/cloud-agent-base.json")), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	features := make(map[string]bool, len(manifest.Features))
+	for _, feature := range manifest.Features {
+		features[feature] = true
+	}
+	for _, packageName := range requiredPackages {
+		if !features[packageName] {
+			t.Fatalf("cloud-agent manifest should include %s: %+v", packageName, manifest.Features)
+		}
+	}
+
+	infoScript := cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-info")
+	requiredInfoCommands := []string{
+		"git --version",
+		"git lfs version",
+		"vim --version",
+		"nano --version",
+		"ssh -V",
+		"gcc --version",
+		"g++ --version",
+		"make --version",
+		"cmake --version",
+		"pkg-config --version",
+		"gdb --version",
+		"rg --version",
+		"fd --version",
+		"tree --version",
+		"tmux -V",
+		"htop --version",
+		"strace -V",
+	}
+	for _, command := range requiredInfoCommands {
+		if !strings.Contains(infoScript, command) {
+			t.Fatalf("cloud-agent info script should report %s: %s", command, infoScript)
+		}
+	}
+}
+
+func dockerfileInstallsPackage(dockerfile string, packageName string) bool {
+	normalized := strings.NewReplacer("\\", " ", "\n", " ", "\t", " ").Replace(dockerfile)
+	for _, token := range strings.Fields(normalized) {
+		if token == packageName {
+			return true
+		}
+	}
+	return false
 }
 
 func TestResolveCloudAgentASSSHA256(t *testing.T) {
@@ -277,8 +360,18 @@ func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
 	if !strings.Contains(script, `-w "$workspace_path"`) {
 		t.Fatalf("shell command should preserve the workspace directory: %s", script)
 	}
-	if !strings.Contains(script, `exec bash -i`) {
-		t.Fatalf("shell command should launch an interactive bash shell inside the container: %s", script)
+	if !strings.Contains(script, `exec bash --rcfile "$aiyolo_shell_rc" -i`) {
+		t.Fatalf("shell command should launch an interactive bash shell with a color-aware rcfile: %s", script)
+	}
+	for _, expected := range []string{`-e TERM=xterm-256color`, `-e COLORTERM=truecolor`, `-e CLICOLOR=1`, `-e CLICOLOR_FORCE=1`, `-e FORCE_COLOR=1`, `-e npm_config_color=always`} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("shell command should export terminal color setting %s: %s", expected, script)
+		}
+	}
+	for _, expected := range []string{`force_color_prompt=yes`, `dircolors -b`, `ls --color=auto`, `grep --color=auto`, `PS1=`, `\[\e[01;32m\]`} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("shell command should install colorful interactive shell defaults %s: %s", expected, script)
+		}
 	}
 	if strings.Contains(script, `claude`) {
 		t.Fatalf("shell command should not launch claude directly: %s", script)

@@ -27,7 +27,7 @@ rootfs_url="${AIYOLO_CLOUD_AGENT_ROOTFS_URL:-}"
 ass_download_url="${AIYOLO_ASS_DOWNLOAD_URL:-}"
 ass_sha256_url="${AIYOLO_ASS_SHA256_URL:-}"
 ass_sha256="${AIYOLO_ASS_SHA256:-}"
-image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-24.04-v2}"
+image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-24.04-v3}"
 skip_proxy_env="${AIYOLO_CLOUD_AGENT_SKIP_PROXY_ENV:-0}"
 buildkit="${DOCKER_BUILDKIT:-1}"
 

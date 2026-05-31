@@ -1,10 +1,12 @@
 package console
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -829,13 +831,16 @@ func TestChatPageRestoresCloudAgentEnvironment(t *testing.T) {
 		"data-chat-action=\"set-image-preview-background\" data-chat-preview-background=\"grid\"",
 		"data-chat-action=\"set-image-preview-background\" data-chat-preview-background=\"light\"",
 		"data-chat-action=\"set-image-preview-background\" data-chat-preview-background=\"dark\"",
+		"data-chat-editor-code",
+		"data-chat-editor-line-numbers",
+		"data-chat-editor-highlight",
 		"data-chat-editor-input",
 	} {
 		if !strings.Contains(html, marker) {
 			t.Fatalf("chat page did not render workbench marker %s: %s", marker, html)
 		}
 	}
-	if !strings.Contains(html, "data-chat-shell-dock") || !strings.Contains(html, "data-chat-shell-tabs") {
+	if !strings.Contains(html, "data-chat-shell-dock") || !strings.Contains(html, "data-chat-shell-tabs") || !strings.Contains(html, "data-chat-shell-action=\"hide\"") {
 		t.Fatalf("chat page did not render the embedded shell dock: %s", html)
 	}
 	for _, action := range []string{
@@ -850,6 +855,42 @@ func TestChatPageRestoresCloudAgentEnvironment(t *testing.T) {
 	}
 	if footerIndex, dockIndex := strings.Index(html, "class=\"chat-footer\""), strings.Index(html, "data-chat-shell-dock"); footerIndex < 0 || dockIndex < 0 || dockIndex < footerIndex {
 		t.Fatalf("chat page should render the shell dock below the composer footer: %s", html)
+	}
+}
+
+func TestChatEditorFallbackAssets(t *testing.T) {
+	cssBytes, err := consoleAssets.ReadFile("static/console.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(cssBytes)
+	for _, marker := range []string{
+		".chat-editor-code[data-chat-editor-highlight-ready=\"true\"] .chat-editor-input",
+		".chat-editor-code[data-chat-editor-highlight-ready=\"true\"] .chat-editor-input::selection",
+		"-webkit-text-fill-color: #d4d4d4;",
+		"-webkit-text-fill-color: transparent;",
+		"z-index: 2;",
+	} {
+		if !strings.Contains(css, marker) {
+			t.Fatalf("console css is missing editor fallback marker %s", marker)
+		}
+	}
+
+	jsBytes, err := consoleAssets.ReadFile("static/chat-workspace.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(jsBytes)
+	for _, marker := range []string{
+		"function setWorkspaceEditorHighlightReady(host, ready)",
+		"host.dataset.chatEditorHighlightReady = \"true\"",
+		"delete host.dataset.chatEditorHighlightReady",
+		"setWorkspaceEditorHighlightReady(host, false)",
+		"setWorkspaceEditorHighlightReady(host, true)",
+	} {
+		if !strings.Contains(js, marker) {
+			t.Fatalf("chat workspace js is missing editor fallback marker %s", marker)
+		}
 	}
 }
 
@@ -955,7 +996,7 @@ func TestChatShellPageLoadsCloudAgentSession(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	html := string(body)
-	if !strings.Contains(html, "data-chat-shell-socket-url=\"/console/chat/shell/ws?session=session-shell\"") {
+	if !strings.Contains(html, "data-chat-shell-socket-url=\"/console/chat/shell/ws?session=session-shell&amp;terminal=default\"") {
 		t.Fatalf("chat shell page is missing socket wiring: %s", html)
 	}
 	if !strings.Contains(html, `https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css`) || !strings.Contains(html, `https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js`) {
@@ -1039,7 +1080,7 @@ func TestChatShellReadyEndpointLoadsCloudAgentSession(t *testing.T) {
 	if payload.WorkerID != "worker-0" || payload.ContainerName != "aiyolo-cloud-agent-worker-0" || payload.WorkspacePath != "/srv/aiyolo/workspace/session-shell" {
 		t.Fatalf("unexpected shell metadata: %+v", payload)
 	}
-	if payload.SocketURL != "/console/chat/shell/ws?session=session-shell" {
+	if payload.TerminalID != consoleChatShellDefaultID || payload.SocketURL != "/console/chat/shell/ws?session=session-shell&terminal=default" {
 		t.Fatalf("unexpected shell socket url: %+v", payload)
 	}
 }
@@ -1557,6 +1598,169 @@ func TestSaveChatWorkspaceFilePersistsChanges(t *testing.T) {
 	}
 }
 
+func TestCreateChatWorkspaceFileAndDirectory(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+
+	now := time.Now().UTC()
+	accountID := consoleChatCloudAgentAccountID("worker-0")
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{
+		ID:              accountID,
+		UserID:          "admin@example.com",
+		WorkerID:        "worker-0",
+		AgentType:       domain.CloudAgentTypeClaudeCode,
+		ModelPublicName: "gpt-5.4",
+		ContainerName:   "aiyolo-cloud-agent-worker-0",
+		WorkspacePath:   "/srv/aiyolo/workspace/session-shell",
+		Credential:      "aiyolo_live_test",
+		Status:          domain.CloudAgentStatusRunning,
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
+		ID:            consoleChatCloudAgentSessionID("session-shell"),
+		UserID:        "admin@example.com",
+		WorkerID:      "worker-0",
+		AccountID:     accountID,
+		AgentType:     domain.CloudAgentTypeClaudeCode,
+		ChatSessionID: "session-shell",
+		WorkspacePath: "/srv/aiyolo/workspace/session-shell",
+		Status:        domain.CloudAgentSessionStatusActive,
+		CreatedAt:     now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(Config{
+		SecretKey:     "test-secret",
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "password",
+	}, store)
+	var ensureCalls atomic.Int32
+	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
+		ensureCalls.Add(1)
+		t.Fatalf("workspace create should use the active session fast path without ensuring runtime worker=%+v key=%+v proxy=%+v options=%+v", worker, key, proxy, options)
+		return workerops.CloudAgentInstance{}, nil
+	}
+	handler.createCloudAgentWorkspaceFile = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content string, mkdirP bool) (workerops.CloudAgentWorkspaceFile, error) {
+		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
+			t.Fatalf("unexpected workspace create file inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
+		}
+		if relativePath != "src/new.go" || content != "package main\n" || !mkdirP {
+			t.Fatalf("unexpected workspace create file payload path=%q content=%q mkdirP=%v", relativePath, content, mkdirP)
+		}
+		return workerops.CloudAgentWorkspaceFile{Path: relativePath, Bytes: int64(len(content))}, nil
+	}
+	handler.createCloudAgentWorkspaceDir = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, mkdirP bool) (workerops.CloudAgentWorkspaceDirectory, error) {
+		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
+			t.Fatalf("unexpected workspace create directory inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
+		}
+		if relativePath != "src/assets" || !mkdirP {
+			t.Fatalf("unexpected workspace create directory payload path=%q mkdirP=%v", relativePath, mkdirP)
+		}
+		return workerops.CloudAgentWorkspaceDirectory{Path: relativePath}, nil
+	}
+	handler.uploadCloudAgentWorkspaceFile = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content []byte, mkdirP bool, overwrite bool) (workerops.CloudAgentWorkspaceFile, error) {
+		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
+			t.Fatalf("unexpected workspace upload inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
+		}
+		if relativePath != "src/assets/blob.bin" || string(content) != string([]byte{0, 1, 2, 3}) || !mkdirP || !overwrite {
+			t.Fatalf("unexpected workspace upload payload path=%q content=%v mkdirP=%v overwrite=%v", relativePath, content, mkdirP, overwrite)
+		}
+		return workerops.CloudAgentWorkspaceFile{Path: relativePath, Bytes: int64(len(content))}, nil
+	}
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileResponse, err := client.Post(server.URL+"/console/chat/workspace/file?session=session-shell", "application/json", strings.NewReader(`{"path":"src/new.go","content":"package main\n","create":true,"mkdir_p":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fileResponse.Body.Close()
+	if fileResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(fileResponse.Body)
+		t.Fatalf("chat workspace create file status=%d body=%s", fileResponse.StatusCode, body)
+	}
+	var filePayload consoleChatWorkspaceFileResponse
+	if err := json.NewDecoder(fileResponse.Body).Decode(&filePayload); err != nil {
+		t.Fatal(err)
+	}
+	if filePayload.Status != "created" || filePayload.Path != "src/new.go" || filePayload.Bytes != 13 || filePayload.Notice != "文件已创建。" {
+		t.Fatalf("unexpected workspace create file payload: %+v", filePayload)
+	}
+
+	directoryResponse, err := client.Post(server.URL+"/console/chat/workspace/directory?session=session-shell", "application/json", strings.NewReader(`{"path":"src/assets","mkdir_p":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directoryResponse.Body.Close()
+	if directoryResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(directoryResponse.Body)
+		t.Fatalf("chat workspace create directory status=%d body=%s", directoryResponse.StatusCode, body)
+	}
+	var directoryPayload consoleChatWorkspaceDirectoryResponse
+	if err := json.NewDecoder(directoryResponse.Body).Decode(&directoryPayload); err != nil {
+		t.Fatal(err)
+	}
+	if directoryPayload.Status != "created" || directoryPayload.Path != "src/assets" || directoryPayload.Notice != "目录已创建。" {
+		t.Fatalf("unexpected workspace create directory payload: %+v", directoryPayload)
+	}
+
+	var uploadBody bytes.Buffer
+	uploadWriter := multipart.NewWriter(&uploadBody)
+	if err := uploadWriter.WriteField("path", "src/assets/blob.bin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := uploadWriter.WriteField("overwrite", "true"); err != nil {
+		t.Fatal(err)
+	}
+	uploadPart, err := uploadWriter.CreateFormFile("file", "blob.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uploadPart.Write([]byte{0, 1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := uploadWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	uploadRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/workspace/upload?session=session-shell", &uploadBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadRequest.Header.Set("Content-Type", uploadWriter.FormDataContentType())
+	uploadResponse, err := client.Do(uploadRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploadResponse.Body.Close()
+	if uploadResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(uploadResponse.Body)
+		t.Fatalf("chat workspace upload status=%d body=%s", uploadResponse.StatusCode, body)
+	}
+	var uploadPayload consoleChatWorkspaceFileResponse
+	if err := json.NewDecoder(uploadResponse.Body).Decode(&uploadPayload); err != nil {
+		t.Fatal(err)
+	}
+	if uploadPayload.Status != "uploaded" || uploadPayload.Path != "src/assets/blob.bin" || uploadPayload.Bytes != 4 || uploadPayload.Notice != "文件已上传。" {
+		t.Fatalf("unexpected workspace upload payload: %+v", uploadPayload)
+	}
+	if ensureCalls.Load() != 0 {
+		t.Fatalf("ensure calls=%d, want 0", ensureCalls.Load())
+	}
+}
+
 func TestChatShellSocketBridgesInteractiveShell(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
@@ -1695,6 +1899,126 @@ func TestChatShellSocketBridgesInteractiveShell(t *testing.T) {
 	}
 	if ensureCalls.Load() != 1 {
 		t.Fatalf("ensure calls=%d, want 1", ensureCalls.Load())
+	}
+}
+
+func TestChatShellSocketReusesTerminalAfterWebSocketDisconnect(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+
+	now := time.Now().UTC()
+	accountID := consoleChatCloudAgentAccountID("worker-0")
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{
+		ID:              accountID,
+		UserID:          "admin@example.com",
+		WorkerID:        "worker-0",
+		AgentType:       domain.CloudAgentTypeClaudeCode,
+		ModelPublicName: "gpt-5.4",
+		ContainerName:   "aiyolo-cloud-agent-worker-0",
+		WorkspacePath:   "/srv/aiyolo/workspace/session-shell",
+		Credential:      "aiyolo_live_test",
+		Status:          domain.CloudAgentStatusRunning,
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
+		ID:            consoleChatCloudAgentSessionID("session-shell"),
+		UserID:        "admin@example.com",
+		WorkerID:      "worker-0",
+		AccountID:     accountID,
+		AgentType:     domain.CloudAgentTypeClaudeCode,
+		ChatSessionID: "session-shell",
+		WorkspacePath: "/srv/aiyolo/workspace/session-shell",
+		Status:        domain.CloudAgentSessionStatusActive,
+		CreatedAt:     now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeShell := newFakeInteractiveShell("ready$ ")
+	handler := NewHandler(Config{
+		SecretKey:     "test-secret",
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "password",
+	}, store)
+	var ensureCalls atomic.Int32
+	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
+		ensureCalls.Add(1)
+		return workerops.CloudAgentInstance{
+			Status:        domain.CloudAgentStatusRunning,
+			WorkerID:      worker.ID,
+			ContainerID:   "container-shell",
+			ContainerName: "aiyolo-cloud-agent-worker-0",
+			WorkspacePath: options.WorkspacePath,
+		}, nil
+	}
+	var openCalls atomic.Int32
+	handler.openCloudAgentShell = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error) {
+		openCalls.Add(1)
+		return fakeShell, nil
+	}
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverURL.Path = "/console/chat/shell/ws"
+	dialShell := func() *websocket.Conn {
+		t.Helper()
+		config, err := websocket.NewConfig("ws"+strings.TrimPrefix(server.URL, "http")+"/console/chat/shell/ws?session=session-shell&terminal=term-stable", server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cookie := range client.Jar.Cookies(serverURL) {
+			config.Header.Add("Cookie", cookie.String())
+		}
+		ws, err := websocket.DialConfig(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ws.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		return ws
+	}
+
+	ws1 := dialShell()
+	if err := websocket.JSON.Send(ws1, consoleChatShellSocketRequest{Type: "input", Data: "echo first\r"}); err != nil {
+		t.Fatal(err)
+	}
+	if write := fakeShell.waitWrite(t); write != "echo first\r" {
+		t.Fatalf("unexpected first shell input: %q", write)
+	}
+	if err := ws1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ws2 := dialShell()
+	defer ws2.Close()
+	if err := websocket.JSON.Send(ws2, consoleChatShellSocketRequest{Type: "input", Data: "echo second\r"}); err != nil {
+		t.Fatal(err)
+	}
+	if write := fakeShell.waitWrite(t); write != "echo second\r" {
+		t.Fatalf("unexpected second shell input: %q", write)
+	}
+	if openCalls.Load() != 1 {
+		t.Fatalf("open shell calls=%d, want 1", openCalls.Load())
+	}
+	if ensureCalls.Load() != 2 {
+		t.Fatalf("ensure calls=%d, want 2", ensureCalls.Load())
 	}
 }
 

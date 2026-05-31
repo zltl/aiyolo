@@ -36,16 +36,24 @@
     }
 
     const term = new window.Terminal({
+      allowTransparency: true,
+      convertEol: true,
       cursorBlink: true,
+      drawBoldTextInBrightColors: true,
       fontFamily: '"IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace',
       fontSize: 14,
       lineHeight: 1.35,
+      minimumContrastRatio: 4.5,
+      scrollback: 12000,
+      tabStopWidth: 4,
       theme: {
         background: "#0d131b",
         foreground: "#eef2f6",
         cursor: "#f4f7fb",
         cursorAccent: "#0d131b",
         selectionBackground: "rgba(128, 175, 255, 0.28)",
+        selectionForeground: "#ffffff",
+        selectionInactiveBackground: "rgba(128, 175, 255, 0.16)",
         black: "#11161d",
         red: "#ff7b72",
         green: "#9fd089",
@@ -217,7 +225,7 @@
       return true;
     };
 
-    const close = () => {
+    const close = (closeOptions = {}) => {
       if (disposed) {
         return;
       }
@@ -225,6 +233,13 @@
       if (socket instanceof WebSocket) {
         const activeSocket = socket;
         socket = null;
+        if (closeOptions.terminate === true && activeSocket.readyState === WebSocket.OPEN) {
+          try {
+            activeSocket.send(JSON.stringify({ type: "close" }));
+          } catch (_error) {
+            // Continue closing the local socket even if the termination signal cannot be sent.
+          }
+        }
         try {
           activeSocket.close();
         } catch (_error) {
@@ -248,7 +263,7 @@
       sendResize();
     };
 
-    const dispose = () => {
+    const dispose = (disposeOptions = {}) => {
       if (disposed) {
         return;
       }
@@ -263,6 +278,13 @@
         windowResizeHandler = null;
       }
       if (socket instanceof WebSocket) {
+        if (disposeOptions.terminate === true && socket.readyState === WebSocket.OPEN) {
+          try {
+            socket.send(JSON.stringify({ type: "close" }));
+          } catch (_error) {
+            // Ignore termination send failures during teardown.
+          }
+        }
         try {
           socket.close();
         } catch (_error) {

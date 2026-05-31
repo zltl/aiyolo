@@ -38,15 +38,16 @@ RUN set -eux; \
     printf 'Acquire::Retries "5";\nAcquire::http::No-Cache "true";\nAcquire::https::No-Cache "true";\n' >/etc/apt/apt.conf.d/99aiyolo
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash bash-completion ca-certificates curl dbus-x11 file fluxbox fonts-dejavu-core fonts-liberation \
-    git iproute2 iptables iputils-ping jq less libasound2t64 libatk-bridge2.0-0 libcups2t64 libgbm1 libgtk-3-0 \
-    libnss3 libu2f-udev libxss1 libxtst6 mesa-utils netcat-openbsd procps psmisc python3 python3-dev python3-pip \
-    python3-venv rsync sudo tini tzdata uidmap unzip wget x11vnc xauth xdg-utils xterm xvfb zip \
+    bash bash-completion build-essential ca-certificates cmake curl dbus-x11 dnsutils fd-find file fluxbox fonts-dejavu-core fonts-liberation \
+    gdb git git-lfs gnupg htop iproute2 iptables iputils-ping jq less libasound2t64 libatk-bridge2.0-0 libcups2t64 libgbm1 libgtk-3-0 \
+    libnss3 libu2f-udev libxss1 libxtst6 lsof mesa-utils nano net-tools netcat-openbsd openssh-client pkg-config procps psmisc python3 python3-dev python3-pip \
+    python3-venv ripgrep rsync strace sudo tini tmux tree tzdata uidmap unzip vim wget x11vnc xauth xdg-utils xterm xvfb zip \
     docker.io fuse-overlayfs \
  && groupadd --gid 1000 "${AIYOLO_CLAUDE_USER}" \
  && useradd --uid 1000 --gid 1000 --create-home --home-dir "${AIYOLO_CLAUDE_HOME}" --shell /bin/bash "${AIYOLO_CLAUDE_USER}" \
  && install -d -o "${AIYOLO_CLAUDE_USER}" -g "${AIYOLO_CLAUDE_USER}" -m 0755 /workspace "${AIYOLO_CLAUDE_HOME}/.claude" \
  && install -d -m 0755 /etc/aiyolo /usr/local/bin /tmp/runtime-root /opt \
+ && if [ -x /usr/bin/fdfind ]; then ln -sf /usr/bin/fdfind /usr/local/bin/fd; fi \
  && wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
  && apt-get install -y /tmp/google-chrome.deb \
  && rm -f /tmp/google-chrome.deb \

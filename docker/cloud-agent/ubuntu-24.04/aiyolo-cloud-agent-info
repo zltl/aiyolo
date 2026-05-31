@@ -6,6 +6,22 @@ printf '\n--- manifest ---\n'
 cat /etc/aiyolo/cloud-agent-base.json
 printf '\n--- toolchain ---\n'
 git --version
+git lfs version
+vim --version | sed -n '1p'
+nano --version | sed -n '1p'
+ssh -V 2>&1
+gcc --version | sed -n '1p'
+g++ --version | sed -n '1p'
+make --version | sed -n '1p'
+cmake --version | sed -n '1p'
+pkg-config --version
+gdb --version | sed -n '1p'
+rg --version | sed -n '1p'
+fd --version
+tree --version
+tmux -V
+htop --version
+strace -V | sed -n '1p'
 node --version
 npm --version
 claude --version
