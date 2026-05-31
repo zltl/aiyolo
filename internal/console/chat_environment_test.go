@@ -100,8 +100,12 @@ func TestChatEnvironmentEnsureEndpointStartsCloudAgent(t *testing.T) {
 	if !strings.Contains(ensured.OpenURL, "/console/chat?session="+payload.SessionID) {
 		t.Fatalf("unexpected ensured open url: %s", ensured.OpenURL)
 	}
-	if ensured.DefaultModel != "gpt-5.4" || len(ensured.AllowedModels) != 1 || ensured.AllowedModels[0] != "gpt-5.4" {
+	if ensured.DefaultModel != "gpt-5.4" {
 		t.Fatalf("unexpected ensured model options: %+v", ensured)
+	}
+	expectedAllowedModels := []string{"gpt-5.4", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
+	if !consoleChatSameStringSet(ensured.AllowedModels, expectedAllowedModels) {
+		t.Fatalf("unexpected ensured allowed models: %+v", ensured.AllowedModels)
 	}
 	if ensured.ASSDownloadURL != "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass" || ensured.ASSSHA256URL != "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass.sha256" {
 		t.Fatalf("unexpected ensured aiyolo-ass artifact urls: %+v", ensured)
@@ -125,12 +129,15 @@ func TestChatEnvironmentEnsureEndpointStartsCloudAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 1 || len(keys[0].AllowedModels) != 1 || keys[0].AllowedModels[0] != "gpt-5.4" {
+	if len(keys) != 1 {
 		t.Fatalf("unexpected api keys: %+v", keys)
+	}
+	if !consoleChatSameStringSet(keys[0].AllowedModels, expectedAllowedModels) {
+		t.Fatalf("unexpected stored allowed models: %+v", keys[0].AllowedModels)
 	}
 }
 
-func TestChatEnvironmentEnsureRotatesStaleCloudAgentAPIKey(t *testing.T) {
+func TestChatEnvironmentEnsureReconcilesStaleCloudAgentAPIKey(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
 		t.Fatal(err)
@@ -216,19 +223,20 @@ func TestChatEnvironmentEnsureRotatesStaleCloudAgentAPIKey(t *testing.T) {
 		t.Fatalf("ensure status=%d body=%s", response.StatusCode, body)
 	}
 
-	if ensured.APIKey == oldClearKey {
-		t.Fatalf("expected ensure to rotate the stale api key")
+	if ensured.APIKey != oldClearKey {
+		t.Fatalf("expected ensure to keep reconciled api key credential")
 	}
-	if joined := strings.Join(ensured.AllowedModels, ","); joined != "gpt-5.4,anthropic/claude-opus-4.7" {
-		t.Fatalf("unexpected ensured allowed models: %s", joined)
+	expectedAllowedModels := []string{"gpt-5.4", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
+	if !consoleChatSameStringSet(ensured.AllowedModels, expectedAllowedModels) {
+		t.Fatalf("unexpected ensured allowed models: %+v", ensured.AllowedModels)
 	}
 
 	account, err := store.GetCloudAgentAccount(ctx, "admin@example.com", consoleChatCloudAgentAccountID("worker-0"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(account.Credential) == "" || account.Credential == oldClearKey {
-		t.Fatalf("expected account credential to be rotated: %+v", account)
+	if strings.TrimSpace(account.Credential) == "" || account.Credential != oldClearKey {
+		t.Fatalf("expected account credential to stay on reconciled key: %+v", account)
 	}
 	keys, err := store.ListAPIKeys(ctx)
 	if err != nil {
@@ -240,8 +248,220 @@ func TestChatEnvironmentEnsureRotatesStaleCloudAgentAPIKey(t *testing.T) {
 	if keys[0].ID != "cloud-agent-worker-0-key" {
 		t.Fatalf("expected api key id to be preserved, got %+v", keys[0])
 	}
-	if joined := strings.Join(keys[0].AllowedModels, ","); joined != "gpt-5.4,anthropic/claude-opus-4.7" {
-		t.Fatalf("unexpected stored allowed models: %s", joined)
+	if !consoleChatSameStringSet(keys[0].AllowedModels, expectedAllowedModels) {
+		t.Fatalf("unexpected stored allowed models: %+v", keys[0].AllowedModels)
+	}
+}
+
+func TestChatEnvironmentEnsureLiveKeyIncludesGPTImage2Aliases(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_img2_env", ModelAlias: "chatgpt-image-2", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 1000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "chatgpt-image-2", ProviderID: "openrouter", UpstreamModel: "chatgpt-image-2", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_img2_env", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	var ensured workerops.CloudAgentStartOptions
+	handler := NewHandler(Config{
+		SecretKey:          "test-secret",
+		AdminEmail:         "admin@example.com",
+		AdminPassword:      "password",
+		CodexPublicBaseURL: "https://aiyolo.quant67.com",
+	}, store)
+	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
+		ensured = options
+		return workerops.CloudAgentInstance{
+			Status:        domain.CloudAgentStatusRunning,
+			WorkerID:      worker.ID,
+			ContainerID:   "container-123",
+			ContainerName: "aiyolo-cloud-agent-worker-0",
+			WorkspacePath: "/srv/aiyolo/workspace/chat-session",
+		}, nil
+	}
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := client.PostForm(server.URL+"/console/chat/environment/ensure", url.Values{
+		"chat_public_name": {"chatgpt-image-2"},
+		"chat_environment": {consoleChatEnvironmentValue("worker-0")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("ensure status=%d body=%s", response.StatusCode, body)
+	}
+
+	expectedModels := []string{"gpt-5.4", "chatgpt-image-2", "gpt-image-2", "openai/gpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
+	if !consoleChatSameStringSet(ensured.AllowedModels, expectedModels) {
+		t.Fatalf("unexpected ensured allowed models: %+v", ensured.AllowedModels)
+	}
+
+	keys, err := store.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected one api key, got %+v", keys)
+	}
+	if !consoleChatSameStringSet(keys[0].AllowedModels, expectedModels) {
+		t.Fatalf("unexpected stored allowed models: %+v", keys[0].AllowedModels)
+	}
+}
+
+func TestConsoleChatExpandAllowedModelsIncludesPreferredImageModels(t *testing.T) {
+	expanded := consoleChatExpandAllowedModels([]string{"gpt-5.4"})
+	expected := []string{"gpt-5.4", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
+	if !consoleChatSameStringSet(expanded, expected) {
+		t.Fatalf("unexpected expanded allowed models: %+v", expanded)
+	}
+}
+
+func TestChatPageFiltersRoutesByEffectiveAPIAllowedModels(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_img2_filter", ModelAlias: "chatgpt-image-2", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 1000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gemini_filter", ModelAlias: "google/gemini-3.1-pro-preview", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 1000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "chatgpt-image-2", ProviderID: "openrouter", UpstreamModel: "chatgpt-image-2", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_img2_filter", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "google/gemini-3.1-pro-preview", ProviderID: "openrouter", UpstreamModel: "google/gemini-3.1-pro-preview", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gemini_filter", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	clearKey, apiKey, err := newConsoleAPIKey(apiKeySpec{
+		ID:               "cloud-agent-worker-0-key",
+		Name:             "Cloud Agent worker-0",
+		Kind:             "live",
+		UserID:           "admin@example.com",
+		Status:           domain.StatusActive,
+		AllowedProtocols: []string{domain.ProtocolOpenAI, domain.ProtocolAnthropic},
+		AllowedModels:    []string{"gpt-5.4", "gpt-image-2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAPIKey(ctx, apiKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{ID: consoleChatCloudAgentAccountID("worker-0"), UserID: "admin@example.com", WorkerID: "worker-0", AgentType: domain.CloudAgentTypeClaudeCode, Credential: clearKey, Status: domain.CloudAgentStatusRunning, WorkspacePath: domain.DefaultCloudAgentWorkspacePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := mountedConsoleTestServer(NewHandler(Config{SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password"}, store))
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Get(server.URL + "/console/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat page status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	html := string(body)
+	for _, expected := range []string{"gpt-5.4", "chatgpt-image-2"} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("expected API-allowed model %q in chat page: %s", expected, html)
+		}
+	}
+	if strings.Contains(html, "google/gemini-3.1-pro-preview") {
+		t.Fatalf("unexpected non-API-allowed model in chat page: %s", html)
+	}
+}
+
+func TestChatPageAutoHealsCloudAgentAPIKeyPreferredImageModels(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "anthropic-main", Name: "Anthropic", BaseURL: "https://anthropic.invalid", Protocol: domain.ProtocolAnthropic, MasterKey: "sk-ant", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "anthropic/claude-opus-4.8", ProviderID: "anthropic-main", UpstreamModel: "anthropic/claude-opus-4.8", Protocol: domain.ProtocolAnthropic, AllowedProtocols: []string{domain.ProtocolAnthropic}, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	clearKey, apiKey, err := newConsoleAPIKey(apiKeySpec{
+		ID:               "cloud-agent-worker-0-key",
+		Name:             "Cloud Agent worker-0",
+		Kind:             "live",
+		UserID:           "admin@example.com",
+		Status:           domain.StatusActive,
+		AllowedProtocols: []string{domain.ProtocolOpenAI, domain.ProtocolAnthropic},
+		AllowedModels:    []string{"deepseek-v4-pro", "anthropic/claude-opus-4.8", "openai/gpt-5.5"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAPIKey(ctx, apiKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{ID: consoleChatCloudAgentAccountID("worker-0"), UserID: "admin@example.com", WorkerID: "worker-0", AgentType: domain.CloudAgentTypeClaudeCode, Credential: clearKey, Status: domain.CloudAgentStatusRunning, WorkspacePath: domain.DefaultCloudAgentWorkspacePath}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := mountedConsoleTestServer(NewHandler(Config{SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password"}, store))
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Get(server.URL + "/console/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat page status=%d body=%s", response.StatusCode, body)
+	}
+
+	keys, err := store.ListAPIKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected one api key, got %+v", keys)
+	}
+	expectedModels := []string{"deepseek-v4-pro", "anthropic/claude-opus-4.8", "openai/gpt-5.5", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
+	if !consoleChatSameStringSet(keys[0].AllowedModels, expectedModels) {
+		t.Fatalf("unexpected auto-healed allowed models: %+v", keys[0].AllowedModels)
 	}
 }
 
@@ -813,6 +1033,18 @@ func TestChatPageRestoresCloudAgentEnvironment(t *testing.T) {
 	if !strings.Contains(html, "data-chat-workspace-file-url=\"/console/chat/workspace/file\"") {
 		t.Fatalf("chat page is missing workspace file wiring: %s", html)
 	}
+	if !strings.Contains(html, "data-chat-workspace-download-url=\"/console/chat/workspace/download\"") {
+		t.Fatalf("chat page is missing workspace download wiring: %s", html)
+	}
+	if !strings.Contains(html, "data-chat-workspace-copy-url=\"/console/chat/workspace/copy\"") {
+		t.Fatalf("chat page is missing workspace copy wiring: %s", html)
+	}
+	if !strings.Contains(html, "data-chat-workspace-rename-url=\"/console/chat/workspace/rename\"") {
+		t.Fatalf("chat page is missing workspace rename wiring: %s", html)
+	}
+	if !strings.Contains(html, "data-chat-workspace-delete-url=\"/console/chat/workspace/path\"") {
+		t.Fatalf("chat page is missing workspace delete wiring: %s", html)
+	}
 	if !strings.Contains(html, "data-chat-action=\"open-shell\"") {
 		t.Fatalf("chat page did not render the shell launch button: %s", html)
 	}
@@ -1297,6 +1529,13 @@ func TestChatWorkspaceTreeRestoresRuntimeWhenBridgeContainerMissing(t *testing.T
 	}
 }
 
+func TestChatWorkspaceRuntimeUnavailableDetectsMissingASSEndpoint(t *testing.T) {
+	err := errors.New("aiyolo-ass endpoint not available: PUT /v1/fs/directory returned HTTP 404: 404 page not found")
+	if !consoleChatWorkspaceRuntimeUnavailable(err) {
+		t.Fatalf("missing ASS endpoint should trigger workspace runtime restore: %v", err)
+	}
+}
+
 func TestChatWorkspaceFileEndpointReadsFile(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
@@ -1675,6 +1914,42 @@ func TestCreateChatWorkspaceFileAndDirectory(t *testing.T) {
 		}
 		return workerops.CloudAgentWorkspaceFile{Path: relativePath, Bytes: int64(len(content))}, nil
 	}
+	handler.renameCloudAgentWorkspacePath = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, oldPath string, newPath string) (workerops.CloudAgentWorkspaceRename, error) {
+		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
+			t.Fatalf("unexpected workspace rename inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
+		}
+		if oldPath != "src/assets" || newPath != "src/static" {
+			t.Fatalf("unexpected workspace rename payload old=%q new=%q", oldPath, newPath)
+		}
+		return workerops.CloudAgentWorkspaceRename{OldPath: oldPath, Path: newPath}, nil
+	}
+	handler.downloadCloudAgentWorkspaceFile = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceDownload, error) {
+		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
+			t.Fatalf("unexpected workspace download inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
+		}
+		if relativePath != "src/static/data.bin" {
+			t.Fatalf("unexpected workspace download path=%q", relativePath)
+		}
+		return workerops.CloudAgentWorkspaceDownload{Path: relativePath, Name: "data.bin", Size: 3, MediaType: "application/octet-stream", Content: []byte{9, 8, 7}}, nil
+	}
+	handler.copyCloudAgentWorkspacePath = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, oldPath string, newPath string) (workerops.CloudAgentWorkspaceCopy, error) {
+		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
+			t.Fatalf("unexpected workspace copy inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
+		}
+		if oldPath != "src/static" || newPath != "src/static-copy" {
+			t.Fatalf("unexpected workspace copy payload old=%q new=%q", oldPath, newPath)
+		}
+		return workerops.CloudAgentWorkspaceCopy{SourcePath: oldPath, Path: newPath}, nil
+	}
+	handler.deleteCloudAgentWorkspacePath = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceDelete, error) {
+		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
+			t.Fatalf("unexpected workspace delete inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
+		}
+		if relativePath != "src/static-copy" {
+			t.Fatalf("unexpected workspace delete path=%q", relativePath)
+		}
+		return workerops.CloudAgentWorkspaceDelete{Path: relativePath}, nil
+	}
 
 	server := mountedConsoleTestServer(handler)
 	defer server.Close()
@@ -1755,6 +2030,79 @@ func TestCreateChatWorkspaceFileAndDirectory(t *testing.T) {
 	}
 	if uploadPayload.Status != "uploaded" || uploadPayload.Path != "src/assets/blob.bin" || uploadPayload.Bytes != 4 || uploadPayload.Notice != "文件已上传。" {
 		t.Fatalf("unexpected workspace upload payload: %+v", uploadPayload)
+	}
+	renameResponse, err := client.Post(server.URL+"/console/chat/workspace/rename?session=session-shell", "application/json", strings.NewReader(`{"path":"src/assets","new_path":"src/static"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer renameResponse.Body.Close()
+	if renameResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(renameResponse.Body)
+		t.Fatalf("chat workspace rename status=%d body=%s", renameResponse.StatusCode, body)
+	}
+	var renamePayload consoleChatWorkspaceRenameResponse
+	if err := json.NewDecoder(renameResponse.Body).Decode(&renamePayload); err != nil {
+		t.Fatal(err)
+	}
+	if renamePayload.Status != "renamed" || renamePayload.OldPath != "src/assets" || renamePayload.Path != "src/static" || renamePayload.Notice != "已重命名。" {
+		t.Fatalf("unexpected workspace rename payload: %+v", renamePayload)
+	}
+	downloadResponse, err := client.Get(server.URL + "/console/chat/workspace/download?session=session-shell&path=src/static/data.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer downloadResponse.Body.Close()
+	if downloadResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(downloadResponse.Body)
+		t.Fatalf("chat workspace download status=%d body=%s", downloadResponse.StatusCode, body)
+	}
+	if contentType := downloadResponse.Header.Get("Content-Type"); contentType != "application/octet-stream" {
+		t.Fatalf("unexpected download content type: %q", contentType)
+	}
+	if disposition := downloadResponse.Header.Get("Content-Disposition"); !strings.Contains(disposition, "attachment") || !strings.Contains(disposition, "data.bin") {
+		t.Fatalf("unexpected download disposition: %q", disposition)
+	}
+	if content, err := io.ReadAll(downloadResponse.Body); err != nil || string(content) != string([]byte{9, 8, 7}) {
+		t.Fatalf("unexpected download content=%v err=%v", content, err)
+	}
+
+	copyResponse, err := client.Post(server.URL+"/console/chat/workspace/copy?session=session-shell", "application/json", strings.NewReader(`{"path":"src/static","new_path":"src/static-copy"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer copyResponse.Body.Close()
+	if copyResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(copyResponse.Body)
+		t.Fatalf("chat workspace copy status=%d body=%s", copyResponse.StatusCode, body)
+	}
+	var copyPayload consoleChatWorkspaceCopyResponse
+	if err := json.NewDecoder(copyResponse.Body).Decode(&copyPayload); err != nil {
+		t.Fatal(err)
+	}
+	if copyPayload.Status != "copied" || copyPayload.SourcePath != "src/static" || copyPayload.Path != "src/static-copy" || copyPayload.Notice != "已复制。" {
+		t.Fatalf("unexpected workspace copy payload: %+v", copyPayload)
+	}
+
+	deleteRequest, err := http.NewRequest(http.MethodDelete, server.URL+"/console/chat/workspace/path?session=session-shell", strings.NewReader(`{"path":"src/static-copy"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleteRequest.Header.Set("Content-Type", "application/json")
+	deleteResponse, err := client.Do(deleteRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteResponse.Body.Close()
+	if deleteResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(deleteResponse.Body)
+		t.Fatalf("chat workspace delete status=%d body=%s", deleteResponse.StatusCode, body)
+	}
+	var deletePayload consoleChatWorkspaceDeleteResponse
+	if err := json.NewDecoder(deleteResponse.Body).Decode(&deletePayload); err != nil {
+		t.Fatal(err)
+	}
+	if deletePayload.Status != "deleted" || deletePayload.Path != "src/static-copy" || deletePayload.Notice != "已永久删除。" {
+		t.Fatalf("unexpected workspace delete payload: %+v", deletePayload)
 	}
 	if ensureCalls.Load() != 0 {
 		t.Fatalf("ensure calls=%d, want 0", ensureCalls.Load())

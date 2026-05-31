@@ -1,0 +1,84 @@
+{{define "apiKeyEdit"}}
+{{template "layout-start" .}}
+<div class="stack">
+  {{if .Notice}}
+  <div class="flash flash-success" role="status">{{.Notice}}</div>
+  {{end}}
+
+  <section class="panel">
+    <div class="section-head">
+      <div>
+        <p class="section-kicker">{{msg .Locale "编辑密钥" "Edit key"}}</p>
+        <h2>{{msg .Locale "编辑 API 密钥" "Edit API key"}}</h2>
+      </div>
+      <a class="ghost-button" href="/console/api-keys">{{msg .Locale "返回列表" "Back to list"}}</a>
+    </div>
+
+    <form method="post" action="/console/api-keys/{{.APIKey.ID}}/update" class="form-grid">
+      <label class="field span-2">
+        <span class="field-label">{{msg .Locale "名称" "Name"}}</span>
+        <input name="name" value="{{.APIKey.Name}}">
+      </label>
+
+      <label class="field">
+        <span class="field-label">{{msg .Locale "前缀" "Prefix"}}</span>
+        <input value="{{.APIKey.Prefix}}" disabled>
+      </label>
+
+      <label class="field">
+        <span class="field-label">{{msg .Locale "状态" "Status"}}</span>
+        <input value="{{statusText .Locale .APIKey.Status}}" disabled>
+      </label>
+
+      <label class="field span-2">
+        <span class="field-label">{{msg .Locale "允许协议" "Allowed protocols"}}</span>
+        <input name="allowed_protocols" list="api-key-edit-protocol-options" value="{{join .APIKey.AllowedProtocols ","}}">
+        <span class="field-help">{{msg .Locale "可输入逗号分隔的协议，例如 openai,anthropic。" "Enter comma-separated protocols, for example openai,anthropic."}}</span>
+      </label>
+
+      <label class="field span-2">
+        <span class="field-label">{{msg .Locale "允许模型" "Allowed models"}}</span>
+        <input name="allowed_models" list="api-key-edit-model-options" value="{{join .APIKey.AllowedModels ","}}">
+        <span class="field-help">{{msg .Locale "会基于已保存模型与当前路由做补全提示。" "Autocomplete hints are based on saved models and current route aliases."}}</span>
+      </label>
+
+      <label class="field">
+        <span class="field-label">RPM</span>
+        <input name="rpm_limit" type="number" min="0" value="{{.APIKey.RPMLimit}}">
+      </label>
+
+      <label class="field">
+        <span class="field-label">TPM</span>
+        <input name="tpm_limit" type="number" min="0" value="{{.APIKey.TPMLimit}}">
+      </label>
+
+      <label class="field">
+        <span class="field-label">{{msg .Locale "并发" "Concurrency"}}</span>
+        <input name="concurrent_limit" type="number" min="0" value="{{.APIKey.ConcurrentLimit}}">
+      </label>
+
+      <label class="field">
+        <span class="field-label">{{msg .Locale "日预算（人民币分）" "Daily budget (CNY fen)"}}</span>
+        <input name="daily_budget_cents" type="number" min="0" value="{{.APIKey.DailyBudgetCents}}">
+      </label>
+
+      <label class="field span-2">
+        <span class="field-label">{{msg .Locale "月预算（人民币分）" "Monthly budget (CNY fen)"}}</span>
+        <input name="monthly_budget_cents" type="number" min="0" value="{{.APIKey.MonthlyBudgetCents}}">
+      </label>
+
+      <div class="field span-2">
+        <button class="primary-button" type="submit">{{msg .Locale "保存" "Save"}}</button>
+      </div>
+    </form>
+
+    <datalist id="api-key-edit-protocol-options">
+      {{range .ConfiguredProtocols}}<option value="{{.}}"></option>{{end}}
+    </datalist>
+    <datalist id="api-key-edit-model-options">
+      {{range .ModelHints}}<option value="{{.}}"></option>{{end}}
+    </datalist>
+  </section>
+</div>
+{{template "layout-end" .}}
+{{end}}

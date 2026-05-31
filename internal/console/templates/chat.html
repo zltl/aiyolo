@@ -7,7 +7,7 @@
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
   <link rel="stylesheet" href="https://unpkg.com/file-icons-js@1.1.0/css/style.css">
   <link rel="stylesheet" href="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css">
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260531m">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260531r">
   <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body class="chat-workspace-body">
@@ -18,7 +18,7 @@
 
 {{define "chat-content"}}
 <div id="chat-content" class="chat-workspace-page">
-  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-attachment-tree-url="{{.ChatAttachmentTreeURL}}" data-chat-attachment-tree-enabled="{{if .ChatAttachmentTreeEnabled}}true{{else}}false{{end}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-workspace-upload-url="{{.ChatWorkspaceUploadURL}}" data-chat-workspace-upload-max-bytes="{{.ChatWorkspaceUploadMaxBytes}}" data-chat-workspace-directory-url="{{.ChatWorkspaceDirectoryURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
+  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-attachment-tree-url="{{.ChatAttachmentTreeURL}}" data-chat-attachment-tree-enabled="{{if .ChatAttachmentTreeEnabled}}true{{else}}false{{end}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-workspace-download-url="{{.ChatWorkspaceDownloadURL}}" data-chat-workspace-upload-url="{{.ChatWorkspaceUploadURL}}" data-chat-workspace-upload-max-bytes="{{.ChatWorkspaceUploadMaxBytes}}" data-chat-workspace-directory-url="{{.ChatWorkspaceDirectoryURL}}" data-chat-workspace-copy-url="{{.ChatWorkspaceCopyURL}}" data-chat-workspace-rename-url="{{.ChatWorkspaceRenameURL}}" data-chat-workspace-delete-url="{{.ChatWorkspaceDeleteURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
     <div class="chat-workbench">
       <div class="chat-sidebar-column">
         <nav class="chat-activitybar" aria-label="{{msg .Locale "工作台导航" "Workbench navigation"}}">
@@ -31,17 +31,6 @@
             </button>
             <button class="chat-activitybar-item" type="button" data-chat-action="switch-sidebar-view" data-chat-sidebar-view="sessions" aria-label="{{msg .Locale "会话列表" "Session list"}}" title="{{msg .Locale "会话列表" "Session list"}}">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6.75h12A2.25 2.25 0 0 1 20.25 9v7A2.25 2.25 0 0 1 18 18.25H9.91a1.5 1.5 0 0 0-.95.34l-2.86 2.33a.5.5 0 0 1-.82-.38v-2.29A2.25 2.25 0 0 1 3.75 16V9A2.25 2.25 0 0 1 6 6.75Z"></path><path d="M8 11h8"></path><path d="M8 14h5"></path></svg>
-            </button>
-          </div>
-          <div class="chat-activitybar-group chat-activitybar-group-panels">
-            <button class="chat-activitybar-item chat-activitybar-item-secondary" type="button" data-chat-action="toggle-pane" data-chat-pane="sidebar" aria-label="{{msg .Locale "切换左侧栏" "Toggle sidebar"}}" title="{{msg .Locale "切换左侧栏" "Toggle sidebar"}}">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3.75" y="4.75" width="16.5" height="14.5" rx="2.25"></rect><path d="M9 4.75v14.5"></path><path d="m14.5 9.5-3 2.75 3 2.75"></path></svg>
-            </button>
-            <button class="chat-activitybar-item chat-activitybar-item-secondary" type="button" data-chat-action="toggle-pane" data-chat-pane="editor" aria-label="{{msg .Locale "切换编辑器" "Toggle editor"}}" title="{{msg .Locale "切换编辑器" "Toggle editor"}}">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M7 4.75h7.25l2.75 2.75v11A1.75 1.75 0 0 1 15.25 20.25h-8.5A1.75 1.75 0 0 1 5 18.5v-12A1.75 1.75 0 0 1 6.75 4.75Z"></path><path d="M14.25 4.75V8h3.25"></path><path d="M8.75 12h4.5"></path><path d="M8.75 15.25h5.5"></path></svg>
-            </button>
-            <button class="chat-activitybar-item chat-activitybar-item-secondary" type="button" data-chat-action="toggle-pane" data-chat-pane="chat" aria-label="{{msg .Locale "切换对话面板" "Toggle chat pane"}}" title="{{msg .Locale "切换对话面板" "Toggle chat pane"}}">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6.75h12A2.25 2.25 0 0 1 20.25 9v6A2.25 2.25 0 0 1 18 17.25H10.5L6 20.25v-3A2.25 2.25 0 0 1 3.75 15V9A2.25 2.25 0 0 1 6 6.75Z"></path><path d="M8.25 11.25h7.5"></path><path d="M8.25 14.25h5.25"></path></svg>
             </button>
           </div>
         </nav>
@@ -334,8 +323,8 @@
   <script src="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
   <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
   <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
-  <script src="/console/static/chat-shell.js?v=chat-shell-20260531b"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260531h"></script>
-  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260531i"></script>
+  <script src="/console/static/chat-shell.js?v=chat-shell-20260531c"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260531i"></script>
+  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260531m"></script>
 </div>
 {{end}}

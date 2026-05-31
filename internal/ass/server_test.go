@@ -180,6 +180,68 @@ func TestFSCreateFileAndDirectory(t *testing.T) {
 	if content, err := os.ReadFile(filepath.Join(root, "src", "assets", "blob.bin")); err != nil || string(content) != string([]byte{9, 8, 7}) {
 		t.Fatalf("overwritten file content=%v err=%v", content, err)
 	}
+
+	response = performRequest(server, http.MethodPost, "/v1/fs/rename", `{"path":"src/assets/blob.bin","new_path":"src/assets/data.bin"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("rename file status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "src", "assets", "blob.bin")); !os.IsNotExist(err) {
+		t.Fatalf("old file should be gone after rename err=%v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "src", "assets", "data.bin")); err != nil || string(content) != string([]byte{9, 8, 7}) {
+		t.Fatalf("renamed file content=%v err=%v", content, err)
+	}
+
+	response = performRequest(server, http.MethodPost, "/v1/fs/rename", `{"path":"src/assets","new_path":"src/static"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("rename directory status=%d body=%s", response.Code, response.Body.String())
+	}
+	if info, err := os.Stat(filepath.Join(root, "src", "static")); err != nil || !info.IsDir() {
+		t.Fatalf("renamed directory info=%+v err=%v", info, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "src", "static", "data.bin")); err != nil || string(content) != string([]byte{9, 8, 7}) {
+		t.Fatalf("renamed directory content=%v err=%v", content, err)
+	}
+
+	response = performRequest(server, http.MethodPost, "/v1/fs/rename", `{"path":"src/static","new_path":"src/new.txt"}`)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("rename conflict status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = performRequest(server, http.MethodGet, "/v1/fs/download?path=src/static/data.bin", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("download file status=%d body=%s", response.Code, response.Body.String())
+	}
+	var download struct {
+		Status string         `json:"status"`
+		Data   fsDownloadData `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &download); err != nil {
+		t.Fatal(err)
+	}
+	if download.Status != "ok" || download.Data.Path != "src/static/data.bin" || download.Data.Name != "data.bin" || string(download.Data.Content) != string([]byte{9, 8, 7}) {
+		t.Fatalf("unexpected download response: %+v", download)
+	}
+
+	response = performRequest(server, http.MethodPost, "/v1/fs/copy", `{"path":"src/static","new_path":"src/static-copy"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("copy directory status=%d body=%s", response.Code, response.Body.String())
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "src", "static-copy", "data.bin")); err != nil || string(content) != string([]byte{9, 8, 7}) {
+		t.Fatalf("copied directory content=%v err=%v", content, err)
+	}
+	response = performRequest(server, http.MethodPost, "/v1/fs/copy", `{"path":"src/static","new_path":"src/static-copy"}`)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("copy conflict status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = performRequest(server, http.MethodDelete, "/v1/fs/path", `{"path":"src/static-copy"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("delete directory status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "src", "static-copy")); !os.IsNotExist(err) {
+		t.Fatalf("copied directory should be gone after delete err=%v", err)
+	}
 }
 
 func TestPathTraversalIsRejected(t *testing.T) {

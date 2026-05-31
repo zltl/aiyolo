@@ -3,8 +3,10 @@ package workers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -236,6 +238,66 @@ func TestResolveCloudAgentASSSHA256(t *testing.T) {
 	}
 	if checksum != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
 		t.Fatalf("checksum=%q", checksum)
+	}
+}
+
+func TestDecodeCloudAgentASSResponseReportsMissingEndpoint(t *testing.T) {
+	err := decodeCloudAgentASSResponse(http.MethodPut, "/v1/fs/directory", http.StatusNotFound, []byte("404 page not found\n"), nil)
+	if err == nil {
+		t.Fatal("expected missing endpoint error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "aiyolo-ass endpoint not available") || !strings.Contains(message, "PUT /v1/fs/directory") || !strings.Contains(message, "404 page not found") {
+		t.Fatalf("unexpected missing endpoint error: %v", err)
+	}
+	if strings.Contains(message, "parse aiyolo-ass response") {
+		t.Fatalf("missing endpoint should not be reported as a JSON parse failure: %v", err)
+	}
+}
+
+func TestCreateCloudAgentWorkspaceDirectoryFallsBackToShellWhenEndpointMissing(t *testing.T) {
+	var calls []string
+	runner := func(_ context.Context, _ domain.WorkerServer, _ domain.WorkerSSHKey, _ domain.CloudAgentAccount, _ domain.CloudAgentSession, method string, endpointPath string, _ url.Values, body any, data any) error {
+		calls = append(calls, method+" "+endpointPath)
+		switch len(calls) {
+		case 1:
+			request, ok := body.(struct {
+				Path   string `json:"path"`
+				MkdirP bool   `json:"mkdir_p"`
+			})
+			if !ok || request.Path != "src/assets" || !request.MkdirP {
+				t.Fatalf("unexpected directory request: %#v", body)
+			}
+			return errors.New("aiyolo-ass endpoint not available: PUT /v1/fs/directory returned HTTP 404: 404 page not found")
+		case 2:
+			request, ok := body.(CloudAgentShellExecRequest)
+			if !ok {
+				t.Fatalf("fallback request type = %T", body)
+			}
+			if request.Mode != "bash" || !strings.Contains(request.Script, "mkdir -p -- \"$target\"") || !strings.Contains(request.Script, "target='src/assets'") {
+				t.Fatalf("unexpected fallback request: %+v", request)
+			}
+			result, ok := data.(*CloudAgentShellExecResult)
+			if !ok {
+				t.Fatalf("fallback data type = %T", data)
+			}
+			*result = CloudAgentShellExecResult{ExitCode: 0}
+			return nil
+		default:
+			t.Fatalf("unexpected extra ASS call: %s %s", method, endpointPath)
+			return nil
+		}
+	}
+
+	result, err := createCloudAgentWorkspaceDirectory(context.Background(), domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, "src/assets", true, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Path != "src/assets" {
+		t.Fatalf("fallback result path=%q", result.Path)
+	}
+	if strings.Join(calls, ",") != "PUT /v1/fs/directory,POST /v1/shell/exec" {
+		t.Fatalf("unexpected ASS calls: %v", calls)
 	}
 }
 

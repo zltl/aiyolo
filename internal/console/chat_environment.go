@@ -23,6 +23,11 @@ const (
 	consoleChatEnvironmentCloudAgentPrefix = "cloud-agent:"
 )
 
+var consoleChatPreferredImageModels = []string{
+	"openai/gpt-image-2",
+	"black-forest-labs/flux-1.1-pro-ultra",
+}
+
 type consoleChatEnvironmentOption struct {
 	Value string
 	Label string
@@ -226,6 +231,38 @@ func consoleChatRoutePublicNames(routes []consoleChatRouteView) []string {
 	return result
 }
 
+func consoleChatAllowedModelAliases(model string) []string {
+	aliases := []string{model}
+	if slot, ok := consoleChatAllowedModelSlot(model); ok && slot == "gpt-image-2" {
+		aliases = append(aliases, "gpt-image-2", "chatgpt-image-2", "openai/gpt-image-2")
+	}
+	return aliases
+}
+
+func consoleChatExpandAllowedModels(models []string) []string {
+	models = append(models, consoleChatPreferredImageModels...)
+	seen := make(map[string]struct{}, len(models))
+	result := make([]string, 0, len(models))
+	for _, model := range models {
+		trimmed := strings.TrimSpace(model)
+		if trimmed == "" {
+			continue
+		}
+		for _, alias := range consoleChatAllowedModelAliases(trimmed) {
+			candidate := strings.TrimSpace(alias)
+			if candidate == "" {
+				continue
+			}
+			if _, ok := seen[candidate]; ok {
+				continue
+			}
+			seen[candidate] = struct{}{}
+			result = append(result, candidate)
+		}
+	}
+	return result
+}
+
 func consoleChatStringSet(values []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(values))
 	for _, value := range values {
@@ -354,7 +391,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	if strings.TrimSpace(baseURL) == "" {
 		return consoleChatEnvironmentEnsureResponse{}, errors.New(handler.requestText(r, "无法解析当前 AIYolo 访问地址", "Unable to resolve the current AIYolo public URL"))
 	}
-	allowedModels := consoleChatRoutePublicNames(state.Routes)
+	allowedModels := consoleChatExpandAllowedModels(consoleChatRoutePublicNames(state.Routes))
 	assDownloadURL, assSHA256URL := handler.consoleChatCloudAgentASSArtifactURLs(baseURL)
 	accountID := consoleChatCloudAgentAccountID(workerID)
 	now := time.Now().UTC()

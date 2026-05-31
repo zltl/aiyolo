@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"path"
 	"strings"
@@ -17,8 +18,12 @@ import (
 const (
 	consoleChatWorkspaceTreePath       = "/console/chat/workspace/tree"
 	consoleChatWorkspaceFilePath       = "/console/chat/workspace/file"
+	consoleChatWorkspaceDownloadPath   = "/console/chat/workspace/download"
 	consoleChatWorkspaceUploadPath     = "/console/chat/workspace/upload"
 	consoleChatWorkspaceDirectoryPath  = "/console/chat/workspace/directory"
+	consoleChatWorkspaceCopyPath       = "/console/chat/workspace/copy"
+	consoleChatWorkspaceRenamePath     = "/console/chat/workspace/rename"
+	consoleChatWorkspaceDeletePath     = "/console/chat/workspace/path"
 	consoleChatWorkspaceMaxFileBytes   = 512 * 1024
 	consoleChatWorkspaceMaxUploadBytes = 20 * 1024 * 1024
 )
@@ -65,12 +70,24 @@ type consoleChatWorkspaceTreeResponse struct {
 
 type consoleChatWorkspaceFileResult struct {
 	Path       string `json:"path,omitempty"`
+	Name       string `json:"name,omitempty"`
 	Size       int64  `json:"size,omitempty"`
 	Kind       string `json:"kind,omitempty"`
 	MediaType  string `json:"mediaType,omitempty"`
 	Content    string `json:"content,omitempty"`
+	Payload    []byte `json:"-"`
 	PreviewURL string `json:"previewURL,omitempty"`
 	Bytes      int64  `json:"bytes,omitempty"`
+}
+
+type consoleChatWorkspaceCopyResult struct {
+	SourcePath string
+	Path       string
+}
+
+type consoleChatWorkspaceRenameResult struct {
+	OldPath string
+	Path    string
 }
 
 type consoleChatWorkspaceFileResponse struct {
@@ -103,7 +120,59 @@ type consoleChatWorkspaceDirectoryCreateRequest struct {
 	MkdirP bool   `json:"mkdir_p"`
 }
 
+type consoleChatWorkspaceRenameRequest struct {
+	Path    string `json:"path"`
+	NewPath string `json:"new_path"`
+}
+
+type consoleChatWorkspacePathRequest struct {
+	Path string `json:"path"`
+}
+
+type consoleChatWorkspaceCopyRequest struct {
+	Path    string `json:"path"`
+	NewPath string `json:"new_path"`
+}
+
 type consoleChatWorkspaceDirectoryResponse struct {
+	Status        string `json:"status"`
+	SessionID     string `json:"sessionId,omitempty"`
+	Environment   string `json:"environment,omitempty"`
+	WorkerID      string `json:"workerId,omitempty"`
+	ContainerName string `json:"containerName,omitempty"`
+	WorkspacePath string `json:"workspacePath,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Notice        string `json:"notice,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+type consoleChatWorkspaceRenameResponse struct {
+	Status        string `json:"status"`
+	SessionID     string `json:"sessionId,omitempty"`
+	Environment   string `json:"environment,omitempty"`
+	WorkerID      string `json:"workerId,omitempty"`
+	ContainerName string `json:"containerName,omitempty"`
+	WorkspacePath string `json:"workspacePath,omitempty"`
+	OldPath       string `json:"oldPath,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Notice        string `json:"notice,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+type consoleChatWorkspaceCopyResponse struct {
+	Status        string `json:"status"`
+	SessionID     string `json:"sessionId,omitempty"`
+	Environment   string `json:"environment,omitempty"`
+	WorkerID      string `json:"workerId,omitempty"`
+	ContainerName string `json:"containerName,omitempty"`
+	WorkspacePath string `json:"workspacePath,omitempty"`
+	SourcePath    string `json:"sourcePath,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Notice        string `json:"notice,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+type consoleChatWorkspaceDeleteResponse struct {
 	Status        string `json:"status"`
 	SessionID     string `json:"sessionId,omitempty"`
 	Environment   string `json:"environment,omitempty"`
@@ -267,6 +336,54 @@ func (handler *Handler) chatWorkspaceFile(w http.ResponseWriter, r *http.Request
 		Content:       result.Content,
 		PreviewURL:    result.PreviewURL,
 	})
+}
+
+func (handler *Handler) downloadChatWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{Status: "error", Error: err.Error()})
+		return
+	}
+	relativePath, err := handler.consoleChatWorkspaceRelativePath(r, r.URL.Query().Get("path"), false)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Error: err.Error()})
+		return
+	}
+	result, err := handler.downloadConsoleChatWorkspaceFile(r.Context(), target, relativePath)
+	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			result, err = handler.downloadConsoleChatWorkspaceFile(r.Context(), target, relativePath)
+		}
+	}
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceFileResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Path: relativePath, Error: err.Error()})
+		return
+	}
+	filename := strings.TrimSpace(result.Name)
+	if filename == "" {
+		filename = path.Base(result.Path)
+	}
+	if filename == "" || filename == "." || filename == "/" {
+		filename = "download"
+	}
+	mediaType := strings.TrimSpace(result.MediaType)
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", mediaType)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(result.Payload)
 }
 
 func (handler *Handler) saveChatWorkspaceFile(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +674,160 @@ func (handler *Handler) createChatWorkspaceDirectory(w http.ResponseWriter, r *h
 	})
 }
 
+func (handler *Handler) copyChatWorkspacePath(w http.ResponseWriter, r *http.Request) {
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceCopyResponse{Status: "error", Error: err.Error()})
+		return
+	}
+	var request consoleChatWorkspaceCopyRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		message := handler.requestText(r, "工作区复制请求无效。", "The workspace copy request is invalid.")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceCopyResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Error: message})
+		return
+	}
+	oldPath, err := handler.consoleChatWorkspaceRelativePath(r, request.Path, false)
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceCopyResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Error: err.Error()})
+		return
+	}
+	newPath, err := handler.consoleChatWorkspaceRelativePath(r, request.NewPath, false)
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceCopyResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, SourcePath: oldPath, Error: err.Error()})
+		return
+	}
+	result, err := handler.copyConsoleChatWorkspacePath(r.Context(), target, oldPath, newPath)
+	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			result, err = handler.copyConsoleChatWorkspacePath(r.Context(), target, oldPath, newPath)
+		}
+	}
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceCopyResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, SourcePath: oldPath, Path: newPath, Error: err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(consoleChatWorkspaceCopyResponse{Status: "copied", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, SourcePath: result.SourcePath, Path: result.Path, Notice: handler.requestText(r, "已复制。", "Copied.")})
+}
+
+func (handler *Handler) renameChatWorkspacePath(w http.ResponseWriter, r *http.Request) {
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceRenameResponse{Status: "error", Error: err.Error()})
+		return
+	}
+	var request consoleChatWorkspaceRenameRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		message := handler.requestText(r, "工作区重命名请求无效。", "The workspace rename request is invalid.")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceRenameResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			Error:         message,
+		})
+		return
+	}
+	oldPath, err := handler.consoleChatWorkspaceRelativePath(r, request.Path, false)
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceRenameResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Error: err.Error()})
+		return
+	}
+	newPath, err := handler.consoleChatWorkspaceRelativePath(r, request.NewPath, false)
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceRenameResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, OldPath: oldPath, Error: err.Error()})
+		return
+	}
+	result, err := handler.renameConsoleChatWorkspacePath(r.Context(), target, oldPath, newPath)
+	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			result, err = handler.renameConsoleChatWorkspacePath(r.Context(), target, oldPath, newPath)
+		}
+	}
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceRenameResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			OldPath:       oldPath,
+			Path:          newPath,
+			Error:         err.Error(),
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(consoleChatWorkspaceRenameResponse{
+		Status:        "renamed",
+		SessionID:     target.SessionID,
+		Environment:   target.Environment,
+		WorkerID:      target.WorkerID,
+		ContainerName: target.ContainerName,
+		WorkspacePath: target.WorkspacePath,
+		OldPath:       result.OldPath,
+		Path:          result.Path,
+		Notice:        handler.requestText(r, "已重命名。", "Renamed."),
+	})
+}
+
+func (handler *Handler) deleteChatWorkspacePath(w http.ResponseWriter, r *http.Request) {
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDeleteResponse{Status: "error", Error: err.Error()})
+		return
+	}
+	var request consoleChatWorkspacePathRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		message := handler.requestText(r, "工作区删除请求无效。", "The workspace delete request is invalid.")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDeleteResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Error: message})
+		return
+	}
+	relativePath, err := handler.consoleChatWorkspaceRelativePath(r, request.Path, false)
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDeleteResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Error: err.Error()})
+		return
+	}
+	result, err := handler.deleteConsoleChatWorkspacePath(r.Context(), target, relativePath)
+	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			result, err = handler.deleteConsoleChatWorkspacePath(r.Context(), target, relativePath)
+		}
+	}
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDeleteResponse{Status: "error", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Path: relativePath, Error: err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(consoleChatWorkspaceDeleteResponse{Status: "deleted", SessionID: target.SessionID, Environment: target.Environment, WorkerID: target.WorkerID, ContainerName: target.ContainerName, WorkspacePath: target.WorkspacePath, Path: result.Path, Notice: handler.requestText(r, "已永久删除。", "Deleted permanently.")})
+}
+
 func (handler *Handler) listConsoleChatWorkspace(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string) (consoleChatWorkspaceTreeResult, error) {
 	result, err := handler.listCloudAgentWorkspaceTree(ctx, target.Worker, target.Key, target.Account, target.CloudSession, relativePath)
 	if err != nil {
@@ -575,6 +846,14 @@ func (handler *Handler) readConsoleChatWorkspaceFile(ctx context.Context, target
 		kind = "text"
 	}
 	return consoleChatWorkspaceFileResult{Path: result.Path, Size: result.Size, Kind: kind, MediaType: strings.TrimSpace(result.MediaType), Content: result.Content, PreviewURL: strings.TrimSpace(result.PreviewURL)}, nil
+}
+
+func (handler *Handler) downloadConsoleChatWorkspaceFile(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string) (consoleChatWorkspaceFileResult, error) {
+	result, err := handler.downloadCloudAgentWorkspaceFile(ctx, target.Worker, target.Key, target.Account, target.CloudSession, relativePath)
+	if err != nil {
+		return consoleChatWorkspaceFileResult{}, err
+	}
+	return consoleChatWorkspaceFileResult{Path: result.Path, Name: strings.TrimSpace(result.Name), Size: result.Size, MediaType: strings.TrimSpace(result.MediaType), Payload: result.Content}, nil
 }
 
 func (handler *Handler) writeConsoleChatWorkspaceFile(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string, content string) (consoleChatWorkspaceFileResult, error) {
@@ -603,6 +882,30 @@ func (handler *Handler) uploadConsoleChatWorkspaceFile(ctx context.Context, targ
 
 func (handler *Handler) createConsoleChatWorkspaceDirectory(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string, mkdirP bool) (consoleChatWorkspaceFileResult, error) {
 	result, err := handler.createCloudAgentWorkspaceDir(ctx, target.Worker, target.Key, target.Account, target.CloudSession, relativePath, mkdirP)
+	if err != nil {
+		return consoleChatWorkspaceFileResult{}, err
+	}
+	return consoleChatWorkspaceFileResult{Path: result.Path}, nil
+}
+
+func (handler *Handler) copyConsoleChatWorkspacePath(ctx context.Context, target consoleChatWorkspaceTarget, oldPath string, newPath string) (consoleChatWorkspaceCopyResult, error) {
+	result, err := handler.copyCloudAgentWorkspacePath(ctx, target.Worker, target.Key, target.Account, target.CloudSession, oldPath, newPath)
+	if err != nil {
+		return consoleChatWorkspaceCopyResult{}, err
+	}
+	return consoleChatWorkspaceCopyResult{SourcePath: result.SourcePath, Path: result.Path}, nil
+}
+
+func (handler *Handler) renameConsoleChatWorkspacePath(ctx context.Context, target consoleChatWorkspaceTarget, oldPath string, newPath string) (consoleChatWorkspaceRenameResult, error) {
+	result, err := handler.renameCloudAgentWorkspacePath(ctx, target.Worker, target.Key, target.Account, target.CloudSession, oldPath, newPath)
+	if err != nil {
+		return consoleChatWorkspaceRenameResult{}, err
+	}
+	return consoleChatWorkspaceRenameResult{OldPath: result.OldPath, Path: result.Path}, nil
+}
+
+func (handler *Handler) deleteConsoleChatWorkspacePath(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string) (consoleChatWorkspaceFileResult, error) {
+	result, err := handler.deleteCloudAgentWorkspacePath(ctx, target.Worker, target.Key, target.Account, target.CloudSession, relativePath)
 	if err != nil {
 		return consoleChatWorkspaceFileResult{}, err
 	}
@@ -663,6 +966,7 @@ func consoleChatWorkspaceRuntimeUnavailable(err error) bool {
 	message := strings.ToLower(err.Error())
 	return (strings.Contains(message, "cloud agent container") && strings.Contains(message, "not available")) ||
 		(strings.Contains(message, "aiyolo-ass socket") && strings.Contains(message, "not available")) ||
+		(strings.Contains(message, "aiyolo-ass endpoint") && strings.Contains(message, "not available")) ||
 		strings.Contains(message, "no such container") ||
 		strings.Contains(message, "connect aiyolo-ass") ||
 		(strings.Contains(message, "could not connect") && strings.Contains(message, "aiyolo-ass"))

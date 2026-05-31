@@ -325,6 +325,9 @@
     if (trimmed === "") {
       return "";
     }
+    if (/^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(trimmed)) {
+      return trimmed;
+    }
     if (/^(#|\/|\.\.?\/|\?)/.test(trimmed)) {
       return trimmed;
     }
@@ -354,6 +357,13 @@
   rendered = rendered.replace(new RegExp(markdownBreakToken, "g"), () => stashToken("<br>"));
     rendered = rendered.replace(/\\([\\`*_[\]()#+\-.!|>~])/g, (_match, escaped) => stashToken(escapeHTML(escaped)));
     rendered = rendered.replace(/`([^`\n]+)`/g, (_match, code) => stashToken(`<code>${escapeHTML(code)}</code>`));
+    rendered = rendered.replace(/!\[([^\]]*)\]\(([^)\s]+(?:\s+\"[^\"]*\")?)\)/g, (_match, alt, target) => {
+      const source = sanitizeMarkdownURL(String(target).replace(/\s+\"[^\"]*\"$/, ""));
+      if (source === "") {
+        return stashToken(`${escapeHTML(alt)} (${escapeHTML(target)})`);
+      }
+      return stashToken(`<img src="${escapeHTML(source)}" alt="${escapeHTML(alt)}" loading="lazy" decoding="async">`);
+    });
     rendered = rendered.replace(/\[([^\]]+)\]\(([^)\s]+(?:\s+\"[^\"]*\")?)\)/g, (_match, label, target) => {
       const href = sanitizeMarkdownURL(String(target).replace(/\s+\"[^\"]*\"$/, ""));
       if (href === "") {
@@ -1972,7 +1982,7 @@
     return card;
   };
 
-  const buildReasoningPanel = (reasoning, open = false) => {
+  const buildReasoningPanel = (bubble, reasoning, open = false) => {
     const details = document.createElement("details");
     details.className = "chat-reasoning";
 
@@ -1997,14 +2007,34 @@
     details.appendChild(summary);
     details.appendChild(copy);
 
+    let mounted = false;
+
+    const mount = () => {
+      if (mounted || !(bubble instanceof HTMLElement)) {
+        return;
+      }
+      bubble.insertBefore(details, bubble.firstChild || null);
+      mounted = true;
+    };
+
+    const unmount = () => {
+      if (!mounted) {
+        return;
+      }
+      details.remove();
+      mounted = false;
+    };
+
     const setReasoning = (nextReasoning, keepOpen = details.open) => {
       const raw = String(nextReasoning || "");
       if (raw.trim() === "") {
         details.hidden = true;
         copy.dataset.chatMarkdownSource = "";
         copy.innerHTML = "";
+        unmount();
         return;
       }
+      mount();
       details.hidden = false;
       renderMarkdownInto(copy, raw);
       details.open = keepOpen;
@@ -2026,8 +2056,7 @@
     const bubble = document.createElement("div");
     bubble.className = "chat-bubble";
 
-    const reasoningPanel = buildReasoningPanel(reasoning, false);
-    bubble.appendChild(reasoningPanel.details);
+    const reasoningPanel = buildReasoningPanel(bubble, reasoning, false);
 
     const copy = document.createElement("div");
     copy.className = "chat-message-copy";
@@ -2983,6 +3012,7 @@
   const openChatShell = async (form, options = {}) => {
     const root = currentRoot();
     const baseSocketURL = shellSocketBaseURL(form);
+    const initialInput = String(options.initialInput || options.command || "");
     if (!root || baseSocketURL === "") {
       return;
     }
@@ -3050,6 +3080,9 @@
         return;
       }
       controller.connect({ resetTerminal: true });
+      if (initialInput !== "") {
+        controller.sendInput?.(initialInput);
+      }
       window.setTimeout(() => {
         controller.refresh?.();
         controller.focus?.();
@@ -3059,6 +3092,15 @@
       updateComposerControls(form);
     }
   };
+
+  window.addEventListener("aiyolo:chat-open-shell", (event) => {
+    const detail = event instanceof CustomEvent && event.detail && typeof event.detail === "object" ? event.detail : {};
+    void openChatShell(currentForm(), {
+      showProgress: detail.showProgress !== false,
+      terminalID: detail.terminalID,
+      initialInput: detail.command || detail.initialInput || "",
+    });
+  });
 
   const canUseCloudAgentShell = (form) => (
     form instanceof HTMLFormElement

@@ -106,6 +106,11 @@
   let workspaceOpenFilePaths = [];
   let workspaceLoadingPaths = new Set();
   let workspaceUploadTargetPath = "";
+  let workspaceUploadTargetRoot = false;
+  let workspaceInlineEdit = null;
+  let workspaceContextMenu = null;
+  let workspacePathClipboard = null;
+  let workspaceCompareBasePath = "";
   let workspaceActiveFilePath = "";
   let workspacePendingRestoreFilePath = "";
   let workspaceEditorKind = "text";
@@ -179,6 +184,10 @@
     return String(form?.dataset.chatWorkspaceFileUrl || "").trim();
   }
 
+  function workspaceDownloadURL(form) {
+    return String(form?.dataset.chatWorkspaceDownloadUrl || "").trim();
+  }
+
   function workspaceUploadURL(form) {
     return String(form?.dataset.chatWorkspaceUploadUrl || "").trim();
   }
@@ -190,6 +199,18 @@
 
   function workspaceDirectoryURL(form) {
     return String(form?.dataset.chatWorkspaceDirectoryUrl || "").trim();
+  }
+
+  function workspaceCopyURL(form) {
+    return String(form?.dataset.chatWorkspaceCopyUrl || "").trim();
+  }
+
+  function workspaceRenameURL(form) {
+    return String(form?.dataset.chatWorkspaceRenameUrl || "").trim();
+  }
+
+  function workspaceDeleteURL(form) {
+    return String(form?.dataset.chatWorkspaceDeleteUrl || "").trim();
   }
 
   function sidebarViewButtons(form) {
@@ -222,6 +243,10 @@
 
   function workspaceTreeHost(form) {
     return form?.querySelector("[data-chat-workspace-tree]") || null;
+  }
+
+  function workspaceFilesPanel(form) {
+    return form?.querySelector("[data-chat-sidebar-panel=\"files\"]") || null;
   }
 
   function workspaceRootCopyNode(form) {
@@ -341,20 +366,38 @@
     return directories;
   }
 
-  function defaultWorkspaceCreatePath() {
+  function defaultWorkspaceCreateParent() {
     const parent = workspaceParentPath(workspaceActiveFilePath);
-    return parent === "" ? "" : `${parent}/`;
+    return parent;
   }
 
-  function promptWorkspaceCreatePath(kind) {
-    const promptText = kind === "directory"
-      ? t("输入新目录路径（相对 /workspace）", "Enter a new folder path relative to /workspace")
-      : t("输入新文件路径（相对 /workspace）", "Enter a new file path relative to /workspace");
-    const raw = window.prompt(promptText, defaultWorkspaceCreatePath());
-    if (raw == null) {
+  function workspaceBaseName(value) {
+    const path = normalizeWorkspaceCreatePath(value);
+    if (path === "") {
       return "";
     }
-    return normalizeWorkspaceCreatePath(raw);
+    const parts = path.split("/").filter(Boolean);
+    return parts.length > 0 ? parts[parts.length - 1] : "";
+  }
+
+  function joinWorkspaceChildPath(parentPath, name) {
+    const parent = normalizeWorkspaceCreatePath(parentPath);
+    const childName = String(name || "").trim();
+    return parent === "" ? childName : `${parent}/${childName}`;
+  }
+
+  function normalizeWorkspaceEntryName(value) {
+    const name = String(value || "").trim();
+    if (name === "") {
+      return { name: "", error: t("请输入名称。", "Enter a name.") };
+    }
+    if (name === "." || name === ".." || name.includes("\0")) {
+      return { name: "", error: t("这个名称不可用。", "This name cannot be used.") };
+    }
+    if (name.includes("/") || name.includes("\\")) {
+      return { name: "", error: t("名称不能包含斜杠。", "Names cannot contain slashes.") };
+    }
+    return { name, error: "" };
   }
 
   function normalizeWorkspacePathList(values, limit = 24) {
@@ -833,6 +876,9 @@
     workspaceOpenFilePaths = [];
     workspaceLoadingPaths = new Set();
     workspaceUploadTargetPath = "";
+    workspaceUploadTargetRoot = false;
+    workspaceInlineEdit = null;
+    hideWorkspaceContextMenu();
     workspaceActiveFilePath = "";
     workspacePendingRestoreFilePath = "";
     workspaceEditorKind = "text";
@@ -1404,6 +1450,69 @@
     return entry.type === "directory" ? t("目录", "Directory") : formatBytes(entry.size);
   }
 
+  function workspaceInlineCreateForParent(parentPath) {
+    if (!workspaceInlineEdit || workspaceInlineEdit.mode !== "create") {
+      return null;
+    }
+    return normalizeWorkspaceCreatePath(workspaceInlineEdit.parentPath) === normalizeWorkspaceCreatePath(parentPath) ? workspaceInlineEdit : null;
+  }
+
+  function workspaceInlineRenameForPath(path) {
+    if (!workspaceInlineEdit || workspaceInlineEdit.mode !== "rename") {
+      return null;
+    }
+    return normalizeWorkspaceCreatePath(workspaceInlineEdit.originalPath) === normalizeWorkspaceCreatePath(path) ? workspaceInlineEdit : null;
+  }
+
+  function renderWorkspaceInlineEdit(container, edit, depth) {
+    if (!(container instanceof Node) || !edit) {
+      return;
+    }
+    const row = document.createElement("div");
+    row.className = "chat-workspace-inline-row";
+    row.style.setProperty("--chat-workspace-depth", String(depth));
+    row.dataset.chatWorkspaceInlineMode = edit.mode;
+    row.dataset.chatWorkspaceType = edit.kind === "directory" ? "directory" : "file";
+
+    const caret = document.createElement("span");
+    caret.className = "chat-workspace-row-caret";
+    caret.textContent = "";
+
+    const kind = document.createElement("span");
+    kind.className = "chat-workspace-row-kind";
+    applyWorkspaceEntryIcon(kind, { name: edit.value || workspaceBaseName(edit.originalPath), path: edit.originalPath || "", type: edit.kind });
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "chat-workspace-inline-input";
+    input.dataset.chatWorkspaceInlineInput = "";
+    input.value = String(edit.value || "");
+    input.disabled = Boolean(edit.busy);
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = edit.kind === "directory" ? t("目录名", "Folder name") : t("文件名", "File name");
+    input.setAttribute("aria-label", edit.mode === "rename" ? t("重命名", "Rename") : (edit.kind === "directory" ? t("新建目录", "New folder") : t("新建文件", "New file")));
+
+    row.appendChild(caret);
+    row.appendChild(kind);
+    row.appendChild(input);
+    container.appendChild(row);
+  }
+
+  function focusWorkspaceInlineInput(form) {
+    if (!workspaceInlineEdit || !(form instanceof HTMLFormElement)) {
+      return;
+    }
+    window.queueMicrotask(() => {
+      const input = form.querySelector("[data-chat-workspace-inline-input]");
+      if (!(input instanceof HTMLInputElement) || input.disabled) {
+        return;
+      }
+      input.focus();
+      input.select();
+    });
+  }
+
   function expandWorkspaceAncestors(path) {
     const segments = String(path || "").split("/").filter(Boolean);
     if (segments.length <= 1) {
@@ -1549,56 +1658,75 @@
     host.replaceChildren(fragment);
   }
 
-  function renderWorkspaceEntries(container, entries, depth) {
+  function renderWorkspaceEntries(container, entries, depth, parentPath = "") {
+    const inlineCreate = workspaceInlineCreateForParent(parentPath);
+    if (inlineCreate) {
+      renderWorkspaceInlineEdit(container, inlineCreate, depth);
+    }
     entries.forEach((entry) => {
       const item = document.createElement("div");
       item.className = "chat-workspace-item";
+      const inlineRename = workspaceInlineRenameForPath(entry.path);
 
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "chat-workspace-row";
-      row.style.setProperty("--chat-workspace-depth", String(depth));
-      row.dataset.chatAction = entry.type === "directory" ? "toggle-workspace-directory" : "open-workspace-file";
-      row.dataset.chatWorkspacePath = entry.path;
-      row.dataset.chatWorkspaceType = entry.type;
-      row.classList.toggle("is-active", workspaceActiveFilePath === entry.path);
-      row.classList.toggle("is-upload-target", entry.type === "directory" && workspaceUploadTargetPath === entry.path);
+      if (inlineRename) {
+        renderWorkspaceInlineEdit(item, inlineRename, depth);
+      } else {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "chat-workspace-row";
+        row.style.setProperty("--chat-workspace-depth", String(depth));
+        row.dataset.chatAction = entry.type === "directory" ? "toggle-workspace-directory" : "open-workspace-file";
+        row.dataset.chatWorkspacePath = entry.path;
+        row.dataset.chatWorkspaceName = entry.name;
+        row.dataset.chatWorkspaceType = entry.type;
+        row.dataset.chatWorkspaceSize = String(entry.size || "");
+        row.dataset.chatWorkspaceModifiedAt = String(entry.modifiedAt || "");
+        row.classList.toggle("is-active", workspaceActiveFilePath === entry.path);
+        row.classList.toggle("is-upload-target", !workspaceUploadTargetRoot && entry.type === "directory" && workspaceUploadTargetPath === entry.path);
 
-      const caret = document.createElement("span");
-      caret.className = "chat-workspace-row-caret";
-      caret.textContent = entry.type === "directory" ? (workspaceOpenPaths.has(entry.path) ? "v" : ">") : "";
+        const caret = document.createElement("span");
+        caret.className = "chat-workspace-row-caret";
+        caret.textContent = entry.type === "directory" ? (workspaceOpenPaths.has(entry.path) ? "v" : ">") : "";
 
-      const kind = document.createElement("span");
-      kind.className = "chat-workspace-row-kind";
-      applyWorkspaceEntryIcon(kind, entry);
+        const kind = document.createElement("span");
+        kind.className = "chat-workspace-row-kind";
+        applyWorkspaceEntryIcon(kind, entry);
 
-      const name = document.createElement("span");
-      name.className = "chat-workspace-row-name";
-      name.textContent = entry.name;
+        const name = document.createElement("span");
+        name.className = "chat-workspace-row-name";
+        name.textContent = entry.name;
 
-      const meta = document.createElement("span");
-      meta.className = "chat-workspace-row-meta";
-      meta.textContent = entryMeta(entry);
+        const meta = document.createElement("span");
+        meta.className = "chat-workspace-row-meta";
+        meta.textContent = entryMeta(entry);
 
-      row.appendChild(caret);
-      row.appendChild(kind);
-      row.appendChild(name);
-      row.appendChild(meta);
-      item.appendChild(row);
+        row.appendChild(caret);
+        row.appendChild(kind);
+        row.appendChild(name);
+        row.appendChild(meta);
+        item.appendChild(row);
+      }
 
       if (entry.type === "directory" && workspaceOpenPaths.has(entry.path)) {
         const children = document.createElement("div");
         children.className = "chat-workspace-children";
         const childEntries = workspaceTreeCache.get(entry.path);
+        const hasInlineCreate = Boolean(workspaceInlineCreateForParent(entry.path));
         if (Array.isArray(childEntries)) {
-          if (childEntries.length === 0) {
+          if (childEntries.length === 0 && !hasInlineCreate) {
             renderWorkspacePlaceholder(children, t("这个目录当前为空。", "This directory is empty."));
           } else {
-            renderWorkspaceEntries(children, childEntries, depth + 1);
+            renderWorkspaceEntries(children, childEntries, depth + 1, entry.path);
           }
         } else if (workspaceLoadingPaths.has(entry.path)) {
+          if (hasInlineCreate) {
+            renderWorkspaceInlineEdit(children, workspaceInlineEdit, depth + 1);
+          }
           renderWorkspacePlaceholder(children, t("正在加载目录…", "Loading directory..."));
         } else {
+          if (hasInlineCreate) {
+            renderWorkspaceInlineEdit(children, workspaceInlineEdit, depth + 1);
+          }
           renderWorkspacePlaceholder(children, t("展开目录后将在这里显示子项。", "Expand the folder to show its children."));
         }
         item.appendChild(children);
@@ -1606,6 +1734,7 @@
 
       container.appendChild(item);
     });
+    return Boolean(inlineCreate) || entries.length > 0;
   }
 
   function renderWorkspaceTree(form) {
@@ -1620,6 +1749,7 @@
     const sessionID = readClientSessionID(form);
     if (section instanceof HTMLElement) {
       section.hidden = !isCloudAgentEnvironment(environment);
+      section.classList.toggle("is-upload-target", workspaceUploadTargetRoot);
     }
     if (rootCopy instanceof HTMLElement) {
       rootCopy.textContent = isCloudAgentEnvironment(environment)
@@ -1643,6 +1773,20 @@
     }
     const rootEntries = workspaceTreeCache.get("");
     if (!Array.isArray(rootEntries)) {
+      const inlineRootCreate = workspaceInlineCreateForParent("");
+      if (inlineRootCreate) {
+        const fragment = document.createDocumentFragment();
+        renderWorkspaceInlineEdit(fragment, inlineRootCreate, 0);
+        const empty = document.createElement("div");
+        empty.className = "chat-workspace-empty";
+        empty.textContent = workspaceLoadingPaths.has("")
+          ? t("正在加载工作区目录…", "Loading the workspace tree...")
+          : t("点击刷新或重新选择 Cloud Agent 环境后，将在这里加载目录树。", "Refresh or re-select the Cloud Agent environment to load the directory tree here.");
+        fragment.appendChild(empty);
+        host.replaceChildren(fragment);
+        focusWorkspaceInlineInput(form);
+        return;
+      }
       if (workspaceLoadingPaths.has("")) {
         renderWorkspacePlaceholder(host, t("正在加载工作区目录…", "Loading the workspace tree..."));
       } else {
@@ -1650,13 +1794,14 @@
       }
       return;
     }
-    if (rootEntries.length === 0) {
+    if (rootEntries.length === 0 && !workspaceInlineCreateForParent("")) {
       renderWorkspacePlaceholder(host, t("当前工作区为空。", "The current workspace is empty."));
       return;
     }
     const fragment = document.createDocumentFragment();
-    renderWorkspaceEntries(fragment, rootEntries, 0);
+    renderWorkspaceEntries(fragment, rootEntries, 0, "");
     host.replaceChildren(fragment);
+    focusWorkspaceInlineInput(form);
   }
 
   function renderWorkspaceEditorTabs(form) {
@@ -2172,7 +2317,7 @@
       return false;
     }
     if (String(endpoint || "").trim() === "") {
-      setWorkspaceTreeStatus(t("工作区创建接口不可用。", "Workspace create endpoint is not available."), true);
+      setWorkspaceTreeStatus(t("工作区操作接口不可用。", "Workspace operation endpoint is not available."), true);
       renderWorkspaceTree(form);
       return false;
     }
@@ -2187,28 +2332,54 @@
     return Array.from(transfer.types || []).includes("Files");
   }
 
-  function workspaceUploadRowFromEvent(event, form) {
+  function workspaceUploadTargetFromEvent(event, form) {
     if (!(form instanceof HTMLFormElement) || !(event?.target instanceof Element)) {
       return null;
     }
-    const row = event.target.closest(".chat-workspace-row[data-chat-workspace-type=\"directory\"]");
-    return row instanceof HTMLElement && form.contains(row) ? row : null;
+    const row = event.target.closest(".chat-workspace-row[data-chat-workspace-path]");
+    if (row instanceof HTMLElement && form.contains(row)) {
+      const info = workspaceRowInfo(row);
+      if (!info) {
+        return null;
+      }
+      if (info.type === "directory") {
+        return { path: info.path, highlightRowPath: info.path, root: false };
+      }
+      const parentPath = workspaceParentPath(info.path);
+      return { path: parentPath, highlightRowPath: parentPath, root: parentPath === "" };
+    }
+    const section = workspaceSection(form);
+    if (section instanceof HTMLElement && section.contains(event.target)) {
+      return { path: "", highlightRowPath: "", root: true };
+    }
+    const treeSection = event.target.closest(".chat-explorer-tree-section");
+    if (treeSection instanceof HTMLElement && treeSection !== section) {
+      return null;
+    }
+    const filesPanel = workspaceFilesPanel(form);
+    if (section instanceof HTMLElement && !section.hidden && filesPanel instanceof HTMLElement && filesPanel.contains(event.target)) {
+      return { path: "", highlightRowPath: "", root: true };
+    }
+    return null;
   }
 
-  function setWorkspaceUploadTarget(form, path) {
+  function setWorkspaceUploadTarget(form, path, root = false) {
     const nextPath = normalizeWorkspaceCreatePath(path);
-    if (workspaceUploadTargetPath === nextPath) {
+    const nextRoot = Boolean(root);
+    if (workspaceUploadTargetPath === nextPath && workspaceUploadTargetRoot === nextRoot) {
       return;
     }
     workspaceUploadTargetPath = nextPath;
+    workspaceUploadTargetRoot = nextRoot;
     renderWorkspaceTree(form);
   }
 
   function clearWorkspaceUploadTarget(form = currentForm()) {
-    if (workspaceUploadTargetPath === "") {
+    if (workspaceUploadTargetPath === "" && !workspaceUploadTargetRoot) {
       return;
     }
     workspaceUploadTargetPath = "";
+    workspaceUploadTargetRoot = false;
     renderWorkspaceTree(form);
   }
 
@@ -2228,7 +2399,7 @@
 
   function workspaceDirectoryHasEntry(directoryPath, name) {
     const entries = workspaceTreeCache.get(normalizeWorkspaceCreatePath(directoryPath));
-    return Array.isArray(entries) && entries.some((entry) => entry.type === "file" && entry.name === name);
+    return Array.isArray(entries) && entries.some((entry) => entry.name === name);
   }
 
   async function uploadWorkspaceFile(form, endpoint, sessionID, relativePath, file, overwrite) {
@@ -2331,74 +2502,713 @@
     renderWorkspaceTree(form);
   }
 
-  async function createWorkspaceFile(form) {
+  function workspaceRowInfo(row) {
+    if (!(row instanceof HTMLElement)) {
+      return null;
+    }
+    const path = normalizeWorkspaceCreatePath(row.dataset.chatWorkspacePath || "");
+    if (path === "") {
+      return null;
+    }
+    return {
+      path,
+      name: String(row.dataset.chatWorkspaceName || workspaceBaseName(path) || "").trim(),
+      type: String(row.dataset.chatWorkspaceType || "file") === "directory" ? "directory" : "file",
+      size: String(row.dataset.chatWorkspaceSize || "").trim(),
+      modifiedAt: String(row.dataset.chatWorkspaceModifiedAt || "").trim(),
+    };
+  }
+
+  function workspaceAbsolutePath(relativePath) {
+    const pathValue = normalizeWorkspaceCreatePath(relativePath);
+    const root = String(workspaceRootPath || "").trim().replace(/\/+$/, "");
+    if (root === "") {
+      return pathValue;
+    }
+    return pathValue === "" ? root : `${root}/${pathValue}`;
+  }
+
+  function shellQuote(value) {
+    return `'${String(value || "").replace(/'/g, `'"'"'`)}'`;
+  }
+
+  async function copyTextToClipboard(text, successMessage) {
+    const value = String(text || "");
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const input = document.createElement("textarea");
+        input.value = value;
+        input.setAttribute("readonly", "");
+        input.style.position = "fixed";
+        input.style.left = "-9999px";
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand("copy");
+        input.remove();
+      }
+      setWorkspaceTreeStatus(successMessage, false);
+    } catch (_error) {
+      setWorkspaceTreeStatus(t("复制失败。", "Copy failed."), true);
+    }
+    renderWorkspaceTree(currentForm());
+  }
+
+  function workspaceFileRequestURL(form, endpoint, path) {
+    const url = new URL(endpoint, window.location.href);
+    url.searchParams.set("session", readClientSessionID(form));
+    url.searchParams.set("path", normalizeWorkspaceCreatePath(path));
+    return url;
+  }
+
+  async function fetchWorkspaceFilePayload(form, path) {
     const endpoint = workspaceFileURL(form);
+    if (!workspaceMutationReady(form, endpoint)) {
+      return null;
+    }
+    return fetchWorkspaceJSON(workspaceFileRequestURL(form, endpoint, path).toString());
+  }
+
+  function downloadBlob(blob, filename, openInNewTab = false) {
+    const objectURL = URL.createObjectURL(blob);
+    if (openInNewTab) {
+      const opened = window.open(objectURL, "_blank", "noopener,noreferrer");
+      window.setTimeout(() => URL.revokeObjectURL(objectURL), opened ? 30000 : 1000);
+      if (opened) {
+        return;
+      }
+    }
+    const link = document.createElement("a");
+    link.href = objectURL;
+    link.download = filename || "download";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
+  }
+
+  async function fetchWorkspaceDownloadBlob(form, path) {
+    const endpoint = workspaceDownloadURL(form);
+    if (!workspaceMutationReady(form, endpoint)) {
+      return null;
+    }
+    const response = await fetch(workspaceFileRequestURL(form, endpoint, path).toString(), {
+      credentials: "same-origin",
+      headers: { Accept: "application/octet-stream, application/json" },
+    });
+    const contentType = String(response.headers.get("Content-Type") || "").toLowerCase();
+    if (!response.ok) {
+      let message = t("下载失败。", "Download failed.");
+      if (contentType.includes("application/json")) {
+        const parsed = safeParseJSON(await response.text(), null);
+        message = String(parsed?.error || message);
+      }
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
+    }
+    return {
+      blob: await response.blob(),
+      filename: workspaceBaseName(path) || "download",
+    };
+  }
+
+  async function openWorkspaceExternal(form, info) {
+    if (!info || info.type !== "file") {
+      setWorkspaceTreeStatus(t("只有文件可以用其他方式打开。", "Only files can be opened another way."), true);
+      renderWorkspaceTree(form);
+      return;
+    }
+    try {
+      setWorkspaceTreeStatus(t("正在打开文件…", "Opening file..."), false);
+      renderWorkspaceTree(form);
+      const download = await fetchWorkspaceDownloadBlob(form, info.path);
+      if (!download) {
+        return;
+      }
+      downloadBlob(download.blob, download.filename, true);
+      setWorkspaceTreeStatus(t("已在浏览器中打开。", "Opened in the browser."), false);
+    } catch (error) {
+      setWorkspaceTreeStatus(String(error?.message || t("打开文件失败。", "Failed to open the file.")), true);
+    }
+    renderWorkspaceTree(form);
+  }
+
+  async function downloadWorkspaceFile(form, info) {
+    if (!info || info.type !== "file") {
+      setWorkspaceTreeStatus(t("目录下载暂不支持。", "Folder download is not supported yet."), true);
+      renderWorkspaceTree(form);
+      return;
+    }
+    try {
+      setWorkspaceTreeStatus(t("正在下载文件…", "Downloading file..."), false);
+      renderWorkspaceTree(form);
+      const download = await fetchWorkspaceDownloadBlob(form, info.path);
+      if (!download) {
+        return;
+      }
+      downloadBlob(download.blob, download.filename, false);
+      setWorkspaceTreeStatus(t("已开始下载。", "Download started."), false);
+    } catch (error) {
+      setWorkspaceTreeStatus(String(error?.message || t("下载失败。", "Download failed.")), true);
+    }
+    renderWorkspaceTree(form);
+  }
+
+  function appendTextToChatDraft(form, text) {
+    const draft = form?.querySelector("#chat-draft");
+    if (!(draft instanceof HTMLTextAreaElement)) {
+      setWorkspaceTreeStatus(t("找不到聊天输入框。", "The chat composer was not found."), true);
+      renderWorkspaceTree(form);
+      return false;
+    }
+    const addition = String(text || "").trim();
+    if (addition === "") {
+      return false;
+    }
+    const current = draft.value.trimEnd();
+    draft.value = current === "" ? addition : `${current}\n\n${addition}`;
+    draft.dispatchEvent(new Event("input", { bubbles: true }));
+    draft.focus();
+    return true;
+  }
+
+  async function addWorkspacePathToChat(form, info) {
+    if (!info) {
+      return;
+    }
+    try {
+      if (info.type === "file") {
+        const parsed = await fetchWorkspaceFilePayload(form, info.path);
+        if (parsed && String(parsed.kind || "text") === "text") {
+          const content = String(parsed.content || "");
+          const truncated = content.length > 24000 ? `${content.slice(0, 24000)}\n...` : content;
+          appendTextToChatDraft(form, `${t("请参考工作区文件", "Reference workspace file")} ${info.path}:\n\n\`\`\`\n${truncated}\n\`\`\``);
+        } else {
+          appendTextToChatDraft(form, `${t("请参考工作区文件", "Reference workspace file")} ${info.path}`);
+        }
+      } else {
+        appendTextToChatDraft(form, `${t("请参考工作区目录", "Reference workspace folder")} ${info.path}`);
+      }
+      setWorkspaceTreeStatus(t("已添加到聊天输入框。", "Added to the chat composer."), false);
+    } catch (_error) {
+      appendTextToChatDraft(form, `${t("请参考工作区文件", "Reference workspace file")} ${info.path}`);
+      setWorkspaceTreeStatus(t("已添加路径到聊天输入框。", "Added the path to the chat composer."), false);
+    }
+    renderWorkspaceTree(form);
+  }
+
+  function openWorkspacePathInTerminal(form, info) {
+    if (!info) {
+      return;
+    }
+    const cwd = info.type === "directory" ? info.path : workspaceParentPath(info.path);
+    window.dispatchEvent(new CustomEvent("aiyolo:chat-open-shell", {
+      detail: { cwd, command: cwd === "" ? "" : `cd -- ${shellQuote(cwd)}\n` },
+    }));
+    setWorkspaceTreeStatus(t("正在打开集成终端…", "Opening the integrated terminal..."), false);
+    renderWorkspaceTree(form);
+  }
+
+  function revealWorkspacePath(form, info) {
+    if (!info) {
+      return;
+    }
+    layoutState.sidebarCollapsed = false;
+    applyLayout(form, true);
+    applySidebarView(form, "files", true);
+    expandWorkspaceAncestors(info.path);
+    writeWorkspaceOpenState(form);
+    void loadWorkspaceTree(form, workspaceParentPath(info.path), true);
+    setWorkspaceTreeStatus(t("已在资源管理器中显示。", "Revealed in the explorer."), false);
+    renderWorkspaceTree(form);
+  }
+
+  function shareWorkspacePath(form, info) {
+    if (!info) {
+      return;
+    }
+    const url = new URL(window.location.href);
+    const sessionID = readClientSessionID(form);
+    if (sessionID !== "") {
+      url.searchParams.set("session", sessionID);
+    }
+    url.hash = `workspace=${encodeURIComponent(info.path)}`;
+    void copyTextToClipboard(url.toString(), t("已复制共享链接。", "Share link copied."));
+  }
+
+  function compareWindowHTML(leftLabel, leftContent, rightLabel, rightContent) {
+    const escape = (value) => String(value || "").replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char]));
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escape(leftLabel)} ↔ ${escape(rightLabel)}</title><style>body{margin:0;background:#1e1e1e;color:#d4d4d4;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}.bar{padding:8px 12px;border-bottom:1px solid #3c3c3c;background:#252526}.grid{display:grid;grid-template-columns:1fr 1fr;min-height:calc(100vh - 38px)}section{min-width:0;border-right:1px solid #3c3c3c}section:last-child{border-right:0}h2{margin:0;padding:8px 12px;font:600 13px system-ui,sans-serif;background:#2d2d2d;color:#e8e8e8}pre{margin:0;padding:12px;white-space:pre-wrap;word-break:break-word}</style></head><body><div class="bar">${escape(t("工作区文件比较", "Workspace file compare"))}</div><main class="grid"><section><h2>${escape(leftLabel)}</h2><pre>${escape(leftContent)}</pre></section><section><h2>${escape(rightLabel)}</h2><pre>${escape(rightContent)}</pre></section></main></body></html>`;
+  }
+
+  async function compareWorkspaceFiles(form, leftPath, rightPath, targetWindow) {
+    const [left, right] = await Promise.all([
+      fetchWorkspaceFilePayload(form, leftPath),
+      fetchWorkspaceFilePayload(form, rightPath),
+    ]);
+    if (!left || !right || String(left.kind || "text") !== "text" || String(right.kind || "text") !== "text") {
+      throw new Error(t("只能比较文本文件。", "Only text files can be compared."));
+    }
+    const html = compareWindowHTML(leftPath, String(left.content || ""), rightPath, String(right.content || ""));
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.document.open();
+      targetWindow.document.write(html);
+      targetWindow.document.close();
+    }
+  }
+
+  function selectWorkspacePathForCompare(form, info) {
+    if (!info || info.type !== "file") {
+      setWorkspaceTreeStatus(t("只能选择文件进行比较。", "Only files can be selected for compare."), true);
+      renderWorkspaceTree(form);
+      return;
+    }
+    if (workspaceCompareBasePath === "" || workspaceCompareBasePath === info.path) {
+      workspaceCompareBasePath = info.path;
+      setWorkspaceTreeStatus(t("已选择进行比较。再右键另一个文件选择比较。", "Selected for compare. Right-click another file to compare."), false);
+      renderWorkspaceTree(form);
+      return;
+    }
+    const leftPath = workspaceCompareBasePath;
+    const rightPath = info.path;
+    workspaceCompareBasePath = "";
+    const targetWindow = window.open("about:blank", "_blank", "noopener,noreferrer");
+    if (targetWindow) {
+      targetWindow.document.write(`<p style="font:14px system-ui;padding:16px">${t("正在加载比较…", "Loading compare...")}</p>`);
+    }
+    compareWorkspaceFiles(form, leftPath, rightPath, targetWindow).then(() => {
+      setWorkspaceTreeStatus(t("已打开比较。", "Compare opened."), false);
+      renderWorkspaceTree(form);
+    }).catch((error) => {
+      if (targetWindow && !targetWindow.closed) {
+        targetWindow.close();
+      }
+      setWorkspaceTreeStatus(String(error?.message || t("比较失败。", "Compare failed.")), true);
+      renderWorkspaceTree(form);
+    });
+  }
+
+  function showWorkspaceTimeline(form, info) {
+    if (!info) {
+      return;
+    }
+    const modified = info.modifiedAt ? new Date(info.modifiedAt) : null;
+    const display = modified && Number.isFinite(modified.getTime()) ? modified.toLocaleString() : t("暂无时间信息", "No timestamp available");
+    setWorkspaceTreeStatus(`${t("时间线", "Timeline")}: ${info.path} · ${t("最后修改", "Last modified")} ${display}`, false);
+    renderWorkspaceTree(form);
+  }
+
+  function setWorkspaceClipboard(form, info, mode) {
+    if (!info) {
+      return;
+    }
+    workspacePathClipboard = { mode: mode === "cut" ? "cut" : "copy", path: info.path, type: info.type, name: info.name || workspaceBaseName(info.path) };
+    setWorkspaceTreeStatus(mode === "cut" ? t("已剪切，选择目标目录后粘贴。", "Cut. Choose a target folder and paste.") : t("已复制，选择目标目录后粘贴。", "Copied. Choose a target folder and paste."), false);
+    renderWorkspaceTree(form);
+  }
+
+  function nextWorkspaceCopyPath(parentPath, name) {
+    const parent = normalizeWorkspaceCreatePath(parentPath);
+    const original = String(name || "copy").trim() || "copy";
+    const dotIndex = original.lastIndexOf(".");
+    const hasExt = dotIndex > 0;
+    const stem = hasExt ? original.slice(0, dotIndex) : original;
+    const ext = hasExt ? original.slice(dotIndex) : "";
+    for (let index = 0; index < 100; index += 1) {
+      const candidateName = index === 0 ? original : `${stem} copy${index === 1 ? "" : ` ${index}`}${ext}`;
+      if (!workspaceDirectoryHasEntry(parent, candidateName)) {
+        return joinWorkspaceChildPath(parent, candidateName);
+      }
+    }
+    return joinWorkspaceChildPath(parent, `${stem} copy ${Date.now()}${ext}`);
+  }
+
+  function forgetDeletedWorkspacePath(form, deletedPath) {
+    const targetPath = normalizeWorkspaceCreatePath(deletedPath);
+    workspaceOpenFilePaths = workspaceOpenFilePaths.filter((value) => value !== targetPath && !value.startsWith(`${targetPath}/`));
+    if (workspaceActiveFilePath === targetPath || workspaceActiveFilePath.startsWith(`${targetPath}/`)) {
+      workspaceActiveFilePath = workspaceOpenFilePaths[0] || "";
+      workspacePendingRestoreFilePath = workspaceActiveFilePath;
+      workspaceEditorKind = "text";
+      workspaceEditorMediaType = "";
+      workspaceEditorPreviewURL = "";
+      workspaceEditorContent = "";
+      workspaceEditorSavedContent = "";
+      workspaceEditorSize = 0;
+      workspaceEditorBusy = "";
+      workspaceEditorMarkdownMode = "preview";
+      setWorkspaceEditorStatus("", false);
+    }
+    Array.from(workspaceOpenPaths).forEach((value) => {
+      if (value === targetPath || value.startsWith(`${targetPath}/`)) {
+        workspaceOpenPaths.delete(value);
+      }
+    });
+    workspaceTreeCache.delete(targetPath);
+    writeWorkspaceOpenState(form);
+  }
+
+  async function pasteWorkspaceClipboard(form, targetInfo) {
+    if (!workspacePathClipboard) {
+      return;
+    }
+    const targetDirectory = targetInfo?.type === "directory" ? targetInfo.path : workspaceParentPath(targetInfo?.path || "");
+    const source = workspacePathClipboard;
+    const endpoint = source.mode === "cut" ? workspaceRenameURL(form) : workspaceCopyURL(form);
     if (!workspaceMutationReady(form, endpoint)) {
       return;
     }
-    const relativePath = promptWorkspaceCreatePath("file");
-    if (relativePath === "") {
+    const targetPath = nextWorkspaceCopyPath(targetDirectory, source.name || workspaceBaseName(source.path));
+    const url = new URL(endpoint, window.location.href);
+    url.searchParams.set("session", readClientSessionID(form));
+    setWorkspaceTreeStatus(source.mode === "cut" ? t("正在移动…", "Moving...") : t("正在复制…", "Copying..."), false);
+    renderWorkspaceTree(form);
+    try {
+      const parsed = await fetchWorkspaceJSON(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: source.mode === "cut"
+          ? JSON.stringify({ path: source.path, new_path: targetPath })
+          : JSON.stringify({ path: source.path, new_path: targetPath }),
+      });
+      const nextPath = normalizeWorkspaceCreatePath(parsed.path || targetPath);
+      if (source.mode === "cut") {
+        applyWorkspaceRenameState(form, source.path, nextPath);
+        workspacePathClipboard = null;
+      }
+      await refreshWorkspaceTreeForPath(form, nextPath, source.type === "directory");
+      setWorkspaceTreeStatus(String(parsed.notice || (source.mode === "cut" ? t("已移动。", "Moved.") : t("已复制。", "Copied."))), false);
+      renderWorkspaceTree(form);
+    } catch (error) {
+      setWorkspaceTreeStatus(String(error?.message || t("粘贴失败。", "Paste failed.")), true);
+      renderWorkspaceTree(form);
+    }
+  }
+
+  async function deleteWorkspacePath(form, info) {
+    const endpoint = workspaceDeleteURL(form);
+    if (!info || !workspaceMutationReady(form, endpoint)) {
+      return;
+    }
+    const confirmed = window.confirm(t(`永久删除“${info.name || info.path}”？`, `Permanently delete "${info.name || info.path}"?`));
+    if (!confirmed) {
+      return;
+    }
+    const url = new URL(endpoint, window.location.href);
+    url.searchParams.set("session", readClientSessionID(form));
+    setWorkspaceTreeStatus(t("正在删除…", "Deleting..."), false);
+    renderWorkspaceTree(form);
+    try {
+      const parsed = await fetchWorkspaceJSON(url.toString(), {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: info.path }),
+      });
+      const deletedPath = normalizeWorkspaceCreatePath(parsed.path || info.path);
+      forgetDeletedWorkspacePath(form, deletedPath);
+      await refreshWorkspaceTreeForPath(form, workspaceParentPath(deletedPath), false);
+      setWorkspaceTreeStatus(String(parsed.notice || t("已永久删除。", "Deleted permanently.")), false);
+      renderWorkspaceTree(form);
+      renderWorkspaceEditor(form);
+    } catch (error) {
+      setWorkspaceTreeStatus(String(error?.message || t("删除失败。", "Delete failed.")), true);
+      renderWorkspaceTree(form);
+    }
+  }
+
+  function startWorkspaceInlineCreate(form, kind, parentPath = defaultWorkspaceCreateParent()) {
+    const normalizedKind = kind === "directory" ? "directory" : "file";
+    const endpoint = normalizedKind === "directory" ? workspaceDirectoryURL(form) : workspaceFileURL(form);
+    if (!workspaceMutationReady(form, endpoint)) {
+      return;
+    }
+    const targetParent = normalizeWorkspaceCreatePath(parentPath);
+    workspaceInlineEdit = {
+      mode: "create",
+      kind: normalizedKind,
+      parentPath: targetParent,
+      value: "",
+      busy: false,
+    };
+    workspaceOpenPaths.add(targetParent);
+    writeWorkspaceOpenState(form);
+    setWorkspaceTreeStatus("", false);
+    renderWorkspaceTree(form);
+    if (targetParent !== "" && !workspaceTreeCache.has(targetParent) && !workspaceLoadingPaths.has(targetParent)) {
+      void loadWorkspaceTree(form, targetParent, false);
+    }
+  }
+
+  function startWorkspaceInlineRename(form, path, kind, name) {
+    const endpoint = workspaceRenameURL(form);
+    if (!workspaceMutationReady(form, endpoint)) {
+      return;
+    }
+    const originalPath = normalizeWorkspaceCreatePath(path);
+    if (originalPath === "") {
+      return;
+    }
+    workspaceInlineEdit = {
+      mode: "rename",
+      kind: kind === "directory" ? "directory" : "file",
+      parentPath: workspaceParentPath(originalPath),
+      originalPath,
+      value: String(name || workspaceBaseName(originalPath) || "").trim(),
+      busy: false,
+    };
+    expandWorkspaceAncestors(originalPath);
+    setWorkspaceTreeStatus("", false);
+    renderWorkspaceTree(form);
+  }
+
+  function cancelWorkspaceInlineEdit(form = currentForm()) {
+    if (!workspaceInlineEdit) {
+      return;
+    }
+    workspaceInlineEdit = null;
+    setWorkspaceTreeStatus("", false);
+    renderWorkspaceTree(form);
+  }
+
+  function rewriteWorkspacePathPrefix(value, oldPath, newPath) {
+    const current = normalizeWorkspacePath(value);
+    const oldValue = normalizeWorkspaceCreatePath(oldPath);
+    const newValue = normalizeWorkspaceCreatePath(newPath);
+    if (current === "" || oldValue === "" || newValue === "") {
+      return current;
+    }
+    if (current === oldValue) {
+      return newValue;
+    }
+    if (current.startsWith(`${oldValue}/`)) {
+      return `${newValue}${current.slice(oldValue.length)}`;
+    }
+    return current;
+  }
+
+  function applyWorkspaceRenameState(form, oldPath, newPath) {
+    const oldValue = normalizeWorkspaceCreatePath(oldPath);
+    const newValue = normalizeWorkspaceCreatePath(newPath);
+    if (oldValue === "" || newValue === "") {
+      return;
+    }
+    workspaceOpenFilePaths = normalizeWorkspacePathList(workspaceOpenFilePaths.map((value) => rewriteWorkspacePathPrefix(value, oldValue, newValue)));
+    workspaceActiveFilePath = rewriteWorkspacePathPrefix(workspaceActiveFilePath, oldValue, newValue);
+    workspacePendingRestoreFilePath = rewriteWorkspacePathPrefix(workspacePendingRestoreFilePath, oldValue, newValue);
+    workspaceOpenPaths = new Set(Array.from(workspaceOpenPaths).map((value) => rewriteWorkspacePathPrefix(value, oldValue, newValue)));
+    workspaceTreeCache.delete(oldValue);
+    workspaceTreeCache.delete(newValue);
+    writeWorkspaceOpenState(form);
+  }
+
+  async function refreshWorkspaceTreeForRename(form, oldPath, newPath, kind) {
+    workspaceTreeCache.delete(workspaceParentPath(oldPath));
+    workspaceTreeCache.delete(workspaceParentPath(newPath));
+    workspaceTreeCache.delete(normalizeWorkspaceCreatePath(oldPath));
+    await refreshWorkspaceTreeForPath(form, newPath, kind === "directory");
+  }
+
+  async function submitWorkspaceInlineEdit(form, input) {
+    if (!(form instanceof HTMLFormElement) || !workspaceInlineEdit || workspaceInlineEdit.busy) {
+      return;
+    }
+    const edit = workspaceInlineEdit;
+    const normalized = normalizeWorkspaceEntryName(input instanceof HTMLInputElement ? input.value : edit.value);
+    if (normalized.error) {
+      edit.value = input instanceof HTMLInputElement ? input.value : edit.value;
+      setWorkspaceTreeStatus(normalized.error, true);
+      renderWorkspaceTree(form);
+      return;
+    }
+    const targetPath = joinWorkspaceChildPath(edit.parentPath, normalized.name);
+    if (edit.mode === "rename" && normalizeWorkspaceCreatePath(edit.originalPath) === targetPath) {
+      cancelWorkspaceInlineEdit(form);
       return;
     }
     const requestKey = currentWorkspaceKey(form);
-    setWorkspaceTreeStatus(t("正在新建文件…", "Creating file..."), false);
+    edit.value = normalized.name;
+    edit.busy = true;
+    setWorkspaceTreeStatus(edit.mode === "rename" ? t("正在重命名…", "Renaming...") : (edit.kind === "directory" ? t("正在新建目录…", "Creating folder...") : t("正在新建文件…", "Creating file...")), false);
     renderWorkspaceTree(form);
     try {
+      if (edit.mode === "rename") {
+        const endpoint = workspaceRenameURL(form);
+        const url = new URL(endpoint, window.location.href);
+        url.searchParams.set("session", readClientSessionID(form));
+        const parsed = await fetchWorkspaceJSON(url.toString(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: edit.originalPath, new_path: targetPath }),
+        });
+        if (requestKey !== workspaceSessionKey || requestKey !== currentWorkspaceKey(form)) {
+          return;
+        }
+        const oldPath = normalizeWorkspaceCreatePath(parsed.oldPath || edit.originalPath);
+        const renamedPath = normalizeWorkspaceCreatePath(parsed.path || targetPath);
+        const nextActivePath = rewriteWorkspacePathPrefix(workspaceActiveFilePath, oldPath, renamedPath);
+        const reloadActiveImage = workspaceActiveFilePath !== "" && nextActivePath !== workspaceActiveFilePath && workspaceEditorKind === "image";
+        workspaceInlineEdit = null;
+        applyWorkspaceRenameState(form, oldPath, renamedPath);
+        await refreshWorkspaceTreeForRename(form, oldPath, renamedPath, edit.kind);
+        setWorkspaceTreeStatus(String(parsed.notice || t("已重命名。", "Renamed.")), false);
+        if (reloadActiveImage) {
+          await openWorkspaceFile(form, nextActivePath, true);
+        } else {
+          renderWorkspaceTree(form);
+          renderWorkspaceEditor(form);
+        }
+        return;
+      }
+
+      const endpoint = edit.kind === "directory" ? workspaceDirectoryURL(form) : workspaceFileURL(form);
       const url = new URL(endpoint, window.location.href);
       url.searchParams.set("session", readClientSessionID(form));
       const parsed = await fetchWorkspaceJSON(url.toString(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: relativePath, content: "", create: true, mkdir_p: true }),
+        body: edit.kind === "directory"
+          ? JSON.stringify({ path: targetPath, mkdir_p: true })
+          : JSON.stringify({ path: targetPath, content: "", create: true, mkdir_p: true }),
       });
       if (requestKey !== workspaceSessionKey || requestKey !== currentWorkspaceKey(form)) {
         return;
       }
-      const createdPath = normalizeWorkspaceCreatePath(parsed.path || relativePath);
-      await refreshWorkspaceTreeForPath(form, createdPath, false);
-      setWorkspaceTreeStatus(String(parsed.notice || t("文件已创建。", "File created.")), false);
-      await openWorkspaceFile(form, createdPath, false);
+      const createdPath = normalizeWorkspaceCreatePath(parsed.path || targetPath);
+      workspaceInlineEdit = null;
+      await refreshWorkspaceTreeForPath(form, createdPath, edit.kind === "directory");
+      setWorkspaceTreeStatus(String(parsed.notice || (edit.kind === "directory" ? t("目录已创建。", "Directory created.") : t("文件已创建。", "File created."))), false);
+      if (edit.kind === "file") {
+        await openWorkspaceFile(form, createdPath, false);
+      } else {
+        renderWorkspaceTree(form);
+      }
     } catch (error) {
-      if (requestKey === workspaceSessionKey) {
-        setWorkspaceTreeStatus(String(error?.message || t("新建文件失败。", "Failed to create the file.")), true);
+      if (requestKey === workspaceSessionKey && workspaceInlineEdit === edit) {
+        edit.busy = false;
+        setWorkspaceTreeStatus(String(error?.message || (edit.mode === "rename" ? t("重命名失败。", "Failed to rename.") : t("新建失败。", "Failed to create."))), true);
         renderWorkspaceTree(form);
       }
     }
   }
 
-  async function createWorkspaceDirectory(form) {
-    const endpoint = workspaceDirectoryURL(form);
-    if (!workspaceMutationReady(form, endpoint)) {
-      return;
+  function hideWorkspaceContextMenu() {
+    if (workspaceContextMenu instanceof HTMLElement) {
+      workspaceContextMenu.remove();
     }
-    const relativePath = promptWorkspaceCreatePath("directory");
-    if (relativePath === "") {
-      return;
+    workspaceContextMenu = null;
+  }
+
+  function addWorkspaceContextMenuSeparator(menu) {
+    const separator = document.createElement("div");
+    separator.className = "chat-workspace-context-separator";
+    separator.setAttribute("role", "separator");
+    menu.appendChild(separator);
+  }
+
+  function addWorkspaceContextMenuButton(menu, label, onClick, options = {}) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "menuitem");
+    const text = document.createElement("span");
+    text.className = "chat-workspace-context-label";
+    text.textContent = label;
+    button.appendChild(text);
+    const shortcut = String(options.shortcut || "").trim();
+    if (shortcut !== "") {
+      const shortcutNode = document.createElement("span");
+      shortcutNode.className = "chat-workspace-context-shortcut";
+      shortcutNode.textContent = shortcut;
+      button.appendChild(shortcutNode);
     }
-    const requestKey = currentWorkspaceKey(form);
-    setWorkspaceTreeStatus(t("正在新建目录…", "Creating folder..."), false);
-    renderWorkspaceTree(form);
-    try {
-      const url = new URL(endpoint, window.location.href);
-      url.searchParams.set("session", readClientSessionID(form));
-      const parsed = await fetchWorkspaceJSON(url.toString(), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: relativePath, mkdir_p: true }),
-      });
-      if (requestKey !== workspaceSessionKey || requestKey !== currentWorkspaceKey(form)) {
+    if (options.danger) {
+      button.classList.add("is-danger");
+    }
+    if (options.disabled) {
+      button.disabled = true;
+      button.setAttribute("aria-disabled", "true");
+    }
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (button.disabled) {
         return;
       }
-      const createdPath = normalizeWorkspaceCreatePath(parsed.path || relativePath);
-      await refreshWorkspaceTreeForPath(form, createdPath, true);
-      setWorkspaceTreeStatus(String(parsed.notice || t("目录已创建。", "Directory created.")), false);
-      renderWorkspaceTree(form);
-    } catch (error) {
-      if (requestKey === workspaceSessionKey) {
-        setWorkspaceTreeStatus(String(error?.message || t("新建目录失败。", "Failed to create the folder.")), true);
+      hideWorkspaceContextMenu();
+      onClick();
+    });
+    menu.appendChild(button);
+  }
+
+  function showWorkspaceContextMenu(form, row, event) {
+    if (!(form instanceof HTMLFormElement) || !(row instanceof HTMLElement)) {
+      return;
+    }
+    const info = workspaceRowInfo(row);
+    if (!info) {
+      return;
+    }
+    hideWorkspaceContextMenu();
+    const menu = document.createElement("div");
+    menu.className = "chat-workspace-context-menu";
+    menu.setAttribute("role", "menu");
+    const parentPath = info.type === "directory" ? info.path : workspaceParentPath(info.path);
+    if (info.type === "directory") {
+      addWorkspaceContextMenuButton(menu, t("新建文件", "New file"), () => startWorkspaceInlineCreate(form, "file", parentPath));
+      addWorkspaceContextMenuButton(menu, t("新建目录", "New folder"), () => startWorkspaceInlineCreate(form, "directory", parentPath));
+      if (workspacePathClipboard) {
+        addWorkspaceContextMenuButton(menu, t("粘贴", "Paste"), () => void pasteWorkspaceClipboard(form, info));
+      }
+      addWorkspaceContextMenuSeparator(menu);
+    }
+    addWorkspaceContextMenuButton(menu, t("在侧边打开", "Open to the Side"), () => {
+      if (info.type === "file") {
+        void openWorkspaceFile(form, info.path, false);
+      } else {
+        workspaceOpenPaths.add(info.path);
+        writeWorkspaceOpenState(form);
+        void loadWorkspaceTree(form, info.path, false);
         renderWorkspaceTree(form);
       }
+    }, { shortcut: "Ctrl+Enter" });
+    addWorkspaceContextMenuButton(menu, t("打开方式...", "Open With..."), () => void openWorkspaceExternal(form, info), { disabled: info.type !== "file" });
+    addWorkspaceContextMenuButton(menu, t("在文件资源管理器中显示", "Reveal in File Explorer"), () => revealWorkspacePath(form, info), { shortcut: "Shift+Alt+R" });
+    addWorkspaceContextMenuButton(menu, t("在集成终端中打开", "Open in Integrated Terminal"), () => openWorkspacePathInTerminal(form, info));
+    addWorkspaceContextMenuSeparator(menu);
+    addWorkspaceContextMenuButton(menu, t("分享", "Share"), () => shareWorkspacePath(form, info), { shortcut: ">" });
+    addWorkspaceContextMenuButton(menu, workspaceCompareBasePath && workspaceCompareBasePath !== info.path ? t("与已选项比较", "Compare with Selected") : t("选择以进行比较", "Select for Compare"), () => selectWorkspacePathForCompare(form, info), { disabled: info.type !== "file" });
+    addWorkspaceContextMenuButton(menu, t("打开时间线", "Open Timeline"), () => showWorkspaceTimeline(form, info));
+    addWorkspaceContextMenuButton(menu, t("将文件添加到聊天", "Add File to Chat"), () => void addWorkspacePathToChat(form, info));
+    addWorkspaceContextMenuSeparator(menu);
+    addWorkspaceContextMenuButton(menu, t("剪切", "Cut"), () => setWorkspaceClipboard(form, info, "cut"), { shortcut: "Ctrl+X" });
+    addWorkspaceContextMenuButton(menu, t("复制", "Copy"), () => setWorkspaceClipboard(form, info, "copy"), { shortcut: "Ctrl+C" });
+    if (workspacePathClipboard && info.type !== "directory") {
+      addWorkspaceContextMenuButton(menu, t("粘贴", "Paste"), () => void pasteWorkspaceClipboard(form, info));
     }
+    addWorkspaceContextMenuSeparator(menu);
+    addWorkspaceContextMenuButton(menu, t("下载...", "Download..."), () => void downloadWorkspaceFile(form, info), { disabled: info.type !== "file" });
+    addWorkspaceContextMenuButton(menu, t("复制路径", "Copy Path"), () => void copyTextToClipboard(workspaceAbsolutePath(info.path), t("已复制路径。", "Path copied.")), { shortcut: "Shift+Alt+C" });
+    addWorkspaceContextMenuButton(menu, t("复制相对路径", "Copy Relative Path"), () => void copyTextToClipboard(info.path, t("已复制相对路径。", "Relative path copied.")), { shortcut: "Ctrl+K Ctrl+Shift+C" });
+    addWorkspaceContextMenuSeparator(menu);
+    addWorkspaceContextMenuButton(menu, t("重命名...", "Rename..."), () => startWorkspaceInlineRename(form, info.path, info.type, info.name), { shortcut: "F2" });
+    addWorkspaceContextMenuButton(menu, t("永久删除", "Delete Permanently"), () => void deleteWorkspacePath(form, info), { shortcut: "Del", danger: true });
+    document.body.appendChild(menu);
+    const margin = 8;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.max(margin, Math.min(Number(event.clientX || 0), window.innerWidth - rect.width - margin));
+    const top = Math.max(margin, Math.min(Number(event.clientY || 0), window.innerHeight - rect.height - margin));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    workspaceContextMenu = menu;
+  }
+
+  async function createWorkspaceFile(form) {
+    startWorkspaceInlineCreate(form, "file");
+  }
+
+  async function createWorkspaceDirectory(form) {
+    startWorkspaceInlineCreate(form, "directory");
   }
 
   async function refreshWorkspace(form) {
@@ -2454,6 +3264,9 @@
   }
 
   document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Node) || !(workspaceContextMenu instanceof HTMLElement) || !workspaceContextMenu.contains(event.target)) {
+      hideWorkspaceContextMenu();
+    }
     const target = event.target instanceof Element ? event.target.closest("[data-chat-action]") : null;
     const form = currentForm();
     if (!(target instanceof HTMLElement) || !(form instanceof HTMLFormElement) || !form.contains(target)) {
@@ -2477,9 +3290,17 @@
       }
       case "switch-sidebar-view": {
         event.preventDefault();
+        const nextView = String(target.dataset.chatSidebarView || "files").trim() === "sessions" ? "sessions" : "files";
+        const togglesActiveView = !layoutState.sidebarCollapsed && layoutState.sidebarView === nextView;
+        if (togglesActiveView) {
+          layoutState.sidebarCollapsed = true;
+          applyLayout(form, true);
+          syncWorkspaceSurface(form);
+          return;
+        }
         layoutState.sidebarCollapsed = false;
         applyLayout(form, false);
-        applySidebarView(form, String(target.dataset.chatSidebarView || "files").trim(), true);
+        applySidebarView(form, nextView, true);
         syncWorkspaceSurface(form);
         return;
       }
@@ -2597,10 +3418,24 @@
     }
   });
 
+  document.addEventListener("contextmenu", (event) => {
+    const form = currentForm();
+    const row = event.target instanceof Element ? event.target.closest(".chat-workspace-row[data-chat-workspace-path]") : null;
+    if (!(form instanceof HTMLFormElement) || !(row instanceof HTMLElement) || !form.contains(row)) {
+      return;
+    }
+    if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || readClientSessionID(form) === "") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    showWorkspaceContextMenu(form, row, event);
+  });
+
   document.addEventListener("dragover", (event) => {
     const form = currentForm();
-    const row = workspaceUploadRowFromEvent(event, form);
-    if (!(form instanceof HTMLFormElement) || !(row instanceof HTMLElement) || !workspaceDragContainsFiles(event)) {
+    const target = workspaceUploadTargetFromEvent(event, form);
+    if (!(form instanceof HTMLFormElement) || !target || !workspaceDragContainsFiles(event)) {
       return;
     }
     if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || readClientSessionID(form) === "" || workspaceUploadURL(form) === "") {
@@ -2611,17 +3446,17 @@
     if (event.dataTransfer) {
       event.dataTransfer.dropEffect = "copy";
     }
-    setWorkspaceUploadTarget(form, String(row.dataset.chatWorkspacePath || "").trim());
+    setWorkspaceUploadTarget(form, target.highlightRowPath, target.root);
   });
 
   document.addEventListener("dragleave", (event) => {
     const form = currentForm();
-    const host = workspaceTreeHost(form);
-    if (!(host instanceof HTMLElement)) {
+    const surface = workspaceFilesPanel(form) || workspaceSection(form) || workspaceTreeHost(form);
+    if (!(surface instanceof HTMLElement)) {
       return;
     }
     const related = event.relatedTarget;
-    if (related instanceof Node && host.contains(related)) {
+    if (related instanceof Node && surface.contains(related)) {
       return;
     }
     clearWorkspaceUploadTarget(form);
@@ -2629,8 +3464,8 @@
 
   document.addEventListener("drop", (event) => {
     const form = currentForm();
-    const row = workspaceUploadRowFromEvent(event, form);
-    if (!(form instanceof HTMLFormElement) || !(row instanceof HTMLElement) || !workspaceDragContainsFiles(event)) {
+    const target = workspaceUploadTargetFromEvent(event, form);
+    if (!(form instanceof HTMLFormElement) || !target || !workspaceDragContainsFiles(event)) {
       clearWorkspaceUploadTarget(form);
       return;
     }
@@ -2641,7 +3476,7 @@
     event.preventDefault();
     event.stopPropagation();
     const files = Array.from(event.dataTransfer?.files || []);
-    const directoryPath = String(row.dataset.chatWorkspacePath || "").trim();
+    const directoryPath = target.path;
     clearWorkspaceUploadTarget(form);
     void uploadWorkspaceFilesToDirectory(form, directoryPath, files);
   });
@@ -2652,6 +3487,60 @@
 
   document.addEventListener("input", (event) => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.matches("[data-chat-workspace-inline-input]")) {
+      if (workspaceInlineEdit) {
+        workspaceInlineEdit.value = target.value;
+      }
+      return;
+    }
+    const form = currentForm();
+    const row = target instanceof Element ? target.closest(".chat-workspace-row[data-chat-workspace-path]") : null;
+    if (form instanceof HTMLFormElement && row instanceof HTMLElement && form.contains(row) && !(target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) {
+      const info = workspaceRowInfo(row);
+      const key = String(event.key || "").toLowerCase();
+      if (info && event.key === "F2" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        startWorkspaceInlineRename(form, info.path, info.type, info.name);
+        return;
+      }
+      if (info && event.key === "Delete" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        void deleteWorkspacePath(form, info);
+        return;
+      }
+      if (info && key === "enter" && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey) {
+        event.preventDefault();
+        if (info.type === "file") {
+          void openWorkspaceFile(form, info.path, false);
+        } else {
+          workspaceOpenPaths.add(info.path);
+          writeWorkspaceOpenState(form);
+          void loadWorkspaceTree(form, info.path, false);
+          renderWorkspaceTree(form);
+        }
+        return;
+      }
+      if (info && key === "c" && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey) {
+        event.preventDefault();
+        setWorkspaceClipboard(form, info, "copy");
+        return;
+      }
+      if (info && key === "x" && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey) {
+        event.preventDefault();
+        setWorkspaceClipboard(form, info, "cut");
+        return;
+      }
+      if (info && key === "c" && event.shiftKey && event.altKey && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        void copyTextToClipboard(workspaceAbsolutePath(info.path), t("已复制路径。", "Path copied."));
+        return;
+      }
+      if (info && key === "r" && event.shiftKey && event.altKey && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        revealWorkspacePath(form, info);
+        return;
+      }
+    }
     if (!(target instanceof HTMLTextAreaElement) || !target.matches("[data-chat-editor-input]")) {
       return;
     }
@@ -2673,6 +3562,23 @@
 
   document.addEventListener("keydown", (event) => {
     const target = event.target;
+    if (event.key === "Escape" && workspaceContextMenu instanceof HTMLElement) {
+      event.preventDefault();
+      hideWorkspaceContextMenu();
+      return;
+    }
+    if (target instanceof HTMLInputElement && target.matches("[data-chat-workspace-inline-input]")) {
+      if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        void submitWorkspaceInlineEdit(target.form instanceof HTMLFormElement ? target.form : currentForm(), target);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelWorkspaceInlineEdit(target.form instanceof HTMLFormElement ? target.form : currentForm());
+      }
+      return;
+    }
     if (!(target instanceof HTMLTextAreaElement) || !target.matches("[data-chat-editor-input]")) {
       return;
     }

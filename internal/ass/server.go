@@ -156,9 +156,13 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/healthz", server.handleHealthz)
 	mux.HandleFunc("GET /v1/fs/tree", server.handleFSTree)
 	mux.HandleFunc("GET /v1/fs/file", server.handleReadFile)
+	mux.HandleFunc("GET /v1/fs/download", server.handleDownloadFile)
 	mux.HandleFunc("PUT /v1/fs/file", server.handleWriteFile)
 	mux.HandleFunc("PUT /v1/fs/upload", server.handleUploadFile)
 	mux.HandleFunc("PUT /v1/fs/directory", server.handleCreateDirectory)
+	mux.HandleFunc("POST /v1/fs/copy", server.handleCopyPath)
+	mux.HandleFunc("POST /v1/fs/rename", server.handleRenamePath)
+	mux.HandleFunc("DELETE /v1/fs/path", server.handleDeletePath)
 	mux.HandleFunc("POST /v1/shell/exec", server.handleShellExec)
 	return mux
 }
@@ -224,6 +228,24 @@ func (server *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, apiErr := server.readWorkspaceFile(relativePath, realPath, info)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	server.writeOK(w, r, payload)
+}
+
+func (server *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
+	relativePath, realPath, info, apiErr := server.resolveExisting(r.URL.Query().Get("path"), false)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	if !info.Mode().IsRegular() {
+		server.writeError(w, r, newAPIError(http.StatusBadRequest, "path_not_file", "workspace path is not a file"))
+		return
+	}
+	payload, apiErr := server.readWorkspaceDownload(relativePath, realPath, info)
 	if apiErr != nil {
 		server.writeError(w, r, apiErr)
 		return
@@ -305,6 +327,73 @@ func (server *Server) handleCreateDirectory(w http.ResponseWriter, r *http.Reque
 	server.writeOK(w, r, result)
 }
 
+func (server *Server) handleCopyPath(w http.ResponseWriter, r *http.Request) {
+	var request fsCopyRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&request); err != nil {
+		server.writeError(w, r, newAPIError(http.StatusBadRequest, "encoding_invalid", "path copy request is invalid"))
+		return
+	}
+	oldPath, apiErr := server.normalizeWorkspacePath(request.Path, false)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	newPath, apiErr := server.normalizeWorkspacePath(request.NewPath, false)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	result, apiErr := server.copyPath(oldPath, newPath)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	server.writeOK(w, r, result)
+}
+
+func (server *Server) handleRenamePath(w http.ResponseWriter, r *http.Request) {
+	var request fsRenameRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&request); err != nil {
+		server.writeError(w, r, newAPIError(http.StatusBadRequest, "encoding_invalid", "path rename request is invalid"))
+		return
+	}
+	oldPath, apiErr := server.normalizeWorkspacePath(request.Path, false)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	newPath, apiErr := server.normalizeWorkspacePath(request.NewPath, false)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	result, apiErr := server.renamePath(oldPath, newPath)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	server.writeOK(w, r, result)
+}
+
+func (server *Server) handleDeletePath(w http.ResponseWriter, r *http.Request) {
+	var request fsPathRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&request); err != nil {
+		server.writeError(w, r, newAPIError(http.StatusBadRequest, "encoding_invalid", "path delete request is invalid"))
+		return
+	}
+	relativePath, apiErr := server.normalizeWorkspacePath(request.Path, false)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	result, apiErr := server.deletePath(relativePath)
+	if apiErr != nil {
+		server.writeError(w, r, apiErr)
+		return
+	}
+	server.writeOK(w, r, result)
+}
+
 func (server *Server) handleShellExec(w http.ResponseWriter, r *http.Request) {
 	var request shellExecRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024)).Decode(&request); err != nil {
@@ -345,6 +434,14 @@ type fsFileData struct {
 	PreviewURL string `json:"preview_url,omitempty"`
 }
 
+type fsDownloadData struct {
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
+	MediaType string `json:"media_type,omitempty"`
+	Content   []byte `json:"content"`
+}
+
 type fsWriteRequest struct {
 	Path             string `json:"path"`
 	Content          string `json:"content"`
@@ -372,6 +469,34 @@ type fsDirectoryRequest struct {
 }
 
 type fsDirectoryData struct {
+	Path string `json:"path"`
+}
+
+type fsRenameRequest struct {
+	Path    string `json:"path"`
+	NewPath string `json:"new_path"`
+}
+
+type fsRenameData struct {
+	OldPath string `json:"old_path"`
+	Path    string `json:"path"`
+}
+
+type fsCopyRequest struct {
+	Path    string `json:"path"`
+	NewPath string `json:"new_path"`
+}
+
+type fsCopyData struct {
+	SourcePath string `json:"source_path"`
+	Path       string `json:"path"`
+}
+
+type fsPathRequest struct {
+	Path string `json:"path"`
+}
+
+type fsDeleteData struct {
 	Path string `json:"path"`
 }
 
@@ -531,6 +656,24 @@ func (server *Server) readWorkspaceFile(relativePath string, realPath string, in
 		MediaType: mediaType,
 		Content:   string(payload),
 	}, nil
+}
+
+func (server *Server) readWorkspaceDownload(relativePath string, realPath string, info os.FileInfo) (fsDownloadData, *apiError) {
+	if info.Size() > server.maxUploadBytes {
+		return fsDownloadData{}, newAPIError(http.StatusRequestEntityTooLarge, "file_too_large", "workspace file exceeds the download size limit")
+	}
+	payload, err := os.ReadFile(realPath)
+	if err != nil {
+		return fsDownloadData{}, newAPIError(http.StatusInternalServerError, "internal_error", "read workspace file failed")
+	}
+	if int64(len(payload)) > server.maxUploadBytes {
+		return fsDownloadData{}, newAPIError(http.StatusRequestEntityTooLarge, "file_too_large", "workspace file exceeds the download size limit")
+	}
+	mediaType := detectWorkspaceMediaType(relativePath, payload)
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	return fsDownloadData{Path: relativePath, Name: path.Base(relativePath), Size: int64(len(payload)), MediaType: mediaType, Content: payload}, nil
 }
 
 func (server *Server) readTextFile(realPath string, info os.FileInfo) ([]byte, *apiError) {
@@ -753,6 +896,184 @@ func (server *Server) createDirectory(relativePath string, mkdirP bool) (fsDirec
 		return fsDirectoryData{}, newAPIError(http.StatusInternalServerError, "internal_error", "create workspace directory failed")
 	}
 	return fsDirectoryData{Path: relativePath}, nil
+}
+
+func (server *Server) renamePath(oldRelativePath string, newRelativePath string) (fsRenameData, *apiError) {
+	if oldRelativePath == newRelativePath {
+		return fsRenameData{OldPath: oldRelativePath, Path: newRelativePath}, nil
+	}
+	oldParentReal, apiErr := server.resolveWritableParent(oldRelativePath, false)
+	if apiErr != nil {
+		return fsRenameData{}, apiErr
+	}
+	oldRealPath := filepath.Join(oldParentReal, filepath.Base(filepath.FromSlash(oldRelativePath)))
+	if !server.pathWithinRoot(oldRealPath) {
+		return fsRenameData{}, newAPIError(http.StatusBadRequest, "path_invalid", "workspace path escapes root")
+	}
+	oldInfo, err := os.Lstat(oldRealPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fsRenameData{}, newAPIError(http.StatusNotFound, "path_not_found", "workspace path does not exist")
+		}
+		return fsRenameData{}, newAPIError(http.StatusInternalServerError, "internal_error", "inspect workspace path failed")
+	}
+	newParentReal, apiErr := server.resolveWritableParent(newRelativePath, false)
+	if apiErr != nil {
+		return fsRenameData{}, apiErr
+	}
+	newRealPath := filepath.Join(newParentReal, filepath.Base(filepath.FromSlash(newRelativePath)))
+	if !server.pathWithinRoot(newRealPath) {
+		return fsRenameData{}, newAPIError(http.StatusBadRequest, "path_invalid", "workspace path escapes root")
+	}
+	if _, err := os.Lstat(newRealPath); err == nil {
+		return fsRenameData{}, newAPIError(http.StatusConflict, "path_exists", "workspace path already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fsRenameData{}, newAPIError(http.StatusInternalServerError, "internal_error", "inspect workspace target path failed")
+	}
+	if oldInfo.IsDir() {
+		if relative, err := filepath.Rel(oldRealPath, newRealPath); err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fsRenameData{}, newAPIError(http.StatusBadRequest, "path_invalid", "workspace directory cannot be moved into itself")
+		}
+	}
+	if err := os.Rename(oldRealPath, newRealPath); err != nil {
+		return fsRenameData{}, newAPIError(http.StatusInternalServerError, "internal_error", "rename workspace path failed")
+	}
+	return fsRenameData{OldPath: oldRelativePath, Path: newRelativePath}, nil
+}
+
+func (server *Server) copyPath(oldRelativePath string, newRelativePath string) (fsCopyData, *apiError) {
+	if oldRelativePath == newRelativePath {
+		return fsCopyData{}, newAPIError(http.StatusConflict, "path_exists", "workspace source and target paths are the same")
+	}
+	oldRealPath, oldInfo, apiErr := server.resolveMutablePath(oldRelativePath)
+	if apiErr != nil {
+		return fsCopyData{}, apiErr
+	}
+	newParentReal, apiErr := server.resolveWritableParent(newRelativePath, false)
+	if apiErr != nil {
+		return fsCopyData{}, apiErr
+	}
+	newRealPath := filepath.Join(newParentReal, filepath.Base(filepath.FromSlash(newRelativePath)))
+	if !server.pathWithinRoot(newRealPath) {
+		return fsCopyData{}, newAPIError(http.StatusBadRequest, "path_invalid", "workspace path escapes root")
+	}
+	if _, err := os.Lstat(newRealPath); err == nil {
+		return fsCopyData{}, newAPIError(http.StatusConflict, "path_exists", "workspace path already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fsCopyData{}, newAPIError(http.StatusInternalServerError, "internal_error", "inspect workspace target path failed")
+	}
+	if oldInfo.IsDir() {
+		if relative, err := filepath.Rel(oldRealPath, newRealPath); err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fsCopyData{}, newAPIError(http.StatusBadRequest, "path_invalid", "workspace directory cannot be copied into itself")
+		}
+		if apiErr := server.copyWorkspaceDirectory(oldRealPath, newRealPath, oldInfo); apiErr != nil {
+			return fsCopyData{}, apiErr
+		}
+		return fsCopyData{SourcePath: oldRelativePath, Path: newRelativePath}, nil
+	}
+	if !oldInfo.Mode().IsRegular() {
+		return fsCopyData{}, newAPIError(http.StatusBadRequest, "path_invalid", "workspace path cannot be copied")
+	}
+	if apiErr := server.copyWorkspaceFile(oldRealPath, newRealPath, oldInfo); apiErr != nil {
+		return fsCopyData{}, apiErr
+	}
+	return fsCopyData{SourcePath: oldRelativePath, Path: newRelativePath}, nil
+}
+
+func (server *Server) deletePath(relativePath string) (fsDeleteData, *apiError) {
+	realPath, _, apiErr := server.resolveMutablePath(relativePath)
+	if apiErr != nil {
+		return fsDeleteData{}, apiErr
+	}
+	if err := os.RemoveAll(realPath); err != nil {
+		return fsDeleteData{}, newAPIError(http.StatusInternalServerError, "internal_error", "delete workspace path failed")
+	}
+	return fsDeleteData{Path: relativePath}, nil
+}
+
+func (server *Server) resolveMutablePath(relativePath string) (string, os.FileInfo, *apiError) {
+	parentReal, apiErr := server.resolveWritableParent(relativePath, false)
+	if apiErr != nil {
+		return "", nil, apiErr
+	}
+	realPath := filepath.Join(parentReal, filepath.Base(filepath.FromSlash(relativePath)))
+	if !server.pathWithinRoot(realPath) {
+		return "", nil, newAPIError(http.StatusBadRequest, "path_invalid", "workspace path escapes root")
+	}
+	info, err := os.Lstat(realPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil, newAPIError(http.StatusNotFound, "path_not_found", "workspace path does not exist")
+		}
+		return "", nil, newAPIError(http.StatusInternalServerError, "internal_error", "inspect workspace path failed")
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", nil, newAPIError(http.StatusBadRequest, "path_invalid", "workspace symbolic links cannot be modified")
+	}
+	return realPath, info, nil
+}
+
+func (server *Server) copyWorkspaceDirectory(sourcePath string, targetPath string, sourceInfo os.FileInfo) *apiError {
+	if err := os.Mkdir(targetPath, sourceInfo.Mode().Perm()); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return newAPIError(http.StatusConflict, "path_exists", "workspace path already exists")
+		}
+		return newAPIError(http.StatusInternalServerError, "internal_error", "copy workspace directory failed")
+	}
+	server.applyOwnership(targetPath, sourceInfo)
+	entries, err := os.ReadDir(sourcePath)
+	if err != nil {
+		return newAPIError(http.StatusInternalServerError, "internal_error", "read workspace directory failed")
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			return newAPIError(http.StatusInternalServerError, "internal_error", "inspect workspace path failed")
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		sourceChild := filepath.Join(sourcePath, entry.Name())
+		targetChild := filepath.Join(targetPath, entry.Name())
+		if info.IsDir() {
+			if apiErr := server.copyWorkspaceDirectory(sourceChild, targetChild, info); apiErr != nil {
+				return apiErr
+			}
+			continue
+		}
+		if info.Mode().IsRegular() {
+			if apiErr := server.copyWorkspaceFile(sourceChild, targetChild, info); apiErr != nil {
+				return apiErr
+			}
+		}
+	}
+	return nil
+}
+
+func (server *Server) copyWorkspaceFile(sourcePath string, targetPath string, sourceInfo os.FileInfo) *apiError {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return newAPIError(http.StatusInternalServerError, "internal_error", "open workspace file failed")
+	}
+	defer source.Close()
+	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, sourceInfo.Mode().Perm())
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return newAPIError(http.StatusConflict, "path_exists", "workspace path already exists")
+		}
+		return newAPIError(http.StatusInternalServerError, "internal_error", "create workspace file failed")
+	}
+	if _, err := io.Copy(target, source); err != nil {
+		_ = target.Close()
+		_ = os.Remove(targetPath)
+		return newAPIError(http.StatusInternalServerError, "internal_error", "copy workspace file failed")
+	}
+	if err := target.Close(); err != nil {
+		_ = os.Remove(targetPath)
+		return newAPIError(http.StatusInternalServerError, "internal_error", "close workspace file failed")
+	}
+	server.applyOwnership(targetPath, sourceInfo)
+	return nil
 }
 
 func (server *Server) resolveExisting(raw string, allowRoot bool) (string, string, os.FileInfo, *apiError) {

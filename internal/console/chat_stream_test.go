@@ -72,6 +72,30 @@ func TestBuildConsoleChatRequestBodyUsesLargerBudgetForDeepSeekV4Pro(t *testing.
 	}
 }
 
+func TestBuildConsoleChatRequestBodyUsesImagesAPIForGPTImage2(t *testing.T) {
+	body, err := buildConsoleChatRequestBody(domain.ProtocolOpenAI, domain.Provider{}, domain.ModelRoute{PublicName: "gpt-image-2", UpstreamModel: "openai/gpt-image-2"}, "Keep it cinematic.", nil, "Generate a rainy cyberpunk alley.", nil, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["model"] != "openai/gpt-image-2" {
+		t.Fatalf("model=%#v", payload["model"])
+	}
+	if payload["response_format"] != "url" {
+		t.Fatalf("response_format=%#v", payload["response_format"])
+	}
+	prompt, _ := payload["prompt"].(string)
+	if !strings.Contains(prompt, "Keep it cinematic.") || !strings.Contains(prompt, "Generate a rainy cyberpunk alley.") {
+		t.Fatalf("prompt=%q", prompt)
+	}
+	if _, exists := payload["messages"]; exists {
+		t.Fatalf("images payload should not include messages: %#v", payload)
+	}
+}
+
 func TestBuildConsoleChatRequestBodyIncludesAnthropicDocumentParts(t *testing.T) {
 	body, err := buildConsoleChatRequestBody(domain.ProtocolAnthropic, domain.Provider{}, domain.ModelRoute{PublicName: "claude-sonnet", UpstreamModel: "claude-sonnet-4-5"}, "", nil, "summarize these inputs", []consoleChatAttachmentView{{ObjectKey: "chat/user/diagram.png", URL: "https://files.example.com/chat/user/diagram.png", MediaType: "image/png", Name: "diagram.png"}, {ObjectKey: "chat/user/notes.pdf", URL: "https://files.example.com/chat/user/notes.pdf", MediaType: "application/pdf", Name: "notes.pdf"}}, false, "")
 	if err != nil {
@@ -312,7 +336,7 @@ func TestConsoleChatExecutionProtocolPrefersAnthropicForDeepSeekImages(t *testin
 	}
 }
 
-func TestConsoleChatRoutesOnlyIncludeAllowedModels(t *testing.T) {
+func TestConsoleChatRoutesIncludeAllCompatibleEnabledModels(t *testing.T) {
 	routes := []domain.ModelRoute{
 		{PublicName: "deepseek-v4-pro", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, Enabled: true},
 		{PublicName: "deepseek/deepseek-v4-pro", ProviderID: "openrouter", UpstreamModel: "deepseek/deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, Enabled: true},
@@ -320,6 +344,7 @@ func TestConsoleChatRoutesOnlyIncludeAllowedModels(t *testing.T) {
 		{PublicName: "claude-opus-4.7", ProviderID: "anthropic-main", UpstreamModel: "claude-opus-4.7", Protocol: domain.ProtocolAnthropic, Enabled: true},
 		{PublicName: "claude-sonnet-4.6", ProviderID: "anthropic-main", UpstreamModel: "claude-sonnet-4.6", Protocol: domain.ProtocolAnthropic, Enabled: true},
 		{PublicName: "gpt-5.5", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.5", Protocol: domain.ProtocolOpenAI, Enabled: true},
+		{PublicName: "gpt-image-2", ProviderID: "openrouter", UpstreamModel: "openai/gpt-image-2", Protocol: domain.ProtocolOpenAI, Enabled: true},
 		{PublicName: "gemini-3.1-pro-preview", ProviderID: "openrouter", UpstreamModel: "google/gemini-3.1-pro-preview", Protocol: domain.ProtocolOpenAI, Enabled: true},
 	}
 	providers := []domain.Provider{
@@ -329,18 +354,13 @@ func TestConsoleChatRoutesOnlyIncludeAllowedModels(t *testing.T) {
 	}
 
 	views := consoleChatRoutes(routes, providers)
-	if len(views) != 5 {
-		t.Fatalf("expected 5 allowed routes, got %d: %+v", len(views), views)
+	if len(views) != 8 {
+		t.Fatalf("expected 8 compatible routes, got %d: %+v", len(views), views)
 	}
 
-	joined := strings.Join([]string{views[0].PublicName, views[1].PublicName, views[2].PublicName, views[3].PublicName, views[4].PublicName}, ",")
-	if joined != "deepseek-v4-pro,openai/gpt-5.4,claude-opus-4.7,claude-sonnet-4.6,gpt-5.5" {
-		t.Fatalf("unexpected curated routes: %s", joined)
-	}
-	for _, blocked := range []string{"deepseek/deepseek-v4-pro", "gemini-3.1-pro-preview"} {
-		if strings.Contains(joined, blocked) {
-			t.Fatalf("blocked model %q leaked into chat routes: %s", blocked, joined)
-		}
+	joined := strings.Join([]string{views[0].PublicName, views[1].PublicName, views[2].PublicName, views[3].PublicName, views[4].PublicName, views[5].PublicName, views[6].PublicName, views[7].PublicName}, ",")
+	if joined != "claude-opus-4.7,claude-sonnet-4.6,deepseek-v4-pro,deepseek/deepseek-v4-pro,gemini-3.1-pro-preview,gpt-5.5,gpt-image-2,openai/gpt-5.4" {
+		t.Fatalf("unexpected compatible routes: %s", joined)
 	}
 }
 
@@ -358,6 +378,24 @@ func TestParseConsoleChatJSONResponseCapturesReasoning(t *testing.T) {
 		t.Fatalf("unexpected output fallback: %q", execution.Result.Output)
 	}
 	if execution.Result.TotalTokens != 8 {
+		t.Fatalf("unexpected total tokens: %d", execution.Result.TotalTokens)
+	}
+}
+
+func TestParseConsoleChatJSONResponseBuildsImageMarkdownOutput(t *testing.T) {
+	body := []byte(`{"id":"img_1","data":[{"url":"https://cdn.example.com/generated.png"}],"usage":{"input_tokens":12,"output_tokens":0,"total_tokens":12}}`)
+
+	execution, err := parseConsoleChatJSONResponse(body, domain.ProtocolOpenAI, domain.ModelRoute{PublicName: "gpt-image-2", UpstreamModel: "openai/gpt-image-2"}, domain.Provider{ID: "openrouter", Name: "OpenRouter"}, http.StatusOK, false, time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Result.Output != "![Generated image 1](https://cdn.example.com/generated.png)" {
+		t.Fatalf("unexpected output: %q", execution.Result.Output)
+	}
+	if execution.Result.FinishReason != "stop" {
+		t.Fatalf("unexpected finish reason: %q", execution.Result.FinishReason)
+	}
+	if execution.Result.TotalTokens != 12 {
 		t.Fatalf("unexpected total tokens: %d", execution.Result.TotalTokens)
 	}
 }

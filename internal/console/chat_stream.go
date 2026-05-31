@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -224,6 +225,11 @@ type consoleUpstreamError struct {
 	StatusCode int
 	Code       string
 	Message    string
+}
+
+func consoleChatIsImageGenerationModel(route domain.ModelRoute) bool {
+	modelID := strings.ToLower(strings.TrimSpace(firstNonEmpty(route.UpstreamModel, route.PublicName)))
+	return strings.Contains(modelID, "gpt-image-2") || strings.Contains(modelID, "chatgpt-image-2")
 }
 
 func (err *consoleUpstreamError) Error() string {
@@ -541,11 +547,12 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 	if err != nil {
 		return consoleChatExecution{StatusCode: http.StatusBadGateway, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusBadGateway, Stream: stream}}, err
 	}
-	body, err := buildConsoleChatRequestBody(protocol, provider, route, systemPrompt, history, prompt, attachments, stream, reasoningEffort)
+	upstreamStream := stream && !consoleChatIsImageGenerationModel(route)
+	body, err := buildConsoleChatRequestBody(protocol, provider, route, systemPrompt, history, prompt, attachments, upstreamStream, reasoningEffort)
 	if err != nil {
 		return consoleChatExecution{StatusCode: http.StatusBadRequest, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusBadRequest, Stream: stream}}, err
 	}
-	request, err := buildConsoleChatUpstreamRequest(chatCtx, provider, protocol, body, stream)
+	request, err := buildConsoleChatUpstreamRequest(chatCtx, provider, route, protocol, body, upstreamStream)
 	if err != nil {
 		return consoleChatExecution{StatusCode: http.StatusInternalServerError, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: http.StatusInternalServerError, Stream: stream}}, err
 	}
@@ -563,7 +570,7 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 		return consoleChatExecution{StatusCode: response.StatusCode, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: response.StatusCode, LatencyMS: time.Since(started).Milliseconds(), Stream: stream}}, upstreamErr
 	}
 
-	if stream {
+	if upstreamStream {
 		contentType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 		if contentType == "text/event-stream" {
 			return parseConsoleChatStreamResponse(response.Body, protocol, route, provider, started, onDelta, onReasoning)
@@ -574,7 +581,18 @@ func runConsoleRawChatTurn(ctx context.Context, protocol string, provider domain
 	if err != nil {
 		return consoleChatExecution{StatusCode: response.StatusCode, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: response.StatusCode, LatencyMS: time.Since(started).Milliseconds(), Stream: stream}}, err
 	}
-	return parseConsoleChatJSONResponse(responseBody, protocol, route, provider, response.StatusCode, stream, started)
+	execution, err := parseConsoleChatJSONResponse(responseBody, protocol, route, provider, response.StatusCode, stream, started)
+	if err != nil {
+		return execution, err
+	}
+	if stream && !upstreamStream {
+		if text := strings.TrimSpace(consoleChatContinuationContent(execution.Result)); text != "" && onDelta != nil {
+			if callbackErr := onDelta(text); callbackErr != nil {
+				return execution, fmt.Errorf("write streamed image result to client: %w", callbackErr)
+			}
+		}
+	}
+	return execution, nil
 }
 
 func runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
@@ -636,6 +654,9 @@ func runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, pr
 		finalizeConsoleChatExecutionAggregate(&aggregate, route, provider, started, combinedOutput.String(), combinedReasoning.String())
 		if err != nil {
 			return aggregate, err
+		}
+		if consoleChatIsImageGenerationModel(route) {
+			return aggregate, nil
 		}
 		if !consoleChatFinishReasonNeedsContinuation(execution.Result.FinishReason) || attempt >= consoleChatAutoContinuationLimit {
 			return aggregate, nil
@@ -738,6 +759,9 @@ func finalizeConsoleChatExecutionAggregate(target *consoleChatExecution, route d
 
 func buildConsoleChatRequestBody(protocol string, provider domain.Provider, route domain.ModelRoute, systemPrompt string, history []consoleChatMessageView, prompt string, attachments []consoleChatAttachmentView, stream bool, reasoningEffort string) ([]byte, error) {
 	upstreamModel := firstNonEmpty(route.UpstreamModel, route.PublicName)
+	if protocol == domain.ProtocolOpenAI && consoleChatIsImageGenerationModel(route) {
+		return json.Marshal(buildConsoleOpenAIImageGenerationPayload(upstreamModel, systemPrompt, prompt, attachments))
+	}
 	appliedReasoningEffort := consoleChatAppliedReasoningEffort(route, provider, reasoningEffort)
 	switch protocol {
 	case domain.ProtocolAnthropic:
@@ -770,6 +794,28 @@ func buildConsoleChatRequestBody(protocol string, provider domain.Provider, rout
 			payload["reasoning_effort"] = appliedReasoningEffort
 		}
 		return json.Marshal(payload)
+	}
+}
+
+func buildConsoleOpenAIImageGenerationPayload(upstreamModel string, systemPrompt string, prompt string, attachments []consoleChatAttachmentView) map[string]any {
+	finalPrompt := strings.TrimSpace(prompt)
+	if instructions := strings.TrimSpace(systemPrompt); instructions != "" {
+		if finalPrompt != "" {
+			finalPrompt = instructions + "\n\n" + finalPrompt
+		} else {
+			finalPrompt = instructions
+		}
+	}
+	for _, attachment := range attachments {
+		if strings.TrimSpace(attachment.URL) == "" {
+			continue
+		}
+		finalPrompt += "\n\n" + consoleChatAttachmentReferenceText(attachment)
+	}
+	return map[string]any{
+		"model":           upstreamModel,
+		"prompt":          strings.TrimSpace(finalPrompt),
+		"response_format": "url",
 	}
 }
 
@@ -916,8 +962,8 @@ func consoleChatAttachmentIsDocument(mediaType string) bool {
 	}
 }
 
-func buildConsoleChatUpstreamRequest(ctx context.Context, provider domain.Provider, protocol string, body []byte, stream bool) (*http.Request, error) {
-	upstreamURL, err := joinConsoleChatUpstreamURL(domain.ProviderBaseURLForProtocol(provider, protocol), consoleChatUpstreamEndpoint(protocol))
+func buildConsoleChatUpstreamRequest(ctx context.Context, provider domain.Provider, route domain.ModelRoute, protocol string, body []byte, stream bool) (*http.Request, error) {
+	upstreamURL, err := joinConsoleChatUpstreamURL(domain.ProviderBaseURLForProtocol(provider, protocol), consoleChatUpstreamEndpoint(protocol, route))
 	if err != nil {
 		return nil, err
 	}
@@ -947,7 +993,10 @@ func buildConsoleChatUpstreamRequest(ctx context.Context, provider domain.Provid
 	return request, nil
 }
 
-func consoleChatUpstreamEndpoint(protocol string) string {
+func consoleChatUpstreamEndpoint(protocol string, route domain.ModelRoute) string {
+	if protocol == domain.ProtocolOpenAI && consoleChatIsImageGenerationModel(route) {
+		return "/v1/images/generations"
+	}
 	if protocol == domain.ProtocolAnthropic {
 		return "/v1/messages"
 	}
@@ -991,6 +1040,14 @@ func parseConsoleChatJSONResponse(body []byte, protocol string, route domain.Mod
 		DurationMS:    usage.LatencyMS,
 		TotalTokens:   usage.TotalTokens,
 	}
+	if protocol == domain.ProtocolOpenAI && consoleChatIsImageGenerationModel(route) {
+		result.Output = consoleOpenAIImageOutput(payload)
+		result.FinishReason = "stop"
+		if strings.TrimSpace(result.Output) == "" {
+			result.Output = consoleChatEmptyOutput
+		}
+		return consoleChatExecution{Result: result, Usage: usage, StatusCode: statusCode}, nil
+	}
 	switch protocol {
 	case domain.ProtocolAnthropic:
 		result.Output = consoleTextContent(payload["content"])
@@ -1011,6 +1068,34 @@ func parseConsoleChatJSONResponse(body []byte, protocol string, route domain.Mod
 		result.Output = consoleChatEmptyOutput
 	}
 	return consoleChatExecution{Result: result, Usage: usage, StatusCode: statusCode}, nil
+}
+
+func consoleOpenAIImageOutput(payload map[string]any) string {
+	data, ok := payload["data"].([]any)
+	if !ok || len(data) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(data))
+	for index, item := range data {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		label := fmt.Sprintf("Generated image %d", index+1)
+		if value := strings.TrimSpace(consoleValueString(entry["url"])); value != "" {
+			parts = append(parts, fmt.Sprintf("![%s](%s)", label, value))
+			continue
+		}
+		b64 := strings.TrimSpace(consoleValueString(entry["b64_json"]))
+		if b64 == "" {
+			continue
+		}
+		if _, err := base64.StdEncoding.DecodeString(b64); err != nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("![%s](data:image/png;base64,%s)", label, b64))
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func parseConsoleChatStreamResponse(body io.Reader, protocol string, route domain.ModelRoute, provider domain.Provider, started time.Time, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {

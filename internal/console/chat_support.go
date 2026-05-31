@@ -3,16 +3,19 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"mime"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
 
+	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/artifacts"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
@@ -69,7 +72,6 @@ type consoleChatPromptView struct {
 	Prompt string
 }
 
-var consoleChatAllowedExactModels = []string{"deepseek-v4-pro", "gpt-5.4", "claude-opus-4.7", "claude-sonnet-4.6", "gpt-5.5"}
 var consoleChatDeepSeekReasoningEfforts = []string{"high", "max"}
 
 func consoleChatCompletionTokens(route domain.ModelRoute) int {
@@ -168,9 +170,13 @@ func (state consoleChatPageState) data() map[string]any {
 		"ChatAttachmentTreeEnabled":   state.AttachmentTreeEnabled,
 		"ChatWorkspaceTreeURL":        consoleChatWorkspaceTreePath,
 		"ChatWorkspaceFileURL":        consoleChatWorkspaceFilePath,
+		"ChatWorkspaceDownloadURL":    consoleChatWorkspaceDownloadPath,
 		"ChatWorkspaceUploadURL":      consoleChatWorkspaceUploadPath,
 		"ChatWorkspaceUploadMaxBytes": consoleChatWorkspaceMaxUploadBytes,
 		"ChatWorkspaceDirectoryURL":   consoleChatWorkspaceDirectoryPath,
+		"ChatWorkspaceCopyURL":        consoleChatWorkspaceCopyPath,
+		"ChatWorkspaceRenameURL":      consoleChatWorkspaceRenamePath,
+		"ChatWorkspaceDeleteURL":      consoleChatWorkspaceDeletePath,
 		"ChatMessages":                state.Messages,
 		"ChatPresets":                 state.Presets,
 		"SelectedChatRoute":           state.SelectedRoute,
@@ -414,59 +420,13 @@ func consoleChatAllowedModelSlot(raw string) (string, bool) {
 	if normalized == "" {
 		return "", false
 	}
-	for _, exact := range consoleChatAllowedExactModels {
-		if normalized == exact || strings.HasSuffix(normalized, "/"+exact) {
-			return exact, true
-		}
+	if normalized == "gpt-image-2" || strings.HasSuffix(normalized, "/gpt-image-2") {
+		return "gpt-image-2", true
+	}
+	if normalized == "chatgpt-image-2" || strings.HasSuffix(normalized, "/chatgpt-image-2") {
+		return "gpt-image-2", true
 	}
 	return "", false
-}
-
-func consoleChatRouteSlot(route domain.ModelRoute) (string, bool) {
-	if slot, ok := consoleChatAllowedModelSlot(route.PublicName); ok {
-		return slot, true
-	}
-	return consoleChatAllowedModelSlot(route.UpstreamModel)
-}
-
-func consoleChatRouteSlotPriority(route domain.ModelRoute, slot string) int {
-	publicName := strings.ToLower(strings.TrimSpace(route.PublicName))
-	upstreamModel := strings.ToLower(strings.TrimSpace(route.UpstreamModel))
-	switch {
-	case publicName == slot:
-		return 0
-	case upstreamModel == slot:
-		return 1
-	case strings.HasSuffix(publicName, "/"+slot):
-		return 2
-	case strings.HasSuffix(upstreamModel, "/"+slot):
-		return 3
-	default:
-		return 4
-	}
-}
-
-func shouldPreferConsoleChatRoute(candidate, current domain.ModelRoute, slot string) bool {
-	candidatePriority := consoleChatRouteSlotPriority(candidate, slot)
-	currentPriority := consoleChatRouteSlotPriority(current, slot)
-	if candidatePriority != currentPriority {
-		return candidatePriority < currentPriority
-	}
-	candidateName := strings.TrimSpace(candidate.PublicName)
-	currentName := strings.TrimSpace(current.PublicName)
-	if len(candidateName) != len(currentName) {
-		return len(candidateName) < len(currentName)
-	}
-	if candidate.Priority != current.Priority {
-		return candidate.Priority < current.Priority
-	}
-	if candidate.Weight != current.Weight {
-		return candidate.Weight > current.Weight
-	}
-	if candidateName != currentName {
-		return candidateName < currentName
-	}
-	return strings.TrimSpace(candidate.ProviderID) < strings.TrimSpace(current.ProviderID)
 }
 
 func parseConsoleChatMessages(r *http.Request, locale string, cfg artifacts.Config) []consoleChatMessageView {
@@ -507,18 +467,9 @@ func consoleChatRoutes(routes []domain.ModelRoute, providers []domain.Provider) 
 	for _, provider := range providers {
 		providerByID[provider.ID] = provider
 	}
-
-	type selectedConsoleChatRoute struct {
-		route domain.ModelRoute
-		view  consoleChatRouteView
-	}
-	selected := make(map[string]selectedConsoleChatRoute, len(consoleChatAllowedExactModels))
+	views := make([]consoleChatRouteView, 0, len(routes))
 	for _, route := range routes {
 		if strings.TrimSpace(route.PublicName) == "" || !route.Enabled {
-			continue
-		}
-		slot, ok := consoleChatRouteSlot(route)
-		if !ok {
 			continue
 		}
 		provider, ok := providerByID[route.ProviderID]
@@ -532,28 +483,24 @@ func consoleChatRoutes(routes []domain.ModelRoute, providers []domain.Provider) 
 		if protocol == "" {
 			continue
 		}
-		candidate := selectedConsoleChatRoute{route: route, view: consoleChatRouteView{
+		views = append(views, consoleChatRouteView{
 			PublicName:       route.PublicName,
 			ProviderID:       provider.ID,
 			ProviderName:     firstNonEmpty(strings.TrimSpace(provider.Name), provider.ID),
 			UpstreamModel:    firstNonEmpty(route.UpstreamModel, route.PublicName),
 			Protocol:         protocol,
 			ReasoningEfforts: consoleChatRouteReasoningEfforts(route, provider),
-		}}
-		current, exists := selected[slot]
-		if exists && !shouldPreferConsoleChatRoute(route, current.route, slot) {
-			continue
-		}
-		selected[slot] = candidate
+		})
 	}
-	views := make([]consoleChatRouteView, 0, len(selected))
-	for _, slot := range consoleChatAllowedExactModels {
-		candidate, ok := selected[slot]
-		if !ok {
-			continue
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].PublicName != views[j].PublicName {
+			return views[i].PublicName < views[j].PublicName
 		}
-		views = append(views, candidate.view)
-	}
+		if views[i].ProviderID != views[j].ProviderID {
+			return views[i].ProviderID < views[j].ProviderID
+		}
+		return views[i].UpstreamModel < views[j].UpstreamModel
+	})
 	return views
 }
 
@@ -564,7 +511,105 @@ func findConsoleChatRoute(routes []consoleChatRouteView, publicName string) (con
 			return route, true
 		}
 	}
+	requestedSlot, ok := consoleChatAllowedModelSlot(publicName)
+	if !ok {
+		return consoleChatRouteView{}, false
+	}
+	for _, route := range routes {
+		if routeSlot, routeOK := consoleChatAllowedModelSlot(route.PublicName); routeOK && routeSlot == requestedSlot {
+			return route, true
+		}
+		if routeSlot, routeOK := consoleChatAllowedModelSlot(route.UpstreamModel); routeOK && routeSlot == requestedSlot {
+			return route, true
+		}
+	}
 	return consoleChatRouteView{}, false
+}
+
+func consoleChatFilterRoutesByAllowedModels(routes []consoleChatRouteView, allowedModels []string) []consoleChatRouteView {
+	if len(allowedModels) == 0 {
+		return routes
+	}
+	expanded := consoleChatExpandAllowedModels(allowedModels)
+	allowedSet := make(map[string]struct{}, len(expanded))
+	for _, model := range expanded {
+		trimmed := strings.TrimSpace(model)
+		if trimmed == "" {
+			continue
+		}
+		allowedSet[trimmed] = struct{}{}
+	}
+	if len(allowedSet) == 0 {
+		return nil
+	}
+	filtered := make([]consoleChatRouteView, 0, len(routes))
+	for _, route := range routes {
+		candidates := []string{strings.TrimSpace(route.PublicName), strings.TrimSpace(route.UpstreamModel)}
+		matched := false
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			if _, ok := allowedSet[candidate]; ok {
+				matched = true
+				break
+			}
+			for _, alias := range consoleChatAllowedModelAliases(candidate) {
+				if _, ok := allowedSet[strings.TrimSpace(alias)]; ok {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
+		}
+		if matched {
+			filtered = append(filtered, route)
+		}
+	}
+	return filtered
+}
+
+func (handler *Handler) consoleChatEffectiveAllowedModels(ctx context.Context, userID string, environment string) ([]string, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+	workerID := consoleChatEnvironmentWorkerID(environment)
+	accounts, err := handler.store.ListCloudAgentAccounts(ctx, userID, workerID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	for _, account := range accounts {
+		credential := strings.TrimSpace(account.Credential)
+		if credential == "" {
+			continue
+		}
+		key, err := handler.store.FindAPIKeyByHash(ctx, auth.HashAPIKey(credential))
+		if errors.Is(err, storage.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !auth.APIKeyActive(key, now) {
+			continue
+		}
+		reconciledAllowedModels := consoleChatExpandAllowedModels(key.AllowedModels)
+		if !consoleChatSameStringSet(reconciledAllowedModels, key.AllowedModels) {
+			key.AllowedModels = reconciledAllowedModels
+			if err := handler.store.CreateAPIKey(ctx, key); err != nil {
+				return nil, err
+			}
+		}
+		return reconciledAllowedModels, nil
+	}
+	if strings.TrimSpace(workerID) != "" {
+		return handler.consoleChatEffectiveAllowedModels(ctx, userID, consoleChatEnvironmentLocal)
+	}
+	return nil, nil
 }
 
 func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (consoleChatPageState, error) {
@@ -616,6 +661,11 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 		state.Messages = cloneConsoleChatMessages(activeSession.Messages)
 	}
 	state.Form.Environment = normalizeConsoleChatEnvironmentValue(state.Form.Environment, state.EnvironmentOptions)
+	if allowedModels, err := handler.consoleChatEffectiveAllowedModels(ctx, userID, state.Form.Environment); err != nil {
+		return consoleChatPageState{}, err
+	} else {
+		state.Routes = consoleChatFilterRoutesByAllowedModels(state.Routes, allowedModels)
+	}
 	if state.Form.PublicName == "" && len(state.Routes) > 0 {
 		state.Form.PublicName = state.Routes[0].PublicName
 	}
@@ -624,6 +674,7 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 	}
 	if selected, ok := findConsoleChatRoute(state.Routes, state.Form.PublicName); ok {
 		state.SelectedRoute = selected
+		state.Form.PublicName = selected.PublicName
 		state.Form.ReasoningEffort = consoleChatNormalizeReasoningEffort(selected.ReasoningEfforts, state.Form.ReasoningEffort)
 	} else {
 		state.Form.ReasoningEffort = ""

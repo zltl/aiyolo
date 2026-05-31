@@ -87,6 +87,7 @@
     let lastCloseMessage = "";
     let resizeObserver = null;
     let windowResizeHandler = null;
+    let pendingInputs = [];
 
     const fitTerminal = () => {
       if (disposed) {
@@ -110,6 +111,23 @@
 
     const sendResize = () => {
       send({ type: "resize", cols: term.cols || 120, rows: term.rows || 32 });
+    };
+
+    const sendInput = (data) => {
+      if (disposed) {
+        return false;
+      }
+      const value = String(data || "");
+      if (value === "") {
+        return false;
+      }
+      if (socket instanceof WebSocket && socket.readyState === WebSocket.OPEN) {
+        send({ type: "input", data: value });
+      } else {
+        pendingInputs.push(value);
+      }
+      term.focus();
+      return true;
     };
 
     const connect = (connectOptions = {}) => {
@@ -148,6 +166,7 @@
           return;
         }
         sendResize();
+        pendingInputs.splice(0).forEach((data) => send({ type: "input", data }));
         term.focus();
       });
       nextSocket.addEventListener("message", (event) => {
@@ -319,6 +338,7 @@
       connect,
       close,
       clear,
+      sendInput,
       dispose,
       refresh,
       focus: () => term.focus(),

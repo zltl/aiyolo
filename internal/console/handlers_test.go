@@ -588,6 +588,208 @@ func TestConsoleRotateAndDisableAPIKey(t *testing.T) {
 	}
 }
 
+func TestConsoleUpdateAPIKey(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	loginForm := url.Values{"email": {"admin@example.com"}, "password": {"password"}}
+	response, err := client.PostForm(server.URL+"/console/login", loginForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("login status=%d", response.StatusCode)
+	}
+	var session *http.Cookie
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "aiyolo_console" {
+			session = cookie
+		}
+	}
+	if session == nil {
+		t.Fatal("session cookie missing")
+	}
+
+	createForm := url.Values{"name": {"editable key"}, "kind": {"live"}}
+	createRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/api-keys", strings.NewReader(createForm.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	createRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createRequest.AddCookie(session)
+	created, err := client.Do(createRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer created.Body.Close()
+	if created.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(created.Body)
+		t.Fatalf("create status=%d body=%s", created.StatusCode, body)
+	}
+
+	keys, err := store.ListAPIKeys(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+	target := keys[0]
+
+	updateForm := url.Values{
+		"name":               {"edited key"},
+		"allowed_protocols":  {"openai,anthropic"},
+		"allowed_models":     {"gpt-5.4,gpt-image-2"},
+		"rpm_limit":          {"120"},
+		"tpm_limit":          {"34000"},
+		"concurrent_limit":   {"5"},
+		"daily_budget_cents": {"8000"},
+		"monthly_budget_cents": {"120000"},
+	}
+	updateRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/api-keys/"+target.ID+"/update", strings.NewReader(updateForm.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	updateRequest.AddCookie(session)
+	updated, err := client.Do(updateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer updated.Body.Close()
+	if updated.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(updated.Body)
+		t.Fatalf("update status=%d body=%s", updated.StatusCode, body)
+	}
+	body, _ := io.ReadAll(updated.Body)
+	if !strings.Contains(string(body), "API 密钥已更新") {
+		t.Fatalf("update notice missing: %s", body)
+	}
+	if !strings.Contains(string(body), "编辑 API 密钥") {
+		t.Fatalf("update should render api key edit page: %s", body)
+	}
+
+	keys, err = store.ListAPIKeys(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key after update, got %d", len(keys))
+	}
+	key := keys[0]
+	if key.ID != target.ID || key.KeyHash != target.KeyHash || key.Prefix != target.Prefix {
+		t.Fatalf("update should keep identity/hash/prefix unchanged: before=%+v after=%+v", target, key)
+	}
+	if key.Name != "edited key" || key.RPMLimit != 120 || key.TPMLimit != 34000 || key.ConcurrentLimit != 5 || key.DailyBudgetCents != 8000 || key.MonthlyBudgetCents != 120000 {
+		t.Fatalf("unexpected updated limits: %+v", key)
+	}
+	if strings.Join(key.AllowedProtocols, ",") != "openai,anthropic" {
+		t.Fatalf("unexpected allowed protocols: %+v", key.AllowedProtocols)
+	}
+	if strings.Join(key.AllowedModels, ",") != "gpt-5.4,gpt-image-2" {
+		t.Fatalf("unexpected allowed models: %+v", key.AllowedModels)
+	}
+}
+
+func TestConsoleAPIKeyEditPageShowsModelHints(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	loginForm := url.Values{"email": {"admin@example.com"}, "password": {"password"}}
+	response, err := client.PostForm(server.URL+"/console/login", loginForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("login status=%d", response.StatusCode)
+	}
+	var session *http.Cookie
+	for _, cookie := range response.Cookies() {
+		if cookie.Name == "aiyolo_console" {
+			session = cookie
+		}
+	}
+	if session == nil {
+		t.Fatal("session cookie missing")
+	}
+
+	createForm := url.Values{"name": {"edit hint key"}, "kind": {"live"}, "allowed_models": {"custom/model-alpha"}}
+	createRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/api-keys", strings.NewReader(createForm.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	createRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createRequest.AddCookie(session)
+	created, err := client.Do(createRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer created.Body.Close()
+	if created.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(created.Body)
+		t.Fatalf("create status=%d body=%s", created.StatusCode, body)
+	}
+
+	keys, err := store.ListAPIKeys(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+
+	editRequest, err := http.NewRequest(http.MethodGet, server.URL+"/console/api-keys/"+keys[0].ID+"/edit", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editRequest.AddCookie(session)
+	editResponse, err := client.Do(editRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer editResponse.Body.Close()
+	if editResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(editResponse.Body)
+		t.Fatalf("edit page status=%d body=%s", editResponse.StatusCode, body)
+	}
+	body, _ := io.ReadAll(editResponse.Body)
+	html := string(body)
+	if !strings.Contains(html, "编辑 API 密钥") {
+		t.Fatalf("edit page heading missing: %s", html)
+	}
+	if !strings.Contains(html, `datalist id="api-key-edit-model-options"`) {
+		t.Fatalf("model hints datalist missing: %s", html)
+	}
+	if !strings.Contains(html, `<option value="gpt-5.4"></option>`) {
+		t.Fatalf("route alias hint missing: %s", html)
+	}
+	if !strings.Contains(html, `<option value="custom/model-alpha"></option>`) {
+		t.Fatalf("saved model hint missing: %s", html)
+	}
+}
+
 func TestConsoleOAuthLoginAfterSavingSettings(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
@@ -2664,7 +2866,7 @@ func TestConsoleChatStreamEndpointEmitsErrorEventWithPartialOutput(t *testing.T)
 	}
 }
 
-func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
+func TestConsoleChatPageShowsAllCompatibleEnabledRoutesWithoutAPIKeyFilter(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
 		t.Fatal(err)
@@ -2714,27 +2916,13 @@ func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
 	defer pageResponse.Body.Close()
 	pageBody, _ := io.ReadAll(pageResponse.Body)
 	pageHTML := string(pageBody)
-	if strings.Contains(pageHTML, "claude-sonnet-4-5") {
-		t.Fatalf("non-curated anthropic route should be filtered out of chat page: %s", pageHTML)
-	}
-	if strings.Contains(pageHTML, "gpt-4.1-mini") {
-		t.Fatalf("non-curated route should be filtered out of chat page: %s", pageHTML)
-	}
-	if strings.Contains(pageHTML, "google/gemini-3-flash-preview") {
-		t.Fatalf("legacy gemini flash route should be filtered out of chat page: %s", pageHTML)
-	}
-	if strings.Contains(pageHTML, "chatgpt-image-2") {
-		t.Fatalf("image route should be filtered out of chat page: %s", pageHTML)
-	}
-	for _, expected := range []string{"deepseek-v4-pro", "gpt-5.4", "claude-opus-4.7", "claude-sonnet-4.6", "gpt-5.5"} {
+	for _, expected := range []string{"claude-sonnet", "claude-opus-4.7", "claude-sonnet-4.6", "deepseek-v4-flash", "deepseek-v4-pro", "gpt-5.4", "gpt-5.5", "gpt-5.5-pro", "gemini-3-flash", "gemini-3.1-pro-preview", "chatgpt-image-2", "gpt-4.1-mini"} {
 		if !strings.Contains(pageHTML, expected) {
-			t.Fatalf("expected curated model slot %q in chat page: %s", expected, pageHTML)
+			t.Fatalf("expected compatible route %q in chat page: %s", expected, pageHTML)
 		}
 	}
-	for _, unexpected := range []string{"gpt-5.5-pro", "gemini-3.1-pro-preview"} {
-		if strings.Contains(pageHTML, unexpected) {
-			t.Fatalf("unexpected curated model slot %q in chat page: %s", unexpected, pageHTML)
-		}
+	if !strings.Contains(pageHTML, `value="chatgpt-image-2" checked`) {
+		t.Fatalf("expected chatgpt-image-2 to be the default selected route: %s", pageHTML)
 	}
 	if strings.Contains(pageHTML, "帮我总结当前 public model 对应的上游路由和潜在故障点") {
 		t.Fatalf("starter prompt cards should be removed from chat page: %s", pageHTML)
@@ -2754,26 +2942,8 @@ func TestConsoleChatPageShowsCuratedModelSlotsOnly(t *testing.T) {
 	if !strings.Contains(pageHTML, `data-chat-attachment-upload-enabled="false"`) {
 		t.Fatalf("chat page should surface disabled attachment upload state: %s", pageHTML)
 	}
-	if !strings.Contains(pageHTML, `value="deepseek-v4-pro" checked`) {
-		t.Fatalf("expected deepseek-v4-pro to be the default selected route: %s", pageHTML)
-	}
-	if !strings.Contains(pageHTML, `name="chat_reasoning_effort"`) {
-		t.Fatalf("expected reasoning effort selector for deepseek-v4-pro: %s", pageHTML)
-	}
 	if !strings.Contains(pageHTML, `data-chat-reasoning-efforts="high,max"`) {
-		t.Fatalf("expected deepseek reasoning effort metadata in chat page: %s", pageHTML)
-	}
-	if !strings.Contains(pageHTML, `reasoning_effort · default`) || !strings.Contains(pageHTML, `reasoning_effort=high`) || !strings.Contains(pageHTML, `reasoning_effort=max`) {
-		t.Fatalf("expected raw DeepSeek reasoning labels in chat page: %s", pageHTML)
-	}
-	if strings.Contains(pageHTML, `value="deepseek-v4-flash" checked`) {
-		t.Fatalf("deepseek-v4-flash should not win over deepseek-v4-pro: %s", pageHTML)
-	}
-	if strings.Contains(pageHTML, `value="deepseek-v4-flash"`) && strings.Contains(pageHTML, `value="deepseek-v4-pro"`) {
-		t.Fatalf("chat page should show only one deepseek v4 slot: %s", pageHTML)
-	}
-	if strings.Contains(pageHTML, `value="claude-sonnet"`) {
-		t.Fatalf("claude route input should not be rendered in chat page: %s", pageHTML)
+		t.Fatalf("expected DeepSeek reasoning effort metadata in chat page: %s", pageHTML)
 	}
 }
 

@@ -45,28 +45,32 @@ type consoleChatAttachmentObjectReader interface {
 }
 
 type Handler struct {
-	cfg                            Config
-	store                          storage.Store
-	tmpl                           *template.Template
-	cloudAgentRuns                 *consoleCloudAgentRunRegistry
-	chatShells                     *consoleChatShellRegistry
-	newChatAttachmentPublisher     func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error)
-	newChatAttachmentReader        func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error)
-	newChatAttachmentCatalogReader func(cfg artifacts.Config) (artifacts.CatalogReader, error)
-	probeWorker                    func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (workerops.ProbeResult, error)
-	buildWorkerBootstrap           func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan
-	executeWorkerBootstrap         func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error)
-	verifyWorkerBootstrap          func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error)
-	ensureCloudAgent               func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error)
-	openCloudAgentShell            func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error)
-	runCloudAgentCommand           func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, script string) (string, error)
-	listCloudAgentWorkspaceTree    func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceTree, error)
-	readCloudAgentWorkspaceFile    func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceFile, error)
-	writeCloudAgentWorkspaceFile   func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content string) (workerops.CloudAgentWorkspaceFile, error)
-	createCloudAgentWorkspaceFile  func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content string, mkdirP bool) (workerops.CloudAgentWorkspaceFile, error)
-	uploadCloudAgentWorkspaceFile  func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content []byte, mkdirP bool, overwrite bool) (workerops.CloudAgentWorkspaceFile, error)
-	createCloudAgentWorkspaceDir   func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, mkdirP bool) (workerops.CloudAgentWorkspaceDirectory, error)
-	runCloudAgentChat              func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error)
+	cfg                             Config
+	store                           storage.Store
+	tmpl                            *template.Template
+	cloudAgentRuns                  *consoleCloudAgentRunRegistry
+	chatShells                      *consoleChatShellRegistry
+	newChatAttachmentPublisher      func(cfg artifacts.Config) (consoleChatAttachmentPublisher, error)
+	newChatAttachmentReader         func(cfg artifacts.Config) (consoleChatAttachmentObjectReader, error)
+	newChatAttachmentCatalogReader  func(cfg artifacts.Config) (artifacts.CatalogReader, error)
+	probeWorker                     func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile) (workerops.ProbeResult, error)
+	buildWorkerBootstrap            func(worker domain.WorkerServer, disks []domain.WorkerDataDisk, proxy domain.ProxyProfile) workerops.BootstrapPlan
+	executeWorkerBootstrap          func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error)
+	verifyWorkerBootstrap           func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error)
+	ensureCloudAgent                func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error)
+	openCloudAgentShell             func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error)
+	runCloudAgentCommand            func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, script string) (string, error)
+	listCloudAgentWorkspaceTree     func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceTree, error)
+	readCloudAgentWorkspaceFile     func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceFile, error)
+	downloadCloudAgentWorkspaceFile func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceDownload, error)
+	writeCloudAgentWorkspaceFile    func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content string) (workerops.CloudAgentWorkspaceFile, error)
+	createCloudAgentWorkspaceFile   func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content string, mkdirP bool) (workerops.CloudAgentWorkspaceFile, error)
+	uploadCloudAgentWorkspaceFile   func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, content []byte, mkdirP bool, overwrite bool) (workerops.CloudAgentWorkspaceFile, error)
+	createCloudAgentWorkspaceDir    func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string, mkdirP bool) (workerops.CloudAgentWorkspaceDirectory, error)
+	copyCloudAgentWorkspacePath     func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, oldPath string, newPath string) (workerops.CloudAgentWorkspaceCopy, error)
+	renameCloudAgentWorkspacePath   func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, oldPath string, newPath string) (workerops.CloudAgentWorkspaceRename, error)
+	deleteCloudAgentWorkspacePath   func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceDelete, error)
+	runCloudAgentChat               func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error)
 }
 
 func NewHandler(cfg Config, store storage.Store) *Handler {
@@ -85,7 +89,7 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 		return artifacts.NewObjectReader(cfg)
 	}, newChatAttachmentCatalogReader: func(cfg artifacts.Config) (artifacts.CatalogReader, error) {
 		return artifacts.NewCatalogReader(cfg)
-	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentCommand: workerops.RunCloudAgentCommand, listCloudAgentWorkspaceTree: workerops.ListCloudAgentWorkspaceTree, readCloudAgentWorkspaceFile: workerops.ReadCloudAgentWorkspaceFile, writeCloudAgentWorkspaceFile: workerops.WriteCloudAgentWorkspaceFile, createCloudAgentWorkspaceFile: workerops.CreateCloudAgentWorkspaceFile, uploadCloudAgentWorkspaceFile: workerops.UploadCloudAgentWorkspaceFile, createCloudAgentWorkspaceDir: workerops.CreateCloudAgentWorkspaceDirectory, runCloudAgentChat: runConsoleCloudAgentChat}
+	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentCommand: workerops.RunCloudAgentCommand, listCloudAgentWorkspaceTree: workerops.ListCloudAgentWorkspaceTree, readCloudAgentWorkspaceFile: workerops.ReadCloudAgentWorkspaceFile, downloadCloudAgentWorkspaceFile: workerops.DownloadCloudAgentWorkspaceFile, writeCloudAgentWorkspaceFile: workerops.WriteCloudAgentWorkspaceFile, createCloudAgentWorkspaceFile: workerops.CreateCloudAgentWorkspaceFile, uploadCloudAgentWorkspaceFile: workerops.UploadCloudAgentWorkspaceFile, createCloudAgentWorkspaceDir: workerops.CreateCloudAgentWorkspaceDirectory, copyCloudAgentWorkspacePath: workerops.CopyCloudAgentWorkspacePath, renameCloudAgentWorkspacePath: workerops.RenameCloudAgentWorkspacePath, deleteCloudAgentWorkspacePath: workerops.DeleteCloudAgentWorkspacePath, runCloudAgentChat: runConsoleCloudAgentChat}
 }
 
 func (handler *Handler) Routes() http.Handler {
@@ -110,9 +114,13 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Get("/chat/attachments/tree", handler.chatAttachmentTree)
 		protected.Get("/chat/workspace/tree", handler.chatWorkspaceTree)
 		protected.Get("/chat/workspace/file", handler.chatWorkspaceFile)
+		protected.Get("/chat/workspace/download", handler.downloadChatWorkspaceFile)
 		protected.Post("/chat/workspace/file", handler.saveChatWorkspaceFile)
 		protected.Post("/chat/workspace/upload", handler.uploadChatWorkspaceFile)
 		protected.Post("/chat/workspace/directory", handler.createChatWorkspaceDirectory)
+		protected.Post("/chat/workspace/copy", handler.copyChatWorkspacePath)
+		protected.Post("/chat/workspace/rename", handler.renameChatWorkspacePath)
+		protected.Delete("/chat/workspace/path", handler.deleteChatWorkspacePath)
 		protected.Post("/chat/environment/ensure", handler.chatEnvironmentEnsure)
 		protected.Post("/chat/session", handler.saveChatSession)
 		protected.Delete("/chat/session/{sessionID}", handler.deleteChatSession)
@@ -123,7 +131,9 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Post("/logout", handler.logout)
 		protected.Get("/usage", handler.usage)
 		protected.Get("/api-keys", handler.apiKeys)
+		protected.Get("/api-keys/{keyID}/edit", handler.editAPIKey)
 		protected.Post("/api-keys", handler.createAPIKey)
+		protected.Post("/api-keys/{keyID}/update", handler.updateAPIKey)
 		protected.Post("/api-keys/{keyID}/rotate", handler.rotateAPIKey)
 		protected.Post("/api-keys/{keyID}/disable", handler.disableAPIKey)
 		protected.Get("/providers", handler.providers)
@@ -241,6 +251,10 @@ func (handler *Handler) apiKeys(w http.ResponseWriter, r *http.Request) {
 	handler.renderAPIKeysPage(w, r, "", "")
 }
 
+func (handler *Handler) editAPIKey(w http.ResponseWriter, r *http.Request) {
+	handler.renderAPIKeyEditPage(w, r, chi.URLParam(r, "keyID"), "")
+}
+
 func (handler *Handler) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -299,6 +313,35 @@ func (handler *Handler) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	handler.renderAPIKeysPage(w, r, clear, handler.requestText(r, "API 密钥已轮换", "API key rotated"))
 	return
+}
+
+func (handler *Handler) updateAPIKey(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	key, err := handler.apiKeyByID(r.Context(), chi.URLParam(r, "keyID"))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	key.Name = formDefault(r, "name", key.Name)
+	key.AllowedProtocols = splitCSV(r.FormValue("allowed_protocols"))
+	key.AllowedModels = splitCSV(r.FormValue("allowed_models"))
+	key.RPMLimit = formInt(r, "rpm_limit", key.RPMLimit)
+	key.TPMLimit = formInt(r, "tpm_limit", key.TPMLimit)
+	key.ConcurrentLimit = formInt(r, "concurrent_limit", key.ConcurrentLimit)
+	key.DailyBudgetCents = int64(formInt(r, "daily_budget_cents", int(key.DailyBudgetCents)))
+	key.MonthlyBudgetCents = int64(formInt(r, "monthly_budget_cents", int(key.MonthlyBudgetCents)))
+	if err := handler.store.CreateAPIKey(r.Context(), key); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	handler.renderAPIKeyEditPage(w, r, key.ID, handler.requestText(r, "API 密钥已更新", "API key updated"))
 }
 
 func (handler *Handler) disableAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -766,6 +809,42 @@ func (handler *Handler) apiKeysPageData(ctx context.Context, createdKey string, 
 	return map[string]any{"Title": "API Keys", "Keys": keys, "CreatedKey": createdKey, "ConfiguredProtocols": configuredProtocols(providers), "RouteAliases": routeAliases(routes), "Notice": notice}, nil
 }
 
+func apiKeyModelHints(routeAliases []string, saved []string) []string {
+	values := make([]string, 0, len(routeAliases)+len(saved))
+	seen := make(map[string]struct{}, len(routeAliases)+len(saved))
+	for _, value := range routeAliases {
+		values = appendUniqueString(values, seen, value)
+	}
+	for _, value := range saved {
+		values = appendUniqueString(values, seen, value)
+	}
+	return values
+}
+
+func (handler *Handler) apiKeyEditPageData(ctx context.Context, keyID string, notice string) (map[string]any, error) {
+	key, err := handler.apiKeyByID(ctx, keyID)
+	if err != nil {
+		return nil, err
+	}
+	routes, err := handler.store.ListModelRoutes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	providers, err := handler.store.ListProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	routeNames := routeAliases(routes)
+	return map[string]any{
+		"Title":               "API Keys",
+		"APIKey":              key,
+		"ConfiguredProtocols": configuredProtocols(providers),
+		"RouteAliases":        routeNames,
+		"ModelHints":          apiKeyModelHints(routeNames, key.AllowedModels),
+		"Notice":              notice,
+	}, nil
+}
+
 func (handler *Handler) renderAPIKeysPage(w http.ResponseWriter, r *http.Request, createdKey string, notice string) {
 	data, err := handler.apiKeysPageData(r.Context(), createdKey, notice)
 	if err != nil {
@@ -777,6 +856,19 @@ func (handler *Handler) renderAPIKeysPage(w http.ResponseWriter, r *http.Request
 		return
 	}
 	handler.render(w, r, "apiKeys", data)
+}
+
+func (handler *Handler) renderAPIKeyEditPage(w http.ResponseWriter, r *http.Request, keyID string, notice string) {
+	data, err := handler.apiKeyEditPageData(r.Context(), keyID, notice)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	handler.render(w, r, "apiKeyEdit", data)
 }
 
 func (handler *Handler) apiKeyByID(ctx context.Context, keyID string) (domain.APIKey, error) {
