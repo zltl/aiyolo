@@ -13,7 +13,7 @@ if [[ -n "${AIYOLO_CHROME_EXTRA_FLAGS:-}" ]]; then
 fi
 
 export DISPLAY="$display"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-aiyolo}"
 
 exec google-chrome-stable \
   --no-sandbox \

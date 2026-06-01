@@ -2,8 +2,8 @@ FROM scratch
 
 ADD rootfs.tar.gz /
 
-ARG UBUNTU_RELEASE=noble
-ARG APT_MIRROR=https://mirrors.aliyun.com/ubuntu
+ARG UBUNTU_RELEASE=resolute
+ARG APT_MIRROR=http://mirrors.aliyun.com/ubuntu
 ARG CHROME_DEB_URL=https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 ARG AIYOLO_ASS_SHA256=
 ARG AIYOLO_CLOUD_AGENT_BUILD_REVISION=dev
@@ -14,10 +14,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV DISPLAY=:99
-ENV XDG_RUNTIME_DIR=/tmp/runtime-root
+ENV XDG_RUNTIME_DIR=/tmp/runtime-aiyolo
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
 ENV AIYOLO_CLAUDE_USER=aiyolo
 ENV AIYOLO_CLAUDE_HOME=/workspace
+ENV HOME=/workspace
+ENV USER=aiyolo
 
 LABEL aiyolo.ass.sha256="${AIYOLO_ASS_SHA256}"
 LABEL aiyolo.cloud_agent.build_revision="${AIYOLO_CLOUD_AGENT_BUILD_REVISION}"
@@ -35,18 +37,24 @@ RUN set -eux; \
       printf 'deb %s %s main restricted universe multiverse\ndeb %s %s-updates main restricted universe multiverse\ndeb %s %s-security main restricted universe multiverse\n' \
         "${mirror}" "${UBUNTU_RELEASE}" "${mirror}" "${UBUNTU_RELEASE}" "${mirror}" "${UBUNTU_RELEASE}" >/etc/apt/sources.list; \
     fi; \
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+      sed -i -E "s|^URIs: .*$|URIs: ${mirror}|g" /etc/apt/sources.list.d/ubuntu.sources; \
+    fi; \
     printf 'Acquire::Retries "5";\nAcquire::http::No-Cache "true";\nAcquire::https::No-Cache "true";\n' >/etc/apt/apt.conf.d/99aiyolo
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash bash-completion build-essential ca-certificates cmake curl dbus-x11 dnsutils fd-find file fluxbox fonts-dejavu-core fonts-liberation \
     gdb git git-lfs gnupg htop iproute2 iptables iputils-ping jq less libasound2t64 libatk-bridge2.0-0 libcups2t64 libgbm1 libgtk-3-0 \
-    libnss3 libu2f-udev libxss1 libxtst6 lsof mesa-utils nano net-tools netcat-openbsd openssh-client pkg-config procps psmisc python3 python3-dev python3-pip \
+    libnss3 libxss1 libxtst6 lsof mesa-utils nano net-tools netcat-openbsd openssh-client pkg-config procps psmisc python3 python3-dev python3-pip \
     python3-venv ripgrep rsync strace sudo tini tmux tree tzdata uidmap unzip vim wget x11vnc xauth xdg-utils xterm xvfb zip \
     docker.io fuse-overlayfs \
  && groupadd --gid 1000 "${AIYOLO_CLAUDE_USER}" \
  && useradd --uid 1000 --gid 1000 --create-home --home-dir "${AIYOLO_CLAUDE_HOME}" --shell /bin/bash "${AIYOLO_CLAUDE_USER}" \
- && install -d -o "${AIYOLO_CLAUDE_USER}" -g "${AIYOLO_CLAUDE_USER}" -m 0755 /workspace "${AIYOLO_CLAUDE_HOME}/.claude" \
- && install -d -m 0755 /etc/aiyolo /usr/local/bin /tmp/runtime-root /opt \
+ && usermod -aG sudo,docker "${AIYOLO_CLAUDE_USER}" \
+ && install -d -o "${AIYOLO_CLAUDE_USER}" -g "${AIYOLO_CLAUDE_USER}" -m 0755 /workspace "${AIYOLO_CLAUDE_HOME}/.claude" "${XDG_RUNTIME_DIR}" /run/aiyolo \
+ && install -d -m 0755 /etc/aiyolo /etc/sudoers.d /usr/local/bin /opt \
+ && printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${AIYOLO_CLAUDE_USER}" >/etc/sudoers.d/aiyolo \
+ && chmod 0440 /etc/sudoers.d/aiyolo \
  && if [ -x /usr/bin/fdfind ]; then ln -sf /usr/bin/fdfind /usr/local/bin/fd; fi \
  && wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
  && apt-get install -y /tmp/google-chrome.deb \
@@ -83,6 +91,8 @@ RUN chmod 0755 \
     /usr/local/bin/aiyolo-cloud-agent-start-services
 
 WORKDIR /workspace
+
+USER ${AIYOLO_CLAUDE_USER}
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/aiyolo-cloud-agent-entrypoint"]
 CMD ["/usr/local/bin/aiyolo-cloud-agent-start-services"]

@@ -6,8 +6,8 @@ APP ?= aiyolo-gateway
 BUILD_DIR ?= bin
 CONFIG ?= aiyolo.private.yaml
 VERSION ?= dev
-CLOUD_AGENT_USER ?= local-user
-CLOUD_AGENT_IMAGE ?= aiyolo/local-cloud-agent:ubuntu-24.04-v3
+CLOUD_AGENT_USER ?= aiyolo
+CLOUD_AGENT_IMAGE ?= aiyolo/local-cloud-agent:ubuntu-26.04-v4
 
 .PHONY: help fmt tidy test build build-aiyolo-windows build-ass-release build-release-artifacts ass-release publish-release-artifacts bootstrap-local-worker build-cloud-agent-image run-cloud-agent-local run clean
 
@@ -24,7 +24,7 @@ help:
 	  '  make ass-release       Upload linux-amd64/aiyolo-ass release aliases + checksums to the configured OSS/S3 bucket' \
 	  '  make publish-release-artifacts Upload release artifacts, including aiyolo-ass, to the configured OSS/S3 bucket' \
 	  '  make bootstrap-local-worker Bootstrap the current Ubuntu host as a local worker' \
-	  '  make build-cloud-agent-image Build the local Ubuntu 24.04 cloud-agent image with desktop/Chrome/DinD' \
+	  '  make build-cloud-agent-image Build the local Ubuntu 26.04 cloud-agent image with desktop/Chrome/DinD' \
 	  '  make run-cloud-agent-local Launch a local cloud-agent container for CLOUD_AGENT_USER' \
 	  '  make run               Run gateway' \
 	  '  make clean             Remove build output'
@@ -72,7 +72,7 @@ bootstrap-local-worker:
 	@./scripts/worker-bootstrap-local.sh
 
 build-cloud-agent-image:
-	@./scripts/build-cloud-agent-image-ubuntu-24.04.sh
+	@./scripts/build-cloud-agent-image-ubuntu-26.04.sh
 
 run-cloud-agent-local:
 	@AIYOLO_CLOUD_AGENT_USER_ID='$(CLOUD_AGENT_USER)' AIYOLO_CLOUD_AGENT_IMAGE='$(CLOUD_AGENT_IMAGE)' ./scripts/run-cloud-agent-local.sh

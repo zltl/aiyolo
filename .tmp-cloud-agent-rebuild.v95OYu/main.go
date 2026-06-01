@@ -19,7 +19,7 @@ import (
   workerops "github.com/zltl/aiyolo/internal/workers"
 )
 
-const cloudAgentImage = "aiyolo/local-cloud-agent:ubuntu-24.04"
+const cloudAgentImage = "aiyolo/local-cloud-agent:ubuntu-26.04-v4"
 
 func main() {
   ctx := context.Background()

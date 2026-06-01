@@ -141,6 +141,19 @@ func TestCloudAgentDockerfileInstallsASS(t *testing.T) {
 	}
 }
 
+func TestCloudAgentDockerfileDefaultsToAiyoloWithPasswordlessSudo(t *testing.T) {
+	dockerfile := cloudAgentAssetString("cloud-agent/Dockerfile")
+	if !strings.Contains(dockerfile, "USER ${AIYOLO_CLAUDE_USER}") {
+		t.Fatalf("cloud-agent Dockerfile should default to the aiyolo user: %s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "NOPASSWD:ALL") || !strings.Contains(dockerfile, "/etc/sudoers.d/aiyolo") {
+		t.Fatalf("cloud-agent Dockerfile should allow passwordless sudo for aiyolo: %s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "usermod -aG sudo,docker") {
+		t.Fatalf("cloud-agent Dockerfile should add aiyolo to sudo and docker groups: %s", dockerfile)
+	}
+}
+
 func TestCloudAgentDockerfileInstallsCommonDeveloperTools(t *testing.T) {
 	dockerfile := cloudAgentAssetString("cloud-agent/Dockerfile")
 	requiredPackages := []string{
@@ -478,6 +491,12 @@ func TestBuildCloudAgentRemoteCommandWaitsForReusedContainerRuntime(t *testing.T
 	if !strings.Contains(script, `wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "test -S ${AIYOLO_ASS_SOCKET_PATH:-/run/aiyolo/ass.sock}"], 30)`) {
 		t.Fatalf("remote script should wait for the aiyolo-ass socket: %s", script)
 	}
+	if !strings.Contains(script, `timeout=probe_timeout`) || !strings.Contains(script, `subprocess.TimeoutExpired`) {
+		t.Fatalf("remote runtime readiness probes should have per-attempt timeouts: %s", script)
+	}
+	if strings.Contains(script, `"docker info >/dev/null 2>&1"`) || strings.Contains(script, `nc -z 127.0.0.1 {payload['container_chrome_port']}`) {
+		t.Fatalf("remote runtime readiness should not block chat startup on dockerd or Chrome: %s", script)
+	}
 }
 
 func TestBuildCloudAgentRemoteCommandDownloadsPublishedASSBinary(t *testing.T) {
@@ -494,5 +513,28 @@ func TestBuildCloudAgentRemoteCommandDownloadsPublishedASSBinary(t *testing.T) {
 	}
 	if !strings.Contains(script, cloudAgentImageASSSHA256Label) || !strings.Contains(script, cloudAgentImageBuildRevisionLabel) {
 		t.Fatalf("remote script should compare and propagate image/container revision labels: %s", script)
+	}
+}
+
+func TestBuildCloudAgentRemoteCommandReusesExistingImage(t *testing.T) {
+	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user","image":"aiyolo/local-cloud-agent:ubuntu-26.04-v4"}`)
+
+	if !strings.Contains(script, `inspect_image()
+        return`) {
+		t.Fatalf("remote script should reuse an existing image without rebuilding on label drift: %s", script)
+	}
+	if strings.Contains(script, `image_matches(inspected)`) {
+		t.Fatalf("remote script should not rebuild an existing image only because labels differ: %s", script)
+	}
+}
+
+func TestBuildCloudAgentRemoteCommandResolvesUbuntuBaseWithoutPatchVersion(t *testing.T) {
+	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user"}`)
+
+	if !strings.Contains(script, `(?:\.[0-9]+)?-base-amd64`) {
+		t.Fatalf("remote script should support Ubuntu base archives without patch versions: %s", script)
+	}
+	if !strings.Contains(script, `rootfs_index_url + "/SHA256SUMS"`) {
+		t.Fatalf("remote script should fall back to SHA256SUMS when the index page does not list files: %s", script)
 	}
 }

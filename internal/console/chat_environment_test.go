@@ -736,6 +736,105 @@ func TestStreamChatEnsuresCloudAgentEnvironment(t *testing.T) {
 	}
 }
 
+func TestStreamChatReusesRecentlyEnsuredCloudAgentEnvironment(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+
+	var ensureCalls atomic.Int32
+	var cloudChatCalls atomic.Int32
+	handler := NewHandler(Config{
+		SecretKey:          "test-secret",
+		AdminEmail:         "admin@example.com",
+		AdminPassword:      "password",
+		CodexPublicBaseURL: "https://aiyolo.quant67.com",
+	}, store)
+	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, _ domain.WorkerSSHKey, _ domain.ProxyProfile, _ workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
+		ensureCalls.Add(1)
+		return workerops.CloudAgentInstance{
+			Status:        domain.CloudAgentStatusRunning,
+			WorkerID:      worker.ID,
+			ContainerID:   "container-stream-reuse",
+			ContainerName: "aiyolo-cloud-agent-worker-0",
+			WorkspacePath: "/srv/aiyolo/workspace/session-stream-reuse",
+		}, nil
+	}
+	handler.runCloudAgentChat = func(_ context.Context, _ domain.WorkerServer, _ domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error) {
+		cloudChatCalls.Add(1)
+		if account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-stream-reuse" {
+			t.Fatalf("unexpected cloud chat target account=%+v session=%+v", account, session)
+		}
+		if err := request.OnDelta("reused cloud agent"); err != nil {
+			return consoleChatExecution{}, err
+		}
+		return consoleChatExecution{
+			Result: consoleChatResultView{
+				PublicName:    request.PublicName,
+				ProviderID:    "cloud-agent:worker-0",
+				ProviderName:  "Claude Code · worker-0",
+				UpstreamModel: request.PublicName,
+				Output:        "reused cloud agent",
+				ResponseID:    "claude-session-stream-reuse",
+			},
+			StatusCode: http.StatusOK,
+			Usage:      domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK, Stream: true},
+		}, nil
+	}
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ensureResponse, err := client.PostForm(server.URL+"/console/chat/environment/ensure", url.Values{
+		"chat_client_session_id": {"session-stream-reuse"},
+		"chat_public_name":       {"gpt-5.4"},
+		"chat_environment":       {consoleChatEnvironmentValue("worker-0")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ensureResponse.Body.Close()
+	if ensureResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(ensureResponse.Body)
+		t.Fatalf("ensure status=%d body=%s", ensureResponse.StatusCode, body)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(url.Values{
+		"chat_client_session_id": {"session-stream-reuse"},
+		"chat_public_name":       {"gpt-5.4"},
+		"chat_environment":       {consoleChatEnvironmentValue("worker-0")},
+		"chat_draft":             {"reuse the already started cloud agent"},
+	}.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("stream status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	if text := string(body); !strings.Contains(text, "reused cloud agent") || !strings.Contains(text, `"type":"done"`) {
+		t.Fatalf("unexpected stream body: %s", text)
+	}
+	if ensureCalls.Load() != 1 || cloudChatCalls.Load() != 1 {
+		t.Fatalf("ensure_calls=%d cloud_chat_calls=%d", ensureCalls.Load(), cloudChatCalls.Load())
+	}
+}
+
 func TestSendChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {

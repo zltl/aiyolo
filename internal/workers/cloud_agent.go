@@ -19,13 +19,13 @@ import (
 )
 
 const (
-	defaultCloudAgentImage               = "aiyolo/local-cloud-agent:ubuntu-24.04-v3"
+	defaultCloudAgentImage               = "aiyolo/local-cloud-agent:ubuntu-26.04-v4"
 	defaultCloudAgentWorkspaceSubdir     = "cloud-agents"
-	defaultCloudAgentUbuntuRelease       = "noble"
-	defaultCloudAgentUbuntuSeries        = "24.04"
-	defaultCloudAgentUbuntuMirror        = "https://mirrors.aliyun.com/ubuntu"
+	defaultCloudAgentUbuntuRelease       = "resolute"
+	defaultCloudAgentUbuntuSeries        = "26.04"
+	defaultCloudAgentUbuntuMirror        = "http://mirrors.aliyun.com/ubuntu"
 	defaultCloudAgentChromeDEBURL        = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
-	defaultCloudAgentRootFSIndexURL      = "https://mirrors.aliyun.com/ubuntu-cdimage/ubuntu-base/releases/24.04/release"
+	defaultCloudAgentRootFSIndexURL      = "https://mirrors.aliyun.com/ubuntu-cdimage/ubuntu-base/releases/26.04/release"
 	defaultCloudAgentContainerVNCPort    = 5900
 	defaultCloudAgentContainerChromePort = 9222
 	defaultCloudAgentContainerASSPort    = 17811

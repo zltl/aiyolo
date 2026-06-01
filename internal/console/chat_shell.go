@@ -329,7 +329,9 @@ func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request
 	chatSessionID := firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(strings.TrimPrefix(cloudSession.ID, "chat-env-")))
 	terminalID := consoleChatShellTerminalID(r)
 	registryKey := consoleChatShellRegistryKey(currentConsoleSessionSubject(r, handler.cfg.SecretKey), chatSessionID, terminalID)
-	shellSession, err := handler.chatShells.getOrCreate(registryKey, func(ctx context.Context) (workerops.InteractiveShell, error) {
+	openCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	shellSession, err := handler.chatShells.getOrCreate(openCtx, registryKey, func(ctx context.Context) (workerops.InteractiveShell, error) {
 		return handler.openCloudAgentShell(ctx, worker, key, account, cloudSession, consoleChatShellCols, consoleChatShellRows)
 	})
 	if err != nil {

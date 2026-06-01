@@ -16,18 +16,18 @@ need_cmd sha256sum
 need_cmd sort
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-template_context="${repo_root}/docker/cloud-agent/ubuntu-24.04"
+template_context="${repo_root}/docker/cloud-agent/ubuntu-26.04"
 build_context="$(mktemp -d -t aiyolo-cloud-agent-build-XXXXXX)"
-release="${AIYOLO_CLOUD_AGENT_UBUNTU_RELEASE:-noble}"
-series="${AIYOLO_CLOUD_AGENT_UBUNTU_SERIES:-24.04}"
-mirror="${AIYOLO_CLOUD_AGENT_UBUNTU_MIRROR:-https://mirrors.aliyun.com/ubuntu}"
+release="${AIYOLO_CLOUD_AGENT_UBUNTU_RELEASE:-resolute}"
+series="${AIYOLO_CLOUD_AGENT_UBUNTU_SERIES:-26.04}"
+mirror="${AIYOLO_CLOUD_AGENT_UBUNTU_MIRROR:-http://mirrors.aliyun.com/ubuntu}"
 chrome_deb_url="${AIYOLO_CLOUD_AGENT_CHROME_DEB_URL:-https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb}"
 rootfs_index_url="${AIYOLO_CLOUD_AGENT_ROOTFS_INDEX_URL:-https://mirrors.aliyun.com/ubuntu-cdimage/ubuntu-base/releases/${series}/release}"
 rootfs_url="${AIYOLO_CLOUD_AGENT_ROOTFS_URL:-}"
 ass_download_url="${AIYOLO_ASS_DOWNLOAD_URL:-}"
 ass_sha256_url="${AIYOLO_ASS_SHA256_URL:-}"
 ass_sha256="${AIYOLO_ASS_SHA256:-}"
-image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-24.04-v3}"
+image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-26.04-v4}"
 skip_proxy_env="${AIYOLO_CLOUD_AGENT_SKIP_PROXY_ENV:-0}"
 buildkit="${DOCKER_BUILDKIT:-1}"
 
@@ -46,6 +46,10 @@ run_with_optional_proxy() {
   env "${proxy_env[@]}" "$@"
 }
 
+proxy_env_value() {
+  printenv "$1" 2>/dev/null || true
+}
+
 resolve_ass_sha256() {
   local resolved="${ass_sha256}"
   if [[ -z "${resolved}" && -n "${ass_sha256_url}" ]]; then
@@ -59,12 +63,30 @@ if [[ -n "${ass_download_url}" && -z "${ass_sha256_url}" ]]; then
 fi
 
 if [[ -z "${rootfs_url}" ]]; then
+  series_pattern="${series//./\\.}"
   rootfs_name="$(
     run_with_optional_proxy curl -fsSL "${rootfs_index_url%/}/" \
-      | grep -o "ubuntu-base-${series//./\\.}\\.[0-9]\\+-base-amd64.tar.gz" \
+      | grep -Eo "ubuntu-base-${series_pattern}(\\.[0-9]+)?-base-amd64\\.tar\\.gz" \
       | sort -V \
-      | tail -n 1
+      | tail -n 1 \
+      || true
   )"
+  if [[ -z "${rootfs_name}" ]]; then
+    rootfs_name="$(
+      run_with_optional_proxy curl -fsSL "${rootfs_index_url%/}/SHA256SUMS" \
+        | awk -v series="${series}" '
+          {
+            filename = $2
+            sub(/^\*/, "", filename)
+            pattern = "^ubuntu-base-" series "(\\.[0-9]+)?-base-amd64\\.tar\\.gz$"
+            if (filename ~ pattern) print filename
+          }
+        ' \
+        | sort -V \
+        | tail -n 1 \
+        || true
+    )"
+  fi
   if [[ -z "${rootfs_name}" ]]; then
     echo "无法从 ${rootfs_index_url} 解析 Ubuntu Base rootfs 包名" >&2
     exit 1
@@ -98,7 +120,7 @@ else
   exit 1
 fi
 chmod 0755 "${build_context}/aiyolo-ass"
-build_revision="sha256:$(printf '%s\n%s\n%s\n%s\n' "${release}" "${mirror}" "${chrome_deb_url}" "${ass_sha256}" | sha256sum | cut -d' ' -f1)"
+build_revision="sha256:$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "${release}" "${series}" "${mirror}" "${chrome_deb_url}" "${rootfs_index_url}" "${rootfs_url}" "${ass_sha256}" | sha256sum | cut -d' ' -f1)"
 run_with_optional_proxy curl -fL --retry 5 --connect-timeout 30 "${rootfs_url}" -o "${build_context}/rootfs.tar.gz"
 
 build_args=(
@@ -114,8 +136,9 @@ build_args=(
 
 if [[ "${skip_proxy_env}" != "1" ]]; then
   for key in ALL_PROXY HTTP_PROXY HTTPS_PROXY NO_PROXY all_proxy http_proxy https_proxy no_proxy; do
-    if [[ -n "${!key-}" ]]; then
-      build_args+=(--build-arg "${key}=${!key}")
+    value="$(proxy_env_value "${key}")"
+    if [[ -n "${value}" ]]; then
+      build_args+=(--build-arg "${key}=${value}")
     fi
   done
 fi

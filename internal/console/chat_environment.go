@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	consoleChatEnvironmentLocal            = "local"
-	consoleChatEnvironmentCloudAgentPrefix = "cloud-agent:"
+	consoleChatEnvironmentLocal             = "local"
+	consoleChatEnvironmentCloudAgentPrefix  = "cloud-agent:"
+	consoleChatEnvironmentEnsureReuseWindow = 2 * time.Minute
 )
 
 var consoleChatPreferredImageModels = []string{
@@ -356,6 +357,53 @@ func (handler *Handler) closeConsoleChatEnvironmentSession(ctx context.Context, 
 	return handler.store.UpsertCloudAgentSession(ctx, session)
 }
 
+func consoleChatCloudAgentRecent(timestamp *time.Time, now time.Time) bool {
+	if timestamp == nil {
+		return false
+	}
+	age := now.Sub(timestamp.UTC())
+	return age <= consoleChatEnvironmentEnsureReuseWindow
+}
+
+func consoleChatCloudAgentReusable(account domain.CloudAgentAccount, workerID string, publicName string, now time.Time) bool {
+	if strings.TrimSpace(account.WorkerID) != strings.TrimSpace(workerID) {
+		return false
+	}
+	if strings.TrimSpace(account.Status) != domain.CloudAgentStatusRunning {
+		return false
+	}
+	if strings.TrimSpace(account.ContainerName) == "" || strings.TrimSpace(account.LastError) != "" {
+		return false
+	}
+	if currentModel := strings.TrimSpace(account.ModelPublicName); currentModel != "" && strings.TrimSpace(publicName) != "" && currentModel != strings.TrimSpace(publicName) {
+		return false
+	}
+	return consoleChatCloudAgentRecent(account.LastSeenAt, now) || consoleChatCloudAgentRecent(account.LastStartedAt, now)
+}
+
+func (handler *Handler) reusableConsoleChatCloudAgentEnvironment(ctx context.Context, userID string, chatSessionID string, workerID string, publicName string, account domain.CloudAgentAccount, now time.Time) (domain.CloudAgentAccount, domain.CloudAgentSession, bool, error) {
+	if !consoleChatCloudAgentReusable(account, workerID, publicName, now) {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, nil
+	}
+	cloudSession, err := handler.store.GetCloudAgentSession(ctx, strings.TrimSpace(userID), consoleChatCloudAgentSessionID(chatSessionID))
+	if errors.Is(err, storage.ErrNotFound) {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, nil
+	}
+	if err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, err
+	}
+	if strings.TrimSpace(cloudSession.Status) != domain.CloudAgentSessionStatusActive ||
+		strings.TrimSpace(cloudSession.WorkerID) != strings.TrimSpace(workerID) ||
+		strings.TrimSpace(cloudSession.AccountID) != strings.TrimSpace(account.ID) {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, nil
+	}
+	account.LastSeenAt = &now
+	if err := handler.store.UpsertCloudAgentAccount(ctx, account); err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, err
+	}
+	return account, cloudSession, true, nil
+}
+
 func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *http.Request, state *consoleChatPageState) (consoleChatEnvironmentEnsureResponse, error) {
 	if state == nil {
 		return consoleChatEnvironmentEnsureResponse{}, fmt.Errorf("chat state is required")
@@ -407,6 +455,19 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 		}
 	} else if err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
+	}
+	if account, cloudSession, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, userID, state.Form.ClientSessionID, workerID, state.Form.PublicName, account, now); err != nil {
+		return consoleChatEnvironmentEnsureResponse{}, err
+	} else if ok {
+		return consoleChatEnvironmentEnsureResponse{
+			Status:        "ready",
+			SessionID:     state.Form.ClientSessionID,
+			Environment:   state.Form.Environment,
+			WorkerID:      workerID,
+			ContainerName: account.ContainerName,
+			WorkspacePath: firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath)),
+			Notice:        handler.requestText(r, "Cloud Agent 已在 "+workerID+" 就绪", "Cloud agent is ready on "+workerID),
+		}, nil
 	}
 	account.WorkerID = workerID
 	account, err = handler.ensureConsoleChatEnvironmentAPIKey(ctx, userID, workerID, account, allowedModels, now)

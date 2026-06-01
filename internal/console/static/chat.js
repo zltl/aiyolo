@@ -1505,7 +1505,7 @@
       shellButton.title = hiddenShellReady
         ? t("显示 Claude Code 终端", "Show the Claude Code terminal")
         : shellOpenInFlight
-        ? t("正在打开 Claude Code 终端…", "Opening the Claude Code terminal…")
+        ? t("正在打开 cloud agent…", "Opening the cloud agent…")
         : canOpenShell
         ? t("打开 Claude Code 终端", "Open the Claude Code terminal")
         : t("切换到 Cloud Agent 环境后即可打开 Claude Code 终端", "Switch to a Cloud Agent environment to open the Claude Code terminal");
@@ -3027,14 +3027,14 @@
     }
     if (shellOpenInFlight) {
       if (showProgress) {
-        setInlineFlash(root, t("Claude Code 终端正在打开…", "The Claude Code terminal is already opening…"), false);
+        setInlineFlash(root, t("cloud agent 正在打开…", "The cloud agent is already opening…"), false);
       }
       return;
     }
     shellOpenInFlight = true;
     updateComposerControls(form);
     if (showProgress) {
-      setInlineFlash(root, t("正在打开 Claude Code 终端…", "Opening the Claude Code terminal…"), false);
+      setInlineFlash(root, t("正在打开 cloud agent…", "Opening the cloud agent…"), false);
     }
     try {
       const terminalID = String(options.terminalID || makeID("terminal")).trim();

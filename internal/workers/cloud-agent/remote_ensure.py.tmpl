@@ -69,13 +69,19 @@ def write_workspace_files():
 def resolve_rootfs_url():
     if payload.get("rootfs_url"):
         return payload["rootfs_url"].strip()
-    with urllib.request.urlopen(payload["rootfs_index_url"], timeout=30) as response:
+    rootfs_index_url = payload["rootfs_index_url"].rstrip("/")
+    rootfs_pattern = r"ubuntu-base-" + re.escape(payload["ubuntu_series"]) + r"(?:\.[0-9]+)?-base-amd64\.tar\.gz"
+    with urllib.request.urlopen(rootfs_index_url + "/", timeout=30) as response:
         index_html = response.read().decode("utf-8", errors="replace")
-    matches = re.findall(r"ubuntu-base-" + re.escape(payload["ubuntu_series"]) + r"\.[0-9]+-base-amd64\.tar\.gz", index_html)
+    matches = re.findall(rootfs_pattern, index_html)
+    if not matches:
+        with urllib.request.urlopen(rootfs_index_url + "/SHA256SUMS", timeout=30) as response:
+            sums = response.read().decode("utf-8", errors="replace")
+        matches = re.findall(rootfs_pattern, sums)
     if not matches:
         raise SystemExit("unable to resolve Ubuntu base rootfs from index")
     matches = sorted(set(matches), key=lambda item: tuple(int(part) for part in re.findall(r"\d+", item)))
-    return payload["rootfs_index_url"].rstrip("/") + "/" + matches[-1]
+    return rootfs_index_url + "/" + matches[-1]
 
 
 def inspect_image():
@@ -83,20 +89,10 @@ def inspect_image():
     return json.loads(result.stdout)[0]
 
 
-def image_matches(inspected):
-    labels = inspected.get("Config", {}).get("Labels") or {}
-    if labels.get("aiyolo.cloud_agent.build_revision") != payload.get("build_revision", ""):
-        return False
-    if labels.get("aiyolo.ass.sha256") != payload.get("ass_sha256", ""):
-        return False
-    return True
-
-
 def ensure_image():
     try:
-        inspected = inspect_image()
-        if image_matches(inspected):
-            return
+        inspect_image()
+        return
     except subprocess.CalledProcessError:
         pass
     build_env = os.environ.copy()
@@ -218,11 +214,12 @@ def container_matches(inspected):
 def wait_for(command, timeout_seconds):
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
+        probe_timeout = max(0.1, min(5, deadline - time.time()))
         try:
-            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=probe_timeout)
             return
-        except subprocess.CalledProcessError:
-            time.sleep(1)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            time.sleep(min(1, max(0, deadline - time.time())))
     raise SystemExit("timed out waiting for container service")
 
 
@@ -270,14 +267,10 @@ def acquire_container_lock():
 
 
 def wait_for_container_runtime():
-    if payload.get("enable_display"):
-        wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", f"nc -z 127.0.0.1 {payload['container_vnc_port']}"], 30)
+    # Chat, shell, and workspace APIs only need the ASS control plane; display,
+    # Chrome, and dockerd continue starting inside the already-running container.
     wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "test -S ${AIYOLO_ASS_SOCKET_PATH:-/run/aiyolo/ass.sock}"], 30)
     wait_for_tcp("127.0.0.1", payload["host_ass_port"], 30)
-    if payload.get("enable_dockerd"):
-        wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "docker info >/dev/null 2>&1"], 60)
-    if payload.get("enable_display") and payload.get("auto_start_chrome"):
-        wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", f"nc -z 127.0.0.1 {payload['container_chrome_port']}"], 60)
 
 
 def ensure_container():

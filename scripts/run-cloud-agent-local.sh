@@ -20,11 +20,11 @@ need_cmd rsync
 need_cmd timeout
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-user_id="${AIYOLO_CLOUD_AGENT_USER_ID:-local-user}"
+user_id="${AIYOLO_CLOUD_AGENT_USER_ID:-aiyolo}"
 safe_user="${user_id//@/-}"
 safe_user="${safe_user//[^A-Za-z0-9_-]/-}"
 container_name="${AIYOLO_CLOUD_AGENT_CONTAINER_NAME:-aiyolo-cloud-agent-${safe_user}}"
-image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-24.04-v3}"
+image="${AIYOLO_CLOUD_AGENT_IMAGE:-aiyolo/local-cloud-agent:ubuntu-26.04-v4}"
 workspace_root="${AIYOLO_CLOUD_AGENT_WORKSPACE_ROOT:-/var/lib/aiyolo-agent/cloud-agents/${user_id}/workspace}"
 repo_snapshot_dir="${workspace_root}/aiyolo"
 docker_data_root="${AIYOLO_CLOUD_AGENT_DOCKER_DATA_ROOT:-/var/lib/aiyolo-agent/cloud-agents/${user_id}/docker}"
@@ -40,7 +40,7 @@ docker_storage_driver="${AIYOLO_DOCKER_STORAGE_DRIVER:-vfs}"
 display="${AIYOLO_DISPLAY:-:99}"
 
 if ! docker image inspect "$image" >/dev/null 2>&1; then
-  AIYOLO_CLOUD_AGENT_IMAGE="$image" "$repo_root/scripts/build-cloud-agent-image-ubuntu-24.04.sh"
+  AIYOLO_CLOUD_AGENT_IMAGE="$image" "$repo_root/scripts/build-cloud-agent-image-ubuntu-26.04.sh"
 fi
 
 install -d -m 0755 "$workspace_root" "$repo_snapshot_dir" "$docker_data_root"

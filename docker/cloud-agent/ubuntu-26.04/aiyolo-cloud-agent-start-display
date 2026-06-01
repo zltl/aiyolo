@@ -5,7 +5,7 @@ display="${AIYOLO_DISPLAY:-:99}"
 screen="${AIYOLO_SCREEN:-1440x900x24}"
 vnc_port="${AIYOLO_VNC_PORT:-5900}"
 
-mkdir -p /tmp/.X11-unix "${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
+mkdir -p /tmp/.X11-unix "${XDG_RUNTIME_DIR:-/tmp/runtime-aiyolo}"
 chmod 1777 /tmp/.X11-unix
 rm -f "/tmp/.X11-unix/X${display#:}" "/tmp/.X${display#:}-lock"
 

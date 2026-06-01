@@ -8,12 +8,16 @@ chrome_url="${AIYOLO_CLOUD_AGENT_CHROME_URL:-about:blank}"
 display="${AIYOLO_DISPLAY:-:99}"
 
 declare -a pids=()
+as_root=()
+if [[ "${EUID}" -ne 0 ]]; then
+  as_root=(sudo -n)
+fi
 
 /usr/local/bin/aiyolo-ass >/tmp/aiyolo-ass.log 2>&1 &
 pids+=("$!")
 
 if [[ "$enable_dockerd" == "1" ]]; then
-  /usr/local/bin/aiyolo-cloud-agent-start-docker >/tmp/aiyolo-dockerd.log 2>&1 &
+  "${as_root[@]}" /usr/local/bin/aiyolo-cloud-agent-start-docker >/tmp/aiyolo-dockerd.log 2>&1 &
   pids+=("$!")
 fi
 

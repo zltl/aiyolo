@@ -40,7 +40,7 @@ func consoleChatShellRegistryKey(userID, chatSessionID, terminalID string) strin
 	return strings.TrimSpace(userID) + "\x00" + strings.TrimSpace(chatSessionID) + "\x00" + strings.TrimSpace(terminalID)
 }
 
-func (registry *consoleChatShellRegistry) getOrCreate(key string, open func(context.Context) (workerops.InteractiveShell, error)) (*consoleChatShellSession, error) {
+func (registry *consoleChatShellRegistry) getOrCreate(ctx context.Context, key string, open func(context.Context) (workerops.InteractiveShell, error)) (*consoleChatShellSession, error) {
 	registry.mu.Lock()
 	if existing := registry.sessions[key]; existing != nil && !existing.isDone() {
 		registry.mu.Unlock()
@@ -48,7 +48,7 @@ func (registry *consoleChatShellRegistry) getOrCreate(key string, open func(cont
 	}
 	registry.mu.Unlock()
 
-	shell, err := open(context.Background())
+	shell, err := open(ctx)
 	if err != nil {
 		return nil, err
 	}

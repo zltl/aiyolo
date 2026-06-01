@@ -1,6 +1,6 @@
 {
   "base_os": "ubuntu",
-  "base_version": "24.04",
+  "base_version": "26.04",
   "image_flavor": "local-cloud-agent",
   "features": [
     "build-essential",
@@ -35,6 +35,8 @@
     "docker.io",
     "docker-in-docker",
     "aiyolo-ass",
+    "default-user-aiyolo",
+    "sudo-nopasswd",
     "workspace-volume"
   ]
 }
