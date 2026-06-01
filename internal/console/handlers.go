@@ -109,6 +109,8 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Get("/chat", handler.chat)
 		protected.Post("/chat", handler.sendChat)
 		protected.Get("/chat/shell/ready", handler.chatShellReady)
+		protected.Get("/chat/shell/state", handler.chatShellState)
+		protected.Post("/chat/shell/state", handler.saveChatShellState)
 		protected.Get("/chat/shell", handler.chatShellPage)
 		protected.Handle("/chat/shell/ws", http.HandlerFunc(handler.chatShellSocket))
 		protected.Get("/chat/attachments/tree", handler.chatAttachmentTree)

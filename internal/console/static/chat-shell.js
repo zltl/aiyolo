@@ -130,6 +130,21 @@
       return true;
     };
 
+    const handleOutput = (data) => {
+      const value = String(data || "");
+      if (value === "") {
+        return;
+      }
+      if (typeof options.onOutput === "function") {
+        try {
+          options.onOutput(value);
+        } catch (_error) {
+          // Keep terminal rendering independent from page-level observers.
+        }
+      }
+      term.write(value);
+    };
+
     const connect = (connectOptions = {}) => {
       if (disposed) {
         return false;
@@ -187,7 +202,7 @@
             break;
           case "output":
             if (payload.data) {
-              term.write(String(payload.data));
+              handleOutput(payload.data);
             }
             break;
           case "error": {
@@ -206,7 +221,7 @@
             break;
           default:
             if (payload && payload.data) {
-              term.write(String(payload.data));
+              handleOutput(payload.data);
             }
             break;
         }

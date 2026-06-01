@@ -5405,15 +5405,99 @@ textarea:focus-visible,
   background: var(--chat-vscode-editor);
 }
 
+.chat-editor-tabs-bar {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--chat-vscode-border);
+  background: var(--chat-vscode-tab);
+}
+
 .chat-editor-tabs {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: flex-end;
   gap: 0;
   min-height: 0;
   padding: 0;
-  border-bottom: 1px solid var(--chat-vscode-border);
-  background: var(--chat-vscode-tab);
-  overflow-x: auto;
+  overflow-x: hidden;
+  background: transparent;
+}
+
+.chat-editor-tabs-overflow {
+  flex: 0 0 auto;
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-left: 1px solid var(--chat-vscode-border);
+}
+
+.chat-editor-tabs-more-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-width: 2.2rem;
+  padding: 0 0.5rem;
+  border: 0;
+  background: transparent;
+  color: var(--chat-vscode-muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  letter-spacing: 0.15em;
+  white-space: nowrap;
+}
+
+.chat-editor-tabs-more-btn:hover,
+.chat-editor-tabs-more-btn:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--chat-vscode-text);
+}
+
+.chat-editor-tabs-overflow-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 300;
+  min-width: 14rem;
+  max-width: 28rem;
+  max-height: 50vh;
+  overflow-y: auto;
+  background: var(--chat-vscode-panel);
+  border: 1px solid var(--chat-vscode-border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  padding: 0.25rem 0;
+}
+
+.chat-editor-tabs-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.35rem 0.75rem;
+  border: 0;
+  background: transparent;
+  color: var(--chat-vscode-text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-editor-tabs-overflow-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.chat-editor-tabs-overflow-item.is-active {
+  color: var(--chat-vscode-accent, #4fc3f7);
+}
+
+.chat-editor-tabs-overflow-item .chat-editor-tab-icon {
+  flex: 0 0 auto;
 }
 
 .chat-editor-tab {

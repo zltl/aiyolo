@@ -337,10 +337,10 @@ func (store *PostgresStore) UpsertCloudAgentSession(ctx context.Context, session
 	}
 	normalized.UpdatedAt = now
 	_, err = store.pool.Exec(ctx, `
-INSERT INTO cloud_agent_sessions (user_id, id, worker_id, account_id, agent_type, chat_session_id, workspace_path, status, last_error, created_at, updated_at, closed_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-ON CONFLICT (user_id, id) DO UPDATE SET worker_id = excluded.worker_id, account_id = excluded.account_id, agent_type = excluded.agent_type, chat_session_id = excluded.chat_session_id, workspace_path = excluded.workspace_path, status = excluded.status, last_error = excluded.last_error, updated_at = excluded.updated_at, closed_at = excluded.closed_at`,
-		normalized.UserID, normalized.ID, normalized.WorkerID, normalized.AccountID, normalized.AgentType, normalized.ChatSessionID, normalized.WorkspacePath, normalized.Status, normalized.LastError, normalized.CreatedAt, normalized.UpdatedAt, normalized.ClosedAt)
+INSERT INTO cloud_agent_sessions (user_id, id, worker_id, account_id, agent_type, chat_session_id, workspace_path, shell_state_json, status, last_error, created_at, updated_at, closed_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+ON CONFLICT (user_id, id) DO UPDATE SET worker_id = excluded.worker_id, account_id = excluded.account_id, agent_type = excluded.agent_type, chat_session_id = excluded.chat_session_id, workspace_path = excluded.workspace_path, shell_state_json = excluded.shell_state_json, status = excluded.status, last_error = excluded.last_error, updated_at = excluded.updated_at, closed_at = excluded.closed_at`,
+		normalized.UserID, normalized.ID, normalized.WorkerID, normalized.AccountID, normalized.AgentType, normalized.ChatSessionID, normalized.WorkspacePath, normalized.ShellStateJSON, normalized.Status, normalized.LastError, normalized.CreatedAt, normalized.UpdatedAt, normalized.ClosedAt)
 	return err
 }
 
@@ -351,9 +351,9 @@ func (store *PostgresStore) ListCloudAgentSessions(ctx context.Context, userID s
 	var rows pgx.Rows
 	var err error
 	if strings.TrimSpace(workerID) == "" {
-		rows, err = store.pool.Query(ctx, `SELECT user_id, id, worker_id, account_id, agent_type, chat_session_id, workspace_path, status, last_error, created_at, updated_at, closed_at FROM cloud_agent_sessions WHERE user_id = $1 ORDER BY updated_at DESC, created_at DESC, id ASC LIMIT $2`, strings.TrimSpace(userID), limit)
+		rows, err = store.pool.Query(ctx, `SELECT user_id, id, worker_id, account_id, agent_type, chat_session_id, workspace_path, shell_state_json, status, last_error, created_at, updated_at, closed_at FROM cloud_agent_sessions WHERE user_id = $1 ORDER BY updated_at DESC, created_at DESC, id ASC LIMIT $2`, strings.TrimSpace(userID), limit)
 	} else {
-		rows, err = store.pool.Query(ctx, `SELECT user_id, id, worker_id, account_id, agent_type, chat_session_id, workspace_path, status, last_error, created_at, updated_at, closed_at FROM cloud_agent_sessions WHERE user_id = $1 AND worker_id = $2 ORDER BY updated_at DESC, created_at DESC, id ASC LIMIT $3`, strings.TrimSpace(userID), strings.TrimSpace(workerID), limit)
+		rows, err = store.pool.Query(ctx, `SELECT user_id, id, worker_id, account_id, agent_type, chat_session_id, workspace_path, shell_state_json, status, last_error, created_at, updated_at, closed_at FROM cloud_agent_sessions WHERE user_id = $1 AND worker_id = $2 ORDER BY updated_at DESC, created_at DESC, id ASC LIMIT $3`, strings.TrimSpace(userID), strings.TrimSpace(workerID), limit)
 	}
 	if err != nil {
 		return nil, err
@@ -371,7 +371,7 @@ func (store *PostgresStore) ListCloudAgentSessions(ctx context.Context, userID s
 }
 
 func (store *PostgresStore) GetCloudAgentSession(ctx context.Context, userID string, sessionID string) (domain.CloudAgentSession, error) {
-	row := store.pool.QueryRow(ctx, `SELECT user_id, id, worker_id, account_id, agent_type, chat_session_id, workspace_path, status, last_error, created_at, updated_at, closed_at FROM cloud_agent_sessions WHERE user_id = $1 AND id = $2`, strings.TrimSpace(userID), strings.TrimSpace(sessionID))
+	row := store.pool.QueryRow(ctx, `SELECT user_id, id, worker_id, account_id, agent_type, chat_session_id, workspace_path, shell_state_json, status, last_error, created_at, updated_at, closed_at FROM cloud_agent_sessions WHERE user_id = $1 AND id = $2`, strings.TrimSpace(userID), strings.TrimSpace(sessionID))
 	item, err := scanCloudAgentSession(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.CloudAgentSession{}, ErrNotFound
@@ -439,6 +439,6 @@ func scanWorkerInitJobEvent(scanner interface{ Scan(dest ...any) error }) (domai
 
 func scanCloudAgentSession(scanner interface{ Scan(dest ...any) error }) (domain.CloudAgentSession, error) {
 	var item domain.CloudAgentSession
-	err := scanner.Scan(&item.UserID, &item.ID, &item.WorkerID, &item.AccountID, &item.AgentType, &item.ChatSessionID, &item.WorkspacePath, &item.Status, &item.LastError, &item.CreatedAt, &item.UpdatedAt, &item.ClosedAt)
+	err := scanner.Scan(&item.UserID, &item.ID, &item.WorkerID, &item.AccountID, &item.AgentType, &item.ChatSessionID, &item.WorkspacePath, &item.ShellStateJSON, &item.Status, &item.LastError, &item.CreatedAt, &item.UpdatedAt, &item.ClosedAt)
 	return item, err
 }

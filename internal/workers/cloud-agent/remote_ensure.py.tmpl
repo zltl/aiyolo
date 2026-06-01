@@ -142,20 +142,24 @@ def exact_container_id():
 
 
 def container_summary(inspected):
+    current_env = env_map(inspected)
+    allowed_models = payload.get("allowed_models", [])
+    if current_env.get("AIYOLO_ALLOWED_MODELS"):
+        allowed_models = [item.strip() for item in current_env["AIYOLO_ALLOWED_MODELS"].split(",") if item.strip()]
     summary = {
         "status": "running" if inspected["State"].get("Running") else "stopped",
         "worker_id": payload["worker_id"],
         "container_id": inspected["Id"],
         "container_name": payload["container_name"],
         "image": inspected["Config"].get("Image", payload["image"]),
-        "workspace_root": payload["workspace_root"],
+        "workspace_root": mount_source(inspected, payload["workspace_path"]) or payload["workspace_root"],
         "workspace_path": payload["workspace_path"],
-        "docker_data_root": payload["docker_data_root"],
-        "default_model": payload.get("default_model", ""),
-        "allowed_models": payload.get("allowed_models", []),
-        "console_url": payload.get("open_url", ""),
-        "api_base_url": payload.get("api_base_url", ""),
-        "last_started_at": payload.get("started_at", ""),
+        "docker_data_root": mount_source(inspected, "/var/lib/docker") or payload["docker_data_root"],
+        "default_model": current_env.get("AIYOLO_DEFAULT_MODEL", payload.get("default_model", "")),
+        "allowed_models": allowed_models,
+        "console_url": current_env.get("AIYOLO_CLOUD_AGENT_CHROME_URL", payload.get("open_url", "")),
+        "api_base_url": current_env.get("AIYOLO_API_BASE_URL", payload.get("api_base_url", "")),
+        "last_started_at": inspected.get("State", {}).get("StartedAt") or payload.get("started_at", ""),
     }
     if payload.get("enable_display"):
         summary["vnc"] = f"127.0.0.1:{payload['host_vnc_port']}"
@@ -182,32 +186,27 @@ def mount_source(inspected, destination):
     return ""
 
 
+def label_matches(labels, key, expected):
+    actual = labels.get(key)
+    return actual is None or actual == str(expected)
+
+
 def container_matches(inspected):
     labels = inspected.get("Config", {}).get("Labels") or {}
-    if labels.get("aiyolo.user_id") != payload["user_id"]:
+    if not label_matches(labels, "aiyolo.user_id", payload["user_id"]):
         return False
-    if labels.get("aiyolo.agent_type") != payload["agent_type"]:
+    if not label_matches(labels, "aiyolo.agent_type", payload["agent_type"]):
         return False
-    if labels.get("aiyolo.workspace_path") != payload["workspace_path"]:
+    if not label_matches(labels, "aiyolo.workspace_path", payload["workspace_path"]):
         return False
-    if labels.get("aiyolo.cloud_agent.build_revision") != payload.get("build_revision", ""):
+    if not label_matches(labels, "aiyolo.ass.container_port", payload.get("container_ass_port", "")):
         return False
-    if labels.get("aiyolo.ass.sha256") != payload.get("ass_sha256", ""):
-        return False
-    if labels.get("aiyolo.ass.container_port") != str(payload.get("container_ass_port", "")):
-        return False
-    if labels.get("aiyolo.ass.host_port") != str(payload.get("host_ass_port", "")):
-        return False
-    if inspected.get("Config", {}).get("Image") != payload["image"]:
+    if not label_matches(labels, "aiyolo.ass.host_port", payload.get("host_ass_port", "")):
         return False
     if mount_source(inspected, payload["workspace_path"]) != payload["workspace_root"]:
         return False
     if mount_source(inspected, "/var/lib/docker") != payload["docker_data_root"]:
         return False
-    current_env = env_map(inspected)
-    for key, expected in (payload.get("container_env") or {}).items():
-        if current_env.get(key) != expected:
-            return False
     return True
 
 
@@ -235,29 +234,6 @@ def wait_for_tcp(host, port, timeout_seconds):
     raise SystemExit(f"timed out waiting for TCP service {host}:{port}")
 
 
-def remove_container():
-    deadline = time.time() + 15
-    last_error = ""
-    while time.time() < deadline:
-        if not exact_container_id():
-            return
-        try:
-            run(["docker", "rm", "-f", payload["container_name"]])
-        except subprocess.CalledProcessError as exc:
-            last_error = (exc.stdout or "").strip()
-            if not exact_container_id():
-                return
-            time.sleep(1)
-            continue
-        if not exact_container_id():
-            return
-        time.sleep(0.5)
-    if not exact_container_id():
-        return
-    detail = f": {last_error}" if last_error else ""
-    raise SystemExit(f"failed to remove stale cloud agent container{detail}")
-
-
 def acquire_container_lock():
     lock_name = re.sub(r"[^0-9A-Za-z_.-]", "-", payload["container_name"])
     lock_path = pathlib.Path("/tmp") / f"{lock_name}.lock"
@@ -278,12 +254,17 @@ def ensure_container():
     if existing_id:
         try:
             inspected = inspect_container()
-        except subprocess.CalledProcessError:
-            inspected = None
-        if inspected is not None and inspected.get("State", {}).get("Running") and container_matches(inspected):
-            wait_for_container_runtime()
-            return container_summary(inspect_container())
-        remove_container()
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stdout or "").strip()
+            suffix = f": {detail}" if detail else ""
+            raise SystemExit(f"failed to inspect existing cloud agent container {payload['container_name']}; stop and remove it manually before retrying{suffix}")
+        if not container_matches(inspected):
+            raise SystemExit(f"cloud agent container {payload['container_name']} already exists but does not match the expected user, workspace, or ASS port; stop and remove it manually before starting a replacement")
+        if not inspected.get("State", {}).get("Running"):
+            run(["docker", "start", payload["container_name"]])
+        wait_for_container_runtime()
+        return container_summary(inspect_container())
+    ensure_image()
     args = [
         "docker", "run", "-d",
         "--name", payload["container_name"],
@@ -323,7 +304,6 @@ if __name__ == "__main__":
     write_workspace_files()
     lock_handle = acquire_container_lock()
     try:
-        ensure_image()
         print(json.dumps(ensure_container(), ensure_ascii=True, sort_keys=True))
     finally:
         lock_handle.close()

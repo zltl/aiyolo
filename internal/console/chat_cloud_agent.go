@@ -12,12 +12,14 @@ import (
 )
 
 type consoleCloudAgentChatRequest struct {
-	PublicName  string
-	History     []consoleChatMessageView
-	UserInput   string
-	Attachments []consoleChatAttachmentView
-	Stream      bool
-	OnDelta     func(string) error
+	PublicName                   string
+	History                      []consoleChatMessageView
+	UserInput                    string
+	Attachments                  []consoleChatAttachmentView
+	ShellActiveTerminalID        string
+	ShellCurrentWorkingDirectory string
+	Stream                       bool
+	OnDelta                      func(string) error
 }
 
 type consoleCloudAgentStreamParser struct {
@@ -35,11 +37,12 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 	sessionID := domain.CloudAgentClaudeSessionID(account.UserID, cloudSession.ChatSessionID)
 	parser := &consoleCloudAgentStreamParser{}
 	output, err := workerops.RunCloudAgentClaudeCode(ctx, worker, key, account, cloudSession, workerops.CloudAgentClaudeCodeOptions{
-		SessionID:     sessionID,
-		Prompt:        consoleCloudAgentCurrentPrompt(request.UserInput, request.Attachments),
-		InitialPrompt: consoleCloudAgentInitialPrompt(request.History, request.UserInput, request.Attachments),
-		Model:         publicName,
-		Stream:        request.Stream,
+		SessionID:        sessionID,
+		Prompt:           consoleCloudAgentCurrentPrompt(request.UserInput, request.Attachments),
+		InitialPrompt:    consoleCloudAgentInitialPrompt(request.History, request.UserInput, request.Attachments),
+		Model:            publicName,
+		WorkingDirectory: consoleCloudAgentWorkingDirectory(account, cloudSession, request.ShellActiveTerminalID, request.ShellCurrentWorkingDirectory),
+		Stream:           request.Stream,
 	}, func(chunk []byte) error {
 		if !request.Stream {
 			return nil
@@ -91,6 +94,28 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 	result.StatusCode = 200
 	result.Usage.StatusCode = 200
 	return result, nil
+}
+
+func consoleCloudAgentWorkingDirectory(account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, activeTerminalID string, requestedWorkingDirectory string) string {
+	if workingDirectory := normalizeConsoleChatShellWorkingDirectory(requestedWorkingDirectory); workingDirectory != "" {
+		return workingDirectory
+	}
+	workspacePath := firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
+	state := consoleChatShellStateFromSession(cloudSession, cloudSession.ChatSessionID, account.WorkerID, account.ContainerName, workspacePath)
+	targetTerminalID := normalizeConsoleChatOptionalShellTerminalID(activeTerminalID)
+	if targetTerminalID == "" {
+		targetTerminalID = state.ActiveTerminalID
+	}
+	for _, snapshot := range state.Instances {
+		if snapshot.TerminalID != targetTerminalID {
+			continue
+		}
+		if workingDirectory := normalizeConsoleChatShellWorkingDirectory(firstNonEmpty(snapshot.CurrentWorkingDirectory, snapshot.Meta.CurrentWorkingDirectory)); workingDirectory != "" {
+			return workingDirectory
+		}
+		break
+	}
+	return firstNonEmpty(normalizeConsoleChatShellWorkingDirectory(workspacePath), domain.DefaultCloudAgentWorkspacePath)
 }
 
 func consoleCloudAgentCurrentPrompt(userInput string, attachments []consoleChatAttachmentView) string {

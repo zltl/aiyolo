@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -24,9 +25,11 @@ import (
 const (
 	consoleChatShellPagePath   = "/console/chat/shell"
 	consoleChatShellSocketPath = "/console/chat/shell/ws"
+	consoleChatShellStatePath  = "/console/chat/shell/state"
 	consoleChatShellDefaultID  = "default"
 	consoleChatShellCols       = 120
 	consoleChatShellRows       = 32
+	consoleChatShellStateLimit = 8
 )
 
 type consoleChatShellPageState struct {
@@ -37,6 +40,7 @@ type consoleChatShellPageState struct {
 	WorkspacePath string
 	SocketURL     string
 	ChatURL       string
+	ShellState    consoleChatShellState
 	Error         string
 }
 
@@ -54,15 +58,62 @@ type consoleChatShellSocketEvent struct {
 }
 
 type consoleChatShellReadyResponse struct {
-	Status        string `json:"status"`
-	SessionID     string `json:"sessionId,omitempty"`
-	TerminalID    string `json:"terminalId,omitempty"`
-	Environment   string `json:"environment,omitempty"`
-	WorkerID      string `json:"workerId,omitempty"`
-	ContainerName string `json:"containerName,omitempty"`
-	WorkspacePath string `json:"workspacePath,omitempty"`
-	SocketURL     string `json:"socketUrl,omitempty"`
-	Error         string `json:"error,omitempty"`
+	Status        string                `json:"status"`
+	SessionID     string                `json:"sessionId,omitempty"`
+	TerminalID    string                `json:"terminalId,omitempty"`
+	Environment   string                `json:"environment,omitempty"`
+	WorkerID      string                `json:"workerId,omitempty"`
+	ContainerName string                `json:"containerName,omitempty"`
+	WorkspacePath string                `json:"workspacePath,omitempty"`
+	SocketURL     string                `json:"socketUrl,omitempty"`
+	ShellState    consoleChatShellState `json:"shellState,omitempty"`
+	Error         string                `json:"error,omitempty"`
+}
+
+type consoleChatShellStateResponse struct {
+	Status        string                `json:"status"`
+	SessionID     string                `json:"sessionId,omitempty"`
+	Environment   string                `json:"environment,omitempty"`
+	WorkerID      string                `json:"workerId,omitempty"`
+	ContainerName string                `json:"containerName,omitempty"`
+	WorkspacePath string                `json:"workspacePath,omitempty"`
+	ShellState    consoleChatShellState `json:"shellState"`
+	Error         string                `json:"error,omitempty"`
+}
+
+type consoleChatShellStateRequest struct {
+	SessionID        string                     `json:"sessionID"`
+	ActiveTerminalID string                     `json:"activeTerminalID"`
+	Instances        []consoleChatShellSnapshot `json:"instances"`
+	Hidden           bool                       `json:"hidden"`
+	UpdatedAt        string                     `json:"updatedAt,omitempty"`
+}
+
+type consoleChatShellState struct {
+	ActiveTerminalID string                     `json:"activeTerminalID,omitempty"`
+	Instances        []consoleChatShellSnapshot `json:"instances"`
+	Hidden           bool                       `json:"hidden"`
+	UpdatedAt        string                     `json:"updatedAt,omitempty"`
+}
+
+type consoleChatShellSnapshot struct {
+	TerminalID              string                       `json:"terminalID"`
+	Label                   string                       `json:"label,omitempty"`
+	SessionID               string                       `json:"sessionID"`
+	SocketURL               string                       `json:"socketURL,omitempty"`
+	WorkerID                string                       `json:"workerID,omitempty"`
+	ContainerName           string                       `json:"containerName,omitempty"`
+	WorkspacePath           string                       `json:"workspacePath,omitempty"`
+	CurrentWorkingDirectory string                       `json:"currentWorkingDirectory,omitempty"`
+	Meta                    consoleChatShellSnapshotMeta `json:"meta,omitempty"`
+}
+
+type consoleChatShellSnapshotMeta struct {
+	SessionID               string `json:"sessionID,omitempty"`
+	WorkerID                string `json:"workerID,omitempty"`
+	ContainerName           string `json:"containerName,omitempty"`
+	WorkspacePath           string `json:"workspacePath,omitempty"`
+	CurrentWorkingDirectory string `json:"currentWorkingDirectory,omitempty"`
 }
 
 func (state consoleChatShellPageState) data() map[string]any {
@@ -98,11 +149,124 @@ func consoleChatShellTerminalID(r *http.Request) string {
 	return normalizeConsoleChatShellTerminalID(r.URL.Query().Get("terminal"))
 }
 
+func normalizeConsoleChatOptionalShellTerminalID(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return normalizeConsoleChatShellTerminalID(value)
+}
+
+func normalizeConsoleChatShellWorkingDirectory(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || strings.ContainsAny(trimmed, "\x00\r\n") || !strings.HasPrefix(trimmed, "/") {
+		return ""
+	}
+	return path.Clean(trimmed)
+}
+
+func normalizeConsoleChatShellLabel(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	var builder strings.Builder
+	for _, r := range trimmed {
+		if r == 0 || r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		builder.WriteRune(r)
+		if builder.Len() >= 80 {
+			break
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
 func consoleChatShellSocketURL(chatSessionID, terminalID string) string {
 	query := url.Values{}
 	query.Set("session", strings.TrimSpace(chatSessionID))
 	query.Set("terminal", normalizeConsoleChatShellTerminalID(terminalID))
 	return consoleChatShellSocketPath + "?" + query.Encode()
+}
+
+func consoleChatShellStateFromSession(cloudSession domain.CloudAgentSession, chatSessionID string, workerID string, containerName string, workspacePath string) consoleChatShellState {
+	var state consoleChatShellState
+	if raw := strings.TrimSpace(cloudSession.ShellStateJSON); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &state)
+	}
+	return normalizeConsoleChatShellState(state, chatSessionID, workerID, containerName, workspacePath)
+}
+
+func normalizeConsoleChatShellState(state consoleChatShellState, chatSessionID string, workerID string, containerName string, workspacePath string) consoleChatShellState {
+	chatSessionID = strings.TrimSpace(chatSessionID)
+	workerID = strings.TrimSpace(workerID)
+	containerName = strings.TrimSpace(containerName)
+	workspacePath = strings.TrimSpace(workspacePath)
+	seen := make(map[string]struct{}, len(state.Instances))
+	instances := make([]consoleChatShellSnapshot, 0, len(state.Instances))
+	for _, snapshot := range state.Instances {
+		terminalID := normalizeConsoleChatShellTerminalID(snapshot.TerminalID)
+		if _, ok := seen[terminalID]; ok {
+			continue
+		}
+		seen[terminalID] = struct{}{}
+		currentWorkingDirectory := normalizeConsoleChatShellWorkingDirectory(firstNonEmpty(snapshot.CurrentWorkingDirectory, snapshot.Meta.CurrentWorkingDirectory))
+		if currentWorkingDirectory == "" {
+			currentWorkingDirectory = normalizeConsoleChatShellWorkingDirectory(workspacePath)
+		}
+		instances = append(instances, consoleChatShellSnapshot{
+			TerminalID:              terminalID,
+			Label:                   normalizeConsoleChatShellLabel(snapshot.Label),
+			SessionID:               chatSessionID,
+			SocketURL:               consoleChatShellSocketURL(chatSessionID, terminalID),
+			WorkerID:                workerID,
+			ContainerName:           containerName,
+			WorkspacePath:           workspacePath,
+			CurrentWorkingDirectory: currentWorkingDirectory,
+			Meta: consoleChatShellSnapshotMeta{
+				SessionID:               chatSessionID,
+				WorkerID:                workerID,
+				ContainerName:           containerName,
+				WorkspacePath:           workspacePath,
+				CurrentWorkingDirectory: currentWorkingDirectory,
+			},
+		})
+		if len(instances) >= consoleChatShellStateLimit {
+			break
+		}
+	}
+	activeTerminalID := normalizeConsoleChatShellTerminalID(state.ActiveTerminalID)
+	foundActive := false
+	for _, snapshot := range instances {
+		if snapshot.TerminalID == activeTerminalID {
+			foundActive = true
+			break
+		}
+	}
+	if !foundActive {
+		if len(instances) > 0 {
+			activeTerminalID = instances[0].TerminalID
+		} else {
+			activeTerminalID = ""
+		}
+	}
+	return consoleChatShellState{
+		ActiveTerminalID: activeTerminalID,
+		Instances:        instances,
+		Hidden:           state.Hidden,
+		UpdatedAt:        strings.TrimSpace(state.UpdatedAt),
+	}
+}
+
+func consoleChatShellStatePayload(state consoleChatShellState) string {
+	if len(state.Instances) == 0 {
+		return ""
+	}
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return ""
+	}
+	return string(payload)
 }
 
 func (handler *Handler) resolveConsoleChatCloudAgentTarget(ctx context.Context, r *http.Request, chatSessionID string) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
@@ -254,14 +418,16 @@ func (handler *Handler) chatShellPageStateForSession(ctx context.Context, r *htt
 	}
 	chatSessionID = firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(chatSessionID))
 	terminalID := consoleChatShellTerminalID(r)
+	workspacePath := firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
 	return consoleChatShellPageState{
 		SessionID:     chatSessionID,
 		TerminalID:    terminalID,
 		WorkerID:      worker.ID,
 		ContainerName: account.ContainerName,
-		WorkspacePath: firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath),
+		WorkspacePath: workspacePath,
 		SocketURL:     consoleChatShellSocketURL(chatSessionID, terminalID),
 		ChatURL:       consoleChatEndpoint + "?session=" + url.QueryEscape(chatSessionID),
+		ShellState:    consoleChatShellStateFromSession(cloudSession, chatSessionID, worker.ID, account.ContainerName, workspacePath),
 	}, nil
 }
 
@@ -303,6 +469,74 @@ func (handler *Handler) chatShellReady(w http.ResponseWriter, r *http.Request) {
 		ContainerName: state.ContainerName,
 		WorkspacePath: state.WorkspacePath,
 		SocketURL:     state.SocketURL,
+		ShellState:    state.ShellState,
+	})
+}
+
+func (handler *Handler) chatShellState(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session"))
+	state, err := handler.chatShellPageStateForSession(r.Context(), r, sessionID)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(consoleChatShellErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatShellStateResponse{
+			Status:    "error",
+			SessionID: sessionID,
+			Error:     err.Error(),
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(consoleChatShellStateResponse{
+		Status:        "ready",
+		SessionID:     state.SessionID,
+		Environment:   consoleChatEnvironmentValue(state.WorkerID),
+		WorkerID:      state.WorkerID,
+		ContainerName: state.ContainerName,
+		WorkspacePath: state.WorkspacePath,
+		ShellState:    state.ShellState,
+	})
+}
+
+func (handler *Handler) saveChatShellState(w http.ResponseWriter, r *http.Request) {
+	var request consoleChatShellStateRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&request); err != nil {
+		http.Error(w, handler.requestText(r, "Shell 状态数据无效。", "Shell state payload is invalid."), http.StatusBadRequest)
+		return
+	}
+	sessionID := firstNonEmpty(strings.TrimSpace(request.SessionID), strings.TrimSpace(r.URL.Query().Get("session")))
+	worker, _, account, cloudSession, err := handler.resolveConsoleChatCloudAgentTarget(r.Context(), r, sessionID)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(consoleChatShellErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatShellStateResponse{
+			Status:    "error",
+			SessionID: sessionID,
+			Error:     err.Error(),
+		})
+		return
+	}
+	chatSessionID := firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(sessionID), strings.TrimSpace(strings.TrimPrefix(cloudSession.ID, "chat-env-")))
+	workspacePath := firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
+	nextState := normalizeConsoleChatShellState(consoleChatShellState{
+		ActiveTerminalID: request.ActiveTerminalID,
+		Instances:        request.Instances,
+		Hidden:           request.Hidden,
+		UpdatedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	}, chatSessionID, worker.ID, account.ContainerName, workspacePath)
+	cloudSession.ShellStateJSON = consoleChatShellStatePayload(nextState)
+	if err := handler.store.UpsertCloudAgentSession(r.Context(), cloudSession); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(consoleChatShellStateResponse{Status: "error", SessionID: chatSessionID, Error: err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(consoleChatShellStateResponse{
+		Status:        "ready",
+		SessionID:     chatSessionID,
+		Environment:   consoleChatEnvironmentValue(worker.ID),
+		WorkerID:      worker.ID,
+		ContainerName: account.ContainerName,
+		WorkspacePath: workspacePath,
+		ShellState:    nextState,
 	})
 }
 
@@ -329,8 +563,7 @@ func (handler *Handler) serveChatShellSocket(ws *websocket.Conn, r *http.Request
 	chatSessionID := firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(strings.TrimPrefix(cloudSession.ID, "chat-env-")))
 	terminalID := consoleChatShellTerminalID(r)
 	registryKey := consoleChatShellRegistryKey(currentConsoleSessionSubject(r, handler.cfg.SecretKey), chatSessionID, terminalID)
-	openCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
+	openCtx := context.WithoutCancel(r.Context())
 	shellSession, err := handler.chatShells.getOrCreate(openCtx, registryKey, func(ctx context.Context) (workerops.InteractiveShell, error) {
 		return handler.openCloudAgentShell(ctx, worker, key, account, cloudSession, consoleChatShellCols, consoleChatShellRows)
 	})

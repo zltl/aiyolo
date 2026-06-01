@@ -552,18 +552,19 @@ type CloudAgentAccount struct {
 }
 
 type CloudAgentSession struct {
-	ID            string
-	UserID        string
-	WorkerID      string
-	AccountID     string
-	AgentType     string
-	ChatSessionID string
-	WorkspacePath string
-	Status        string
-	LastError     string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	ClosedAt      *time.Time
+	ID             string
+	UserID         string
+	WorkerID       string
+	AccountID      string
+	AgentType      string
+	ChatSessionID  string
+	WorkspacePath  string
+	ShellStateJSON string
+	Status         string
+	LastError      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	ClosedAt       *time.Time
 }
 
 func NormalizeWorkerLabels(values []string) []string {
@@ -801,6 +802,7 @@ func NormalizeCloudAgentSession(session CloudAgentSession) (CloudAgentSession, e
 	session.AgentType = strings.TrimSpace(session.AgentType)
 	session.ChatSessionID = strings.TrimSpace(session.ChatSessionID)
 	session.WorkspacePath = path.Clean(strings.TrimSpace(session.WorkspacePath))
+	session.ShellStateJSON = strings.TrimSpace(session.ShellStateJSON)
 	session.Status = strings.TrimSpace(session.Status)
 	session.LastError = strings.TrimSpace(session.LastError)
 	if session.ID == "" {

@@ -92,11 +92,13 @@ func (run *consoleCloudAgentRun) start() {
 func (run *consoleCloudAgentRun) execute() {
 	defer run.registry.delete(run.key, run)
 	execution, executionErr := run.handler.runCloudAgentChat(context.Background(), run.worker, run.sshKey, run.account, run.cloudSession, consoleCloudAgentChatRequest{
-		PublicName:  run.request.PublicName,
-		History:     cloneConsoleChatMessages(run.request.History),
-		UserInput:   run.request.UserInput,
-		Attachments: cloneConsoleChatAttachments(run.request.Attachments),
-		Stream:      true,
+		PublicName:                   run.request.PublicName,
+		History:                      cloneConsoleChatMessages(run.request.History),
+		UserInput:                    run.request.UserInput,
+		Attachments:                  cloneConsoleChatAttachments(run.request.Attachments),
+		ShellActiveTerminalID:        run.request.ShellActiveTerminalID,
+		ShellCurrentWorkingDirectory: run.request.ShellCurrentWorkingDirectory,
+		Stream:                       true,
 		OnDelta: func(delta string) error {
 			run.appendDelta(delta)
 			return nil
@@ -267,10 +269,12 @@ func (handler *Handler) startConsoleCloudAgentRun(r *http.Request, state console
 			account:      account,
 			cloudSession: cloudSession,
 			request: consoleCloudAgentChatRequest{
-				PublicName:  state.Form.PublicName,
-				History:     cloneConsoleChatMessages(history),
-				UserInput:   state.Form.Draft,
-				Attachments: cloneConsoleChatAttachments(state.Form.Attachments),
+				PublicName:                   state.Form.PublicName,
+				History:                      cloneConsoleChatMessages(history),
+				UserInput:                    state.Form.Draft,
+				Attachments:                  cloneConsoleChatAttachments(state.Form.Attachments),
+				ShellActiveTerminalID:        state.Form.ShellActiveTerminalID,
+				ShellCurrentWorkingDirectory: state.Form.ShellCurrentWorkingDirectory,
 			},
 		}
 	})

@@ -888,12 +888,15 @@
   const shellLaunchButton = (form = currentForm()) => form?.querySelector("[data-chat-action=\"open-shell\"]") || null;
   const shellPageBaseURL = (form = currentForm()) => String(form?.dataset.chatShellUrl || "").trim();
   const shellSocketBaseURL = (form = currentForm()) => String(form?.dataset.chatShellSocketUrl || "").trim();
+  const shellStateURL = (form = currentForm()) => String(form?.dataset.chatShellStateUrl || "").trim();
   const shellDock = (form = currentForm()) => form?.querySelector("[data-chat-shell-dock]") || null;
   const shellPanelBar = (form = currentForm()) => form?.querySelector(".chat-shell-panel-bar") || null;
   const shellTabsHost = (form = currentForm()) => form?.querySelector("[data-chat-shell-tabs]") || null;
   const shellPanelsHost = (form = currentForm()) => form?.querySelector("[data-chat-shell-panels]") || null;
   const shellHeightPreferenceKey = "aiyolo.console.chat.shellHeight";
   const shellStatePreferenceKey = "aiyolo.console.chat.shellSessions.v1";
+  const shellCwdOscPrefix = "\u001b]6973;AiyoloCwd=";
+  const shellCwdOscMaxBuffer = 8192;
   const shellDefaultHeight = 360;
   const shellMinHeight = 240;
   const shellReadyProbeTimeoutMs = 3000;
@@ -902,6 +905,7 @@
   let shellResizeState = null;
   let shellInstanceCounter = 0;
   let shellOpenInFlight = false;
+  let shellStatePersistTimer = null;
 
   const syncDraftFieldHeight = (field) => {
     if (!(field instanceof HTMLTextAreaElement)) {
@@ -962,12 +966,20 @@
     }
   };
 
+  const normalizeShellWorkingDirectory = (value) => {
+    const path = String(value || "").trim();
+    if (path === "" || !path.startsWith("/") || /[\u0000\r\n]/.test(path)) {
+      return "";
+    }
+    return path;
+  };
+
   const normalizeShellSnapshot = (snapshot) => {
     if (!snapshot || typeof snapshot !== "object") {
       return null;
     }
-    const terminalID = String(snapshot.terminalID || snapshot.id || "").trim();
-    const sessionID = String(snapshot.sessionID || "").trim();
+    const terminalID = String(snapshot.terminalID || snapshot.terminalId || snapshot.id || "").trim();
+    const sessionID = String(snapshot.sessionID || snapshot.sessionId || "").trim();
     if (terminalID === "" || sessionID === "") {
       return null;
     }
@@ -975,12 +987,13 @@
       terminalID,
       label: String(snapshot.label || "").trim(),
       sessionID,
-      socketURL: String(snapshot.socketURL || "").trim(),
+      socketURL: String(snapshot.socketURL || snapshot.socketUrl || "").trim(),
       meta: {
         sessionID,
         workerID: String(snapshot.meta?.workerID || snapshot.workerID || "").trim(),
         containerName: String(snapshot.meta?.containerName || snapshot.containerName || "").trim(),
         workspacePath: String(snapshot.meta?.workspacePath || snapshot.workspacePath || "").trim(),
+        currentWorkingDirectory: normalizeShellWorkingDirectory(snapshot.meta?.currentWorkingDirectory || snapshot.currentWorkingDirectory || snapshot.cwd || ""),
       },
     };
   };
@@ -1006,39 +1019,83 @@
         : instances[0]?.terminalID || "",
       instances,
       hidden: parsed.hidden === true,
+      updatedAt: String(parsed.updatedAt || "").trim(),
     };
+  };
+
+  const currentShellStateSnapshot = (form = currentForm()) => {
+    const sessionID = readClientSessionID(form);
+    const instances = shellInstances
+      .filter((instance) => instance && String(instance.sessionID || "").trim() === sessionID)
+      .map((instance) => ({
+        terminalID: String(instance.terminalID || instance.id || "").trim(),
+        label: String(instance.label || "").trim(),
+        sessionID: String(instance.sessionID || "").trim(),
+        socketURL: String(instance.socketURL || "").trim(),
+        meta: {
+          sessionID: String(instance.sessionID || "").trim(),
+          workerID: String(instance.meta?.workerID || "").trim(),
+          containerName: String(instance.meta?.containerName || "").trim(),
+          workspacePath: String(instance.meta?.workspacePath || "").trim(),
+          currentWorkingDirectory: normalizeShellWorkingDirectory(instance.meta?.currentWorkingDirectory || ""),
+        },
+      }))
+      .filter((instance) => instance.terminalID !== "" && instance.sessionID !== "");
+    return {
+      activeTerminalID: activeShellInstance()?.terminalID || instances[0]?.terminalID || "",
+      instances,
+      hidden: shellDock(form)?.hidden === true,
+      updatedAt: new Date().toISOString(),
+    };
+  };
+
+  const persistShellStateToServer = (form, state) => {
+    const sessionID = readClientSessionID(form);
+    const endpoint = shellStateURL(form);
+    if (!(form instanceof HTMLFormElement) || sessionID === "" || endpoint === "" || !isCloudAgentEnvironment(currentSelectedEnvironment(form))) {
+      return;
+    }
+    if (shellStatePersistTimer) {
+      window.clearTimeout(shellStatePersistTimer);
+    }
+    const body = JSON.stringify({
+      sessionID,
+      activeTerminalID: String(state?.activeTerminalID || "").trim(),
+      instances: Array.isArray(state?.instances) ? state.instances : [],
+      hidden: state?.hidden === true,
+      updatedAt: String(state?.updatedAt || new Date().toISOString()).trim(),
+    });
+    shellStatePersistTimer = window.setTimeout(() => {
+      shellStatePersistTimer = null;
+      void fetch(endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive: body.length < 60000,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body,
+      }).catch(() => {});
+    }, 120);
   };
 
   const writeShellState = (form = currentForm()) => {
     const stateKey = currentShellStateKey(form);
-    if (stateKey === "" || typeof window === "undefined" || !window.localStorage) {
+    if (stateKey === "") {
+      return;
+    }
+    const nextState = currentShellStateSnapshot(form);
+    persistShellStateToServer(form, nextState);
+    if (typeof window === "undefined" || !window.localStorage) {
       return;
     }
     try {
       const states = readShellStates();
-      const instances = shellInstances
-        .filter((instance) => instance && String(instance.sessionID || "").trim() === readClientSessionID(form))
-        .map((instance) => ({
-          terminalID: String(instance.terminalID || instance.id || "").trim(),
-          label: String(instance.label || "").trim(),
-          sessionID: String(instance.sessionID || "").trim(),
-          socketURL: String(instance.socketURL || "").trim(),
-          meta: {
-            workerID: String(instance.meta?.workerID || "").trim(),
-            containerName: String(instance.meta?.containerName || "").trim(),
-            workspacePath: String(instance.meta?.workspacePath || "").trim(),
-          },
-        }))
-        .filter((instance) => instance.terminalID !== "" && instance.sessionID !== "");
-      if (instances.length === 0) {
+      if (nextState.instances.length === 0) {
         delete states[stateKey];
       } else {
-        states[stateKey] = {
-          activeTerminalID: activeShellInstance()?.terminalID || instances[0].terminalID,
-          instances,
-          hidden: shellDock(form)?.hidden === true,
-          updatedAt: new Date().toISOString(),
-        };
+        states[stateKey] = nextState;
       }
       const entries = Object.entries(states)
         .filter(([, value]) => value && typeof value === "object")
@@ -1048,6 +1105,109 @@
     } catch (_error) {
       // Ignore storage failures and keep the current in-memory shell tabs.
     }
+  };
+
+  const decodeShellBase64UTF8 = (value) => {
+    const encoded = String(value || "").trim();
+    if (encoded === "" || typeof window.atob !== "function") {
+      return "";
+    }
+    try {
+      const binary = window.atob(encoded);
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      if (typeof window.TextDecoder === "function") {
+        return new window.TextDecoder("utf-8").decode(bytes);
+      }
+      return binary;
+    } catch (_error) {
+      return "";
+    }
+  };
+
+  const setShellInstanceCurrentWorkingDirectory = (form, instance, value) => {
+    const currentWorkingDirectory = normalizeShellWorkingDirectory(value);
+    if (!(form instanceof HTMLFormElement) || !instance || currentWorkingDirectory === "") {
+      return;
+    }
+    if (!instance.meta || typeof instance.meta !== "object") {
+      instance.meta = {};
+    }
+    if (instance.meta.currentWorkingDirectory === currentWorkingDirectory) {
+      return;
+    }
+    instance.meta.currentWorkingDirectory = currentWorkingDirectory;
+    renderShellMeta(instance);
+    writeShellState(form);
+  };
+
+  const processShellCwdReports = (form, instance, chunk) => {
+    const value = String(chunk || "");
+    if (!(form instanceof HTMLFormElement) || !instance || value === "") {
+      return;
+    }
+    let buffer = `${String(instance.cwdReportBuffer || "")}${value}`;
+    let consumedUntil = 0;
+    while (true) {
+      const start = buffer.indexOf(shellCwdOscPrefix, consumedUntil);
+      if (start < 0) {
+        break;
+      }
+      const payloadStart = start + shellCwdOscPrefix.length;
+      const belEnd = buffer.indexOf("\u0007", payloadStart);
+      const stEnd = buffer.indexOf("\u001b\\", payloadStart);
+      const end = belEnd >= 0 && (stEnd < 0 || belEnd < stEnd) ? belEnd : stEnd;
+      if (end < 0) {
+        consumedUntil = start;
+        break;
+      }
+      const terminatorLength = end === stEnd ? 2 : 1;
+      const decoded = decodeShellBase64UTF8(buffer.slice(payloadStart, end));
+      setShellInstanceCurrentWorkingDirectory(form, instance, decoded);
+      consumedUntil = end + terminatorLength;
+    }
+    buffer = consumedUntil > 0 ? buffer.slice(consumedUntil) : buffer;
+    if (buffer.length > shellCwdOscMaxBuffer) {
+      buffer = buffer.slice(-shellCwdOscMaxBuffer);
+    }
+    instance.cwdReportBuffer = buffer;
+  };
+
+  const ensureHiddenFormField = (form, name) => {
+    if (!(form instanceof HTMLFormElement) || String(name || "").trim() === "") {
+      return null;
+    }
+    let field = form.querySelector(`input[type="hidden"][name="${name}"]`);
+    if (!(field instanceof HTMLInputElement)) {
+      field = document.createElement("input");
+      field.type = "hidden";
+      field.name = name;
+      form.appendChild(field);
+    }
+    return field;
+  };
+
+  const currentShellChatContext = () => {
+    const instance = activeShellInstance();
+    return {
+      terminalID: String(instance?.terminalID || "").trim(),
+      currentWorkingDirectory: normalizeShellWorkingDirectory(instance?.meta?.currentWorkingDirectory || ""),
+    };
+  };
+
+  const syncShellContextFields = (form = currentForm()) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return { terminalID: "", currentWorkingDirectory: "" };
+    }
+    const context = currentShellChatContext();
+    const terminalField = ensureHiddenFormField(form, "chat_shell_active_terminal_id");
+    const cwdField = ensureHiddenFormField(form, "chat_shell_current_working_directory");
+    if (terminalField instanceof HTMLInputElement) {
+      terminalField.value = context.terminalID;
+    }
+    if (cwdField instanceof HTMLInputElement) {
+      cwdField.value = context.currentWorkingDirectory;
+    }
+    return context;
   };
 
   const normalizeShellHeight = (value) => {
@@ -1097,9 +1257,72 @@
     return shellInstances.length > 0 && dock instanceof HTMLElement && dock.hidden === true;
   };
 
+  const generatedShellLabel = (number) => t(`终端 ${number}`, `Terminal ${number}`);
+
+  const generatedShellLabelNumber = (label) => {
+    const match = String(label || "").trim().match(/^(?:终端|Terminal)\s+(\d+)$/i);
+    if (!match) {
+      return 0;
+    }
+    const number = Number.parseInt(match[1], 10);
+    return Number.isFinite(number) && number > 0 ? number : 0;
+  };
+
+  const syncShellInstanceCounterFromLabels = () => {
+    let maxLabelNumber = 0;
+    shellInstances.forEach((instance) => {
+      maxLabelNumber = Math.max(maxLabelNumber, generatedShellLabelNumber(instance?.label));
+    });
+    shellInstanceCounter = Math.max(shellInstanceCounter, maxLabelNumber, shellInstances.length);
+  };
+
   const nextShellLabel = () => {
-    shellInstanceCounter += 1;
-    return t(`终端 ${shellInstanceCounter}`, `Terminal ${shellInstanceCounter}`);
+    syncShellInstanceCounterFromLabels();
+    const used = new Set(shellInstances.map((instance) => String(instance?.label || "").trim()).filter(Boolean));
+    for (let index = 0; index < 64; index += 1) {
+      shellInstanceCounter += 1;
+      const label = generatedShellLabel(shellInstanceCounter);
+      if (!used.has(label)) {
+        return label;
+      }
+    }
+    return generatedShellLabel(shellInstanceCounter);
+  };
+
+  const normalizeShellInstanceLabels = () => {
+    if (shellInstances.length === 0) {
+      shellInstanceCounter = 0;
+      return;
+    }
+    const allGenerated = shellInstances.every((instance) => {
+      const label = String(instance?.label || "").trim();
+      return label === "" || generatedShellLabelNumber(label) > 0;
+    });
+    if (allGenerated) {
+      shellInstances.forEach((instance, index) => {
+        instance.label = generatedShellLabel(index + 1);
+      });
+      shellInstanceCounter = Math.max(shellInstanceCounter, shellInstances.length);
+      return;
+    }
+    const used = new Set();
+    shellInstances.forEach((instance) => {
+      const currentLabel = String(instance?.label || "").trim();
+      if (currentLabel !== "" && !used.has(currentLabel)) {
+        instance.label = currentLabel;
+        used.add(currentLabel);
+        return;
+      }
+      let nextNumber = 1;
+      let nextLabel = generatedShellLabel(nextNumber);
+      while (used.has(nextLabel)) {
+        nextNumber += 1;
+        nextLabel = generatedShellLabel(nextNumber);
+      }
+      instance.label = nextLabel;
+      used.add(nextLabel);
+    });
+    syncShellInstanceCounterFromLabels();
   };
 
   const shellTabMetaText = (instance) => truncateText(
@@ -1119,7 +1342,7 @@
     setShellMetaValue(instance.metaNodes?.session, instance.meta?.sessionID);
     setShellMetaValue(instance.metaNodes?.worker, instance.meta?.workerID);
     setShellMetaValue(instance.metaNodes?.container, instance.meta?.containerName);
-    setShellMetaValue(instance.metaNodes?.workspace, instance.meta?.workspacePath);
+    setShellMetaValue(instance.metaNodes?.workspace, instance.meta?.currentWorkingDirectory || instance.meta?.workspacePath);
   };
 
   const createShellInstance = (meta) => ({
@@ -1133,6 +1356,7 @@
       workerID: String(meta?.workerID || "").trim(),
       containerName: String(meta?.containerName || "").trim(),
       workspacePath: String(meta?.workspacePath || "").trim(),
+      currentWorkingDirectory: normalizeShellWorkingDirectory(meta?.currentWorkingDirectory || meta?.cwd || ""),
     },
     statusMessage: t("未连接", "Not connected"),
     statusError: false,
@@ -1185,6 +1409,7 @@
     if (!(form instanceof HTMLFormElement)) {
       return;
     }
+    normalizeShellInstanceLabels();
     const tabsHost = shellTabsHost(form);
     const panelsHost = shellPanelsHost(form);
     if (!(tabsHost instanceof HTMLElement) || !(panelsHost instanceof HTMLElement)) {
@@ -1302,6 +1527,9 @@
         instance.statusError = Boolean(isError);
         renderShellDockContents(form);
       },
+      onOutput: (chunk) => {
+        processShellCwdReports(form, instance, chunk);
+      },
     });
     return instance.controller;
   };
@@ -1384,15 +1612,11 @@
     return nextURL.toString();
   };
 
-  const restoreShellInstances = (form) => {
+  const restoreShellInstancesFromState = (form, rawState, options = {}) => {
     if (!(form instanceof HTMLFormElement) || !canUseCloudAgentShell(form)) {
       return false;
     }
-    const stateKey = currentShellStateKey(form);
-    if (stateKey === "") {
-      return false;
-    }
-    const state = normalizeShellState(readShellStates()[stateKey]);
+    const state = normalizeShellState(rawState);
     if (state.instances.length === 0) {
       return false;
     }
@@ -1405,17 +1629,80 @@
       workerID: snapshot.meta.workerID,
       containerName: snapshot.meta.containerName,
       workspacePath: snapshot.meta.workspacePath,
+      currentWorkingDirectory: snapshot.meta.currentWorkingDirectory,
     }));
     shellInstanceCounter = Math.max(shellInstanceCounter, shellInstances.length);
     const active = shellInstances.find((instance) => instance.terminalID === state.activeTerminalID) || shellInstances[0] || null;
     activeShellInstanceID = active ? active.id : "";
     renderShellDockContents(form);
-    setShellDockVisible(form, false);
+    setShellDockVisible(form, state.hidden !== true);
     shellInstances.forEach((instance) => {
       ensureShellController(form, instance)?.connect?.({ resetTerminal: true });
     });
-    writeShellState(form);
+    if (options.persist !== false) {
+      writeShellState(form);
+    }
     return shellInstances.length > 0;
+  };
+
+  const restoreShellInstances = (form) => {
+    if (!(form instanceof HTMLFormElement) || !canUseCloudAgentShell(form)) {
+      return false;
+    }
+    const stateKey = currentShellStateKey(form);
+    if (stateKey === "") {
+      return false;
+    }
+    return restoreShellInstancesFromState(form, readShellStates()[stateKey]);
+  };
+
+  const loadShellStateFromServer = async (form) => {
+    const sessionID = readClientSessionID(form);
+    const endpoint = shellStateURL(form);
+    if (!(form instanceof HTMLFormElement) || sessionID === "" || endpoint === "" || !canUseCloudAgentShell(form)) {
+      return null;
+    }
+    try {
+      const stateURL = new URL(endpoint, window.location.href);
+      stateURL.searchParams.set("session", sessionID);
+      const response = await fetchWithTimeout(stateURL.toString(), {
+        method: "GET",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      }, shellReadyProbeTimeoutMs);
+      if (!response.ok) {
+        return null;
+      }
+      const parsed = safeParseJSON(await response.text(), null);
+      if (!parsed || typeof parsed !== "object" || String(parsed.status || "").trim() !== "ready") {
+        return null;
+      }
+      if (String(parsed.environment || "").trim() !== currentSelectedEnvironment(form)) {
+        return null;
+      }
+      return normalizeShellState(parsed.shellState || parsed.state || null);
+    } catch (_error) {
+      return null;
+    }
+  };
+
+  const restoreShellInstancesFromServer = async (form) => {
+    if (shellInstances.length > 0) {
+      return true;
+    }
+    const state = await loadShellStateFromServer(form);
+    if (!state || state.instances.length === 0 || shellInstances.length > 0) {
+      return false;
+    }
+    return restoreShellInstancesFromState(form, state);
+  };
+
+  const restoreShellInstancesOrLoadServer = (form) => {
+    if (restoreShellInstances(form)) {
+      return true;
+    }
+    void restoreShellInstancesFromServer(form);
+    return false;
   };
 
   const syncChatShellSession = (form) => {
@@ -1425,14 +1712,14 @@
     applyShellHeight(form, preferredShellOpenHeight());
     const instance = activeShellInstance();
     if (!instance) {
-      restoreShellInstances(form);
+      restoreShellInstancesOrLoadServer(form);
       return;
     }
     if (instance.sessionID === "" || instance.sessionID === readClientSessionID(form)) {
       return;
     }
     closeAllChatShells(form, { terminate: false, forget: false });
-    restoreShellInstances(form);
+    restoreShellInstancesOrLoadServer(form);
   };
 
   const readDraftPayload = (form, options = {}) => {
@@ -2676,6 +2963,7 @@
     }
     writeHiddenJSON(form, "chat_draft_attachments_json", attachments);
     renderDraftAttachments(currentRoot(), attachments);
+    syncShellContextFields(form);
     form.submit();
   };
 
@@ -3180,6 +3468,9 @@
     const formData = new FormData(form);
     formData.set("chat_draft", promptValue);
     formData.set("chat_draft_attachments_json", JSON.stringify(attachments));
+    const shellContext = syncShellContextFields(form);
+    formData.set("chat_shell_active_terminal_id", shellContext.terminalID);
+    formData.set("chat_shell_current_working_directory", shellContext.currentWorkingDirectory);
 
     form.dataset.streaming = "true";
     form.classList.add("is-streaming");
@@ -3628,7 +3919,7 @@
       queuePersist();
       void ensureChatEnvironment(form)
         .then(() => {
-          restoreShellInstances(form);
+          restoreShellInstancesOrLoadServer(form);
           updateComposerControls(form);
         })
         .catch(() => {});
@@ -3642,7 +3933,7 @@
       queuePersist();
       void ensureChatEnvironment(form)
         .then(() => {
-          restoreShellInstances(form);
+          restoreShellInstancesOrLoadServer(form);
           updateComposerControls(form);
         })
         .catch(() => {});
@@ -3763,6 +4054,7 @@
     if (!target.matches(".chat-shell[data-chat-stream-url]")) {
       return;
     }
+    syncShellContextFields(target);
     if (!supportsStreaming()) {
       persistCurrentSession(false);
       return;

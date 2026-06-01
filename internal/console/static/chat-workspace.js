@@ -110,6 +110,7 @@
   let workspaceInlineEdit = null;
   let workspaceContextMenu = null;
   let workspacePathClipboard = null;
+  let workspaceDragMove = null;
   let workspaceCompareBasePath = "";
   let workspaceActiveFilePath = "";
   let workspacePendingRestoreFilePath = "";
@@ -1674,6 +1675,7 @@
         const row = document.createElement("button");
         row.type = "button";
         row.className = "chat-workspace-row";
+        row.draggable = true;
         row.style.setProperty("--chat-workspace-depth", String(depth));
         row.dataset.chatAction = entry.type === "directory" ? "toggle-workspace-directory" : "open-workspace-file";
         row.dataset.chatWorkspacePath = entry.path;
@@ -1887,6 +1889,38 @@
       item.appendChild(close);
       host.appendChild(item);
     });
+
+    // Update overflow dropdown menu
+    const overflowWrapper = form?.querySelector("[data-chat-tabs-overflow]");
+    const overflowMenu = form?.querySelector("[data-chat-tabs-overflow-menu]");
+    const overflowBtn = form?.querySelector("[data-chat-action='toggle-tabs-overflow']");
+    if (overflowWrapper instanceof HTMLElement && overflowMenu instanceof HTMLElement) {
+      overflowWrapper.hidden = false;
+      overflowMenu.replaceChildren();
+      if (overflowBtn instanceof HTMLElement) {
+        overflowBtn.setAttribute("aria-expanded", "false");
+      }
+      paths.forEach((path) => {
+        const active = path === workspaceActiveFilePath;
+        const pathInfo = workspacePathParts(path);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "chat-editor-tabs-overflow-item";
+        btn.classList.toggle("is-active", active);
+        btn.dataset.chatAction = "activate-overflow-tab";
+        btn.dataset.chatWorkspacePath = path;
+        btn.title = path;
+        const icon = document.createElement("span");
+        icon.className = "chat-editor-tab-icon";
+        icon.setAttribute("aria-hidden", "true");
+        applyWorkspaceEntryIcon(icon, { name: basenameForIcon(path), path, type: "file" });
+        const name = document.createElement("span");
+        name.textContent = pathInfo.name;
+        btn.appendChild(icon);
+        btn.appendChild(name);
+        overflowMenu.appendChild(btn);
+      });
+    }
   }
 
   function renderWorkspaceEditor(form) {
@@ -2887,6 +2921,55 @@
     }
   }
 
+  async function moveWorkspacePath(form, source, targetDirectory) {
+    const endpoint = workspaceRenameURL(form);
+    if (!source || !workspaceMutationReady(form, endpoint)) {
+      return;
+    }
+    const sourcePath = normalizeWorkspaceCreatePath(source.path);
+    const destDirectory = normalizeWorkspaceCreatePath(targetDirectory);
+    if (sourcePath === "") {
+      return;
+    }
+    if (workspaceParentPath(sourcePath) === destDirectory) {
+      return;
+    }
+    if (source.type === "directory" && (destDirectory === sourcePath || destDirectory.startsWith(`${sourcePath}/`))) {
+      setWorkspaceTreeStatus(t("不能把目录移动到它自身里。", "Cannot move a folder into itself."), true);
+      renderWorkspaceTree(form);
+      return;
+    }
+    const name = source.name || workspaceBaseName(sourcePath);
+    if (workspaceDirectoryHasEntry(destDirectory, name)) {
+      setWorkspaceTreeStatus(t(`目标目录已存在“${name}”。`, `"${name}" already exists in the destination folder.`), true);
+      renderWorkspaceTree(form);
+      return;
+    }
+    const targetPath = joinWorkspaceChildPath(destDirectory, name);
+    const url = new URL(endpoint, window.location.href);
+    url.searchParams.set("session", readClientSessionID(form));
+    setWorkspaceTreeStatus(t("正在移动…", "Moving..."), false);
+    renderWorkspaceTree(form);
+    try {
+      const parsed = await fetchWorkspaceJSON(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: sourcePath, new_path: targetPath }),
+      });
+      const nextPath = normalizeWorkspaceCreatePath(parsed.path || targetPath);
+      applyWorkspaceRenameState(form, sourcePath, nextPath);
+      if (workspacePathClipboard && normalizeWorkspaceCreatePath(workspacePathClipboard.path) === sourcePath) {
+        workspacePathClipboard = null;
+      }
+      await refreshWorkspaceTreeForRename(form, sourcePath, nextPath, source.type);
+      setWorkspaceTreeStatus(String(parsed.notice || t("已移动。", "Moved.")), false);
+      renderWorkspaceTree(form);
+    } catch (error) {
+      setWorkspaceTreeStatus(String(error?.message || t("移动失败。", "Move failed.")), true);
+      renderWorkspaceTree(form);
+    }
+  }
+
   async function deleteWorkspacePath(form, info) {
     const endpoint = workspaceDeleteURL(form);
     if (!info || !workspaceMutationReady(form, endpoint)) {
@@ -3203,6 +3286,94 @@
     workspaceContextMenu = menu;
   }
 
+  function placeWorkspaceContextMenu(menu, event) {
+    document.body.appendChild(menu);
+    const margin = 8;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.max(margin, Math.min(Number(event.clientX || 0), window.innerWidth - rect.width - margin));
+    const top = Math.max(margin, Math.min(Number(event.clientY || 0), window.innerHeight - rect.height - margin));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    workspaceContextMenu = menu;
+  }
+
+  function resetWorkspaceEditorAfterClose(form) {
+    workspaceActiveFilePath = "";
+    workspaceEditorKind = "text";
+    workspaceEditorMediaType = "";
+    workspaceEditorPreviewURL = "";
+    workspaceEditorContent = "";
+    workspaceEditorSavedContent = "";
+    workspaceEditorSize = 0;
+    workspaceEditorBusy = "";
+    workspaceEditorMarkdownMode = "preview";
+    setWorkspaceEditorStatus("", false);
+    renderWorkspaceTree(form);
+    renderWorkspaceEditor(form);
+    applyLayout(form, true);
+  }
+
+  function closeWorkspaceTab(form, path) {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const nextPath = forgetWorkspaceOpenFile(normalizeWorkspacePath(path), true);
+    if (nextPath !== "") {
+      void openWorkspaceFile(form, nextPath, true);
+    } else {
+      resetWorkspaceEditorAfterClose(form);
+    }
+  }
+
+  function setWorkspaceOpenTabs(form, nextPaths, preferredActive) {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const previousActive = workspaceActiveFilePath;
+    const paths = normalizeWorkspacePathList(nextPaths);
+    workspaceOpenFilePaths = paths;
+    let active = normalizeWorkspacePath(preferredActive || "");
+    if (active === "" || !paths.includes(active)) {
+      active = paths.includes(previousActive) ? previousActive : (paths[0] || "");
+    }
+    workspaceActiveFilePath = active;
+    workspacePendingRestoreFilePath = active;
+    writeWorkspaceOpenState(form);
+    if (active === "") {
+      resetWorkspaceEditorAfterClose(form);
+      return;
+    }
+    if (active === previousActive) {
+      renderWorkspaceTree(form);
+      renderWorkspaceEditor(form);
+      applyLayout(form, true);
+      return;
+    }
+    void openWorkspaceFile(form, active, true);
+  }
+
+  function showEditorTabContextMenu(form, path, event) {
+    const targetPath = normalizeWorkspacePath(path);
+    if (!(form instanceof HTMLFormElement) || targetPath === "") {
+      return;
+    }
+    hideWorkspaceContextMenu();
+    const menu = document.createElement("div");
+    menu.className = "chat-workspace-context-menu";
+    menu.setAttribute("role", "menu");
+    const paths = normalizeWorkspacePathList(workspaceOpenFilePaths);
+    const index = paths.indexOf(targetPath);
+    addWorkspaceContextMenuButton(menu, t("关闭", "Close"), () => closeWorkspaceTab(form, targetPath), { shortcut: "Ctrl+F4" });
+    addWorkspaceContextMenuButton(menu, t("关闭其他", "Close Others"), () => setWorkspaceOpenTabs(form, [targetPath], targetPath), { disabled: paths.length <= 1 });
+    addWorkspaceContextMenuButton(menu, t("关闭右侧标签页", "Close Tabs to the Right"), () => setWorkspaceOpenTabs(form, paths.slice(0, index + 1), workspaceActiveFilePath), { disabled: index < 0 || index >= paths.length - 1 });
+    addWorkspaceContextMenuButton(menu, t("关闭已保存", "Close Saved"), () => setWorkspaceOpenTabs(form, editorIsDirty() ? [workspaceActiveFilePath] : [], workspaceActiveFilePath), { shortcut: "Ctrl+K U" });
+    addWorkspaceContextMenuButton(menu, t("全部关闭", "Close All"), () => setWorkspaceOpenTabs(form, [], ""), { shortcut: "Ctrl+K W", disabled: paths.length === 0 });
+    addWorkspaceContextMenuSeparator(menu);
+    addWorkspaceContextMenuButton(menu, t("复制路径", "Copy Path"), () => void copyTextToClipboard(workspaceAbsolutePath(targetPath), t("已复制路径。", "Path copied.")), { shortcut: "Shift+Alt+C" });
+    addWorkspaceContextMenuButton(menu, t("复制相对路径", "Copy Relative Path"), () => void copyTextToClipboard(targetPath, t("已复制相对路径。", "Relative path copied.")), { shortcut: "Ctrl+K Ctrl+Shift+C" });
+    placeWorkspaceContextMenu(menu, event);
+  }
+
   async function createWorkspaceFile(form) {
     startWorkspaceInlineCreate(form, "file");
   }
@@ -3266,6 +3437,19 @@
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Node) || !(workspaceContextMenu instanceof HTMLElement) || !workspaceContextMenu.contains(event.target)) {
       hideWorkspaceContextMenu();
+    }
+    // Close tabs overflow menu when clicking outside
+    const overflowMenu = document.querySelector("[data-chat-tabs-overflow-menu]");
+    const overflowBtn = document.querySelector("[data-chat-action='toggle-tabs-overflow']");
+    if (overflowMenu instanceof HTMLElement && !overflowMenu.hidden) {
+      const clickedInsideMenu = event.target instanceof Node && overflowMenu.contains(event.target);
+      const clickedBtn = event.target instanceof Node && overflowBtn instanceof Node && overflowBtn.contains(event.target);
+      if (!clickedInsideMenu && !clickedBtn) {
+        overflowMenu.hidden = true;
+        if (overflowBtn instanceof HTMLElement) {
+          overflowBtn.setAttribute("aria-expanded", "false");
+        }
+      }
     }
     const target = event.target instanceof Element ? event.target.closest("[data-chat-action]") : null;
     const form = currentForm();
@@ -3368,26 +3552,32 @@
         void openWorkspaceFile(form, String(target.dataset.chatWorkspacePath || "").trim(), false);
         return;
       }
+      case "activate-overflow-tab": {
+        event.preventDefault();
+        const overflowMenu = form.querySelector("[data-chat-tabs-overflow-menu]");
+        const overflowBtn = form.querySelector("[data-chat-action='toggle-tabs-overflow']");
+        if (overflowMenu instanceof HTMLElement) {
+          overflowMenu.hidden = true;
+        }
+        if (overflowBtn instanceof HTMLElement) {
+          overflowBtn.setAttribute("aria-expanded", "false");
+        }
+        void openWorkspaceFile(form, String(target.dataset.chatWorkspacePath || "").trim(), false);
+        return;
+      }
+      case "toggle-tabs-overflow": {
+        event.preventDefault();
+        const overflowMenu = form.querySelector("[data-chat-tabs-overflow-menu]");
+        if (overflowMenu instanceof HTMLElement) {
+          const nowHidden = !overflowMenu.hidden;
+          overflowMenu.hidden = nowHidden;
+          target.setAttribute("aria-expanded", String(!nowHidden));
+        }
+        return;
+      }
       case "close-workspace-tab": {
         event.preventDefault();
-        const nextPath = forgetWorkspaceOpenFile(String(target.dataset.chatWorkspacePath || "").trim(), true);
-        if (nextPath !== "") {
-          void openWorkspaceFile(form, nextPath, true);
-        } else {
-          workspaceActiveFilePath = "";
-          workspaceEditorKind = "text";
-          workspaceEditorMediaType = "";
-          workspaceEditorPreviewURL = "";
-          workspaceEditorContent = "";
-          workspaceEditorSavedContent = "";
-          workspaceEditorSize = 0;
-          workspaceEditorBusy = "";
-          workspaceEditorMarkdownMode = "preview";
-          setWorkspaceEditorStatus("", false);
-          renderWorkspaceTree(form);
-          renderWorkspaceEditor(form);
-          applyLayout(form, true);
-        }
+        closeWorkspaceTab(form, String(target.dataset.chatWorkspacePath || "").trim());
         return;
       }
       case "save-workspace-file": {
@@ -3420,11 +3610,21 @@
 
   document.addEventListener("contextmenu", (event) => {
     const form = currentForm();
-    const row = event.target instanceof Element ? event.target.closest(".chat-workspace-row[data-chat-workspace-path]") : null;
-    if (!(form instanceof HTMLFormElement) || !(row instanceof HTMLElement) || !form.contains(row)) {
+    if (!(form instanceof HTMLFormElement)) {
       return;
     }
     if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || readClientSessionID(form) === "") {
+      return;
+    }
+    const tab = event.target instanceof Element ? event.target.closest(".chat-editor-tab[data-chat-workspace-path]") : null;
+    if (tab instanceof HTMLElement && form.contains(tab)) {
+      event.preventDefault();
+      event.stopPropagation();
+      showEditorTabContextMenu(form, tab.dataset.chatWorkspacePath || "", event);
+      return;
+    }
+    const row = event.target instanceof Element ? event.target.closest(".chat-workspace-row[data-chat-workspace-path]") : null;
+    if (!(row instanceof HTMLElement) || !form.contains(row)) {
       return;
     }
     event.preventDefault();
@@ -3432,13 +3632,63 @@
     showWorkspaceContextMenu(form, row, event);
   });
 
-  document.addEventListener("dragover", (event) => {
+  document.addEventListener("dragstart", (event) => {
     const form = currentForm();
-    const target = workspaceUploadTargetFromEvent(event, form);
-    if (!(form instanceof HTMLFormElement) || !target || !workspaceDragContainsFiles(event)) {
+    if (!(form instanceof HTMLFormElement)) {
       return;
     }
-    if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || readClientSessionID(form) === "" || workspaceUploadURL(form) === "") {
+    const row = event.target instanceof Element ? event.target.closest(".chat-workspace-row[data-chat-workspace-path]") : null;
+    if (!(row instanceof HTMLElement) || !form.contains(row)) {
+      workspaceDragMove = null;
+      return;
+    }
+    if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || readClientSessionID(form) === "" || workspaceRenameURL(form) === "") {
+      workspaceDragMove = null;
+      return;
+    }
+    const info = workspaceRowInfo(row);
+    if (!info) {
+      workspaceDragMove = null;
+      return;
+    }
+    workspaceDragMove = { path: info.path, type: info.type, name: info.name };
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      try {
+        event.dataTransfer.setData("application/x-aiyolo-workspace-path", info.path);
+        event.dataTransfer.setData("text/plain", workspaceAbsolutePath(info.path));
+      } catch (_error) {
+        /* ignore unsupported dataTransfer types */
+      }
+    }
+  });
+
+  document.addEventListener("dragover", (event) => {
+    const form = currentForm();
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || readClientSessionID(form) === "") {
+      return;
+    }
+    if (workspaceDragMove && !workspaceDragContainsFiles(event)) {
+      const target = workspaceUploadTargetFromEvent(event, form);
+      if (!target || workspaceRenameURL(form) === "") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "move";
+      }
+      setWorkspaceUploadTarget(form, target.highlightRowPath, target.root);
+      return;
+    }
+    const target = workspaceUploadTargetFromEvent(event, form);
+    if (!target || !workspaceDragContainsFiles(event)) {
+      return;
+    }
+    if (workspaceUploadURL(form) === "") {
       return;
     }
     event.preventDefault();
@@ -3464,8 +3714,27 @@
 
   document.addEventListener("drop", (event) => {
     const form = currentForm();
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    if (workspaceDragMove && !workspaceDragContainsFiles(event)) {
+      const target = workspaceUploadTargetFromEvent(event, form);
+      const source = workspaceDragMove;
+      workspaceDragMove = null;
+      clearWorkspaceUploadTarget(form);
+      if (!target) {
+        return;
+      }
+      if (!isCloudAgentEnvironment(currentSelectedEnvironment(form)) || readClientSessionID(form) === "" || workspaceRenameURL(form) === "") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void moveWorkspacePath(form, source, target.path);
+      return;
+    }
     const target = workspaceUploadTargetFromEvent(event, form);
-    if (!(form instanceof HTMLFormElement) || !target || !workspaceDragContainsFiles(event)) {
+    if (!target || !workspaceDragContainsFiles(event)) {
       clearWorkspaceUploadTarget(form);
       return;
     }
@@ -3482,6 +3751,7 @@
   });
 
   document.addEventListener("dragend", () => {
+    workspaceDragMove = null;
     clearWorkspaceUploadTarget();
   });
 

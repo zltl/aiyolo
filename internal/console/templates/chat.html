@@ -18,7 +18,7 @@
 
 {{define "chat-content"}}
 <div id="chat-content" class="chat-workspace-page">
-  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-attachment-tree-url="{{.ChatAttachmentTreeURL}}" data-chat-attachment-tree-enabled="{{if .ChatAttachmentTreeEnabled}}true{{else}}false{{end}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-workspace-download-url="{{.ChatWorkspaceDownloadURL}}" data-chat-workspace-upload-url="{{.ChatWorkspaceUploadURL}}" data-chat-workspace-upload-max-bytes="{{.ChatWorkspaceUploadMaxBytes}}" data-chat-workspace-directory-url="{{.ChatWorkspaceDirectoryURL}}" data-chat-workspace-copy-url="{{.ChatWorkspaceCopyURL}}" data-chat-workspace-rename-url="{{.ChatWorkspaceRenameURL}}" data-chat-workspace-delete-url="{{.ChatWorkspaceDeleteURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
+  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-shell-state-url="{{.ChatShellStateURL}}" data-chat-attachment-tree-url="{{.ChatAttachmentTreeURL}}" data-chat-attachment-tree-enabled="{{if .ChatAttachmentTreeEnabled}}true{{else}}false{{end}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-workspace-download-url="{{.ChatWorkspaceDownloadURL}}" data-chat-workspace-upload-url="{{.ChatWorkspaceUploadURL}}" data-chat-workspace-upload-max-bytes="{{.ChatWorkspaceUploadMaxBytes}}" data-chat-workspace-directory-url="{{.ChatWorkspaceDirectoryURL}}" data-chat-workspace-copy-url="{{.ChatWorkspaceCopyURL}}" data-chat-workspace-rename-url="{{.ChatWorkspaceRenameURL}}" data-chat-workspace-delete-url="{{.ChatWorkspaceDeleteURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
     <div class="chat-workbench">
       <div class="chat-sidebar-column">
         <nav class="chat-activitybar" aria-label="{{msg .Locale "工作台导航" "Workbench navigation"}}">
@@ -85,11 +85,17 @@
 
       <section class="chat-editor-pane">
         <div class="chat-editor-pane-shell">
-          <div class="chat-editor-tabs" data-chat-editor-tabs role="tablist" aria-label="{{msg .Locale "打开的文件" "Open editors"}}">
-            <div class="chat-editor-tab is-active" role="tab" aria-selected="true">
-              <span class="chat-editor-tab-icon" aria-hidden="true"></span>
-              <span class="chat-editor-tab-name" data-chat-editor-tab-name>{{msg .Locale "尚未打开文件" "No file open"}}</span>
-              <span class="chat-editor-tab-dirty" data-chat-editor-dirty hidden></span>
+          <div class="chat-editor-tabs-bar">
+            <div class="chat-editor-tabs" data-chat-editor-tabs role="tablist" aria-label="{{msg .Locale "打开的文件" "Open editors"}}">
+              <div class="chat-editor-tab is-active" role="tab" aria-selected="true">
+                <span class="chat-editor-tab-icon" aria-hidden="true"></span>
+                <span class="chat-editor-tab-name" data-chat-editor-tab-name>{{msg .Locale "尚未打开文件" "No file open"}}</span>
+                <span class="chat-editor-tab-dirty" data-chat-editor-dirty hidden></span>
+              </div>
+            </div>
+            <div class="chat-editor-tabs-overflow" data-chat-tabs-overflow hidden>
+              <button class="chat-editor-tabs-more-btn" type="button" data-chat-action="toggle-tabs-overflow" aria-label="{{msg .Locale "所有标签页" "All open tabs"}}" aria-haspopup="listbox" aria-expanded="false">···</button>
+              <div class="chat-editor-tabs-overflow-menu" data-chat-tabs-overflow-menu role="listbox" hidden></div>
             </div>
           </div>
           <div class="chat-editor-toolbar">
@@ -323,8 +329,8 @@
   <script src="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
   <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
   <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
-  <script src="/console/static/chat-shell.js?v=chat-shell-20260531c"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260531i"></script>
-  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260531m"></script>
+  <script src="/console/static/chat-shell.js?v=chat-shell-20260601a"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260601d"></script>
+  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260601a"></script>
 </div>
 {{end}}

@@ -253,6 +253,91 @@ func TestChatEnvironmentEnsureReconcilesStaleCloudAgentAPIKey(t *testing.T) {
 	}
 }
 
+func TestChatEnvironmentEnsureReusesActiveCloudAgentSessionAfterOldLastSeen(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+	oldSeen := time.Now().UTC().Add(-6 * time.Hour)
+	accountID := consoleChatCloudAgentAccountID("worker-0")
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{
+		ID:              accountID,
+		UserID:          "admin@example.com",
+		WorkerID:        "worker-0",
+		AgentType:       domain.CloudAgentTypeClaudeCode,
+		ModelPublicName: "gpt-5.4",
+		ContainerID:     "container-123",
+		ContainerName:   "aiyolo-cloud-agent-worker-0",
+		WorkspacePath:   "/srv/aiyolo/workspace/chat-session",
+		Credential:      "sk-cloud-agent",
+		Status:          domain.CloudAgentStatusRunning,
+		CreatedAt:       oldSeen,
+		LastStartedAt:   &oldSeen,
+		LastSeenAt:      &oldSeen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
+		ID:            consoleChatCloudAgentSessionID("session-refresh"),
+		UserID:        "admin@example.com",
+		WorkerID:      "worker-0",
+		AccountID:     accountID,
+		AgentType:     domain.CloudAgentTypeClaudeCode,
+		ChatSessionID: "session-refresh",
+		WorkspacePath: "/srv/aiyolo/workspace/chat-session",
+		Status:        domain.CloudAgentSessionStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var ensureCalls atomic.Int32
+	handler := NewHandler(Config{
+		SecretKey:          "test-secret",
+		AdminEmail:         "admin@example.com",
+		AdminPassword:      "password",
+		CodexPublicBaseURL: "https://aiyolo.quant67.com",
+	}, store)
+	handler.ensureCloudAgent = func(_ context.Context, _ domain.WorkerServer, _ domain.WorkerSSHKey, _ domain.ProxyProfile, _ workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
+		ensureCalls.Add(1)
+		return workerops.CloudAgentInstance{}, errors.New("refresh should reuse the active cloud agent session")
+	}
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.PostForm(server.URL+"/console/chat/environment/ensure", url.Values{
+		"chat_client_session_id": {"session-refresh"},
+		"chat_public_name":       {"gpt-5.4"},
+		"chat_environment":       {consoleChatEnvironmentValue("worker-0")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("ensure status=%d body=%s", response.StatusCode, body)
+	}
+	if ensureCalls.Load() != 0 {
+		t.Fatalf("ensure calls=%d, want reused active session", ensureCalls.Load())
+	}
+	account, err := store.GetCloudAgentAccount(ctx, "admin@example.com", accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.LastSeenAt == nil || !account.LastSeenAt.After(oldSeen) {
+		t.Fatalf("expected reuse to refresh last seen timestamp: %+v", account)
+	}
+}
+
 func TestChatEnvironmentEnsureLiveKeyIncludesGPTImage2Aliases(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
@@ -1416,6 +1501,127 @@ func TestChatShellReadyEndpointLoadsCloudAgentSession(t *testing.T) {
 	}
 }
 
+func TestChatShellStateEndpointPersistsTerminalTabs(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+
+	now := time.Now().UTC()
+	accountID := consoleChatCloudAgentAccountID("worker-0")
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{
+		ID:              accountID,
+		UserID:          "admin@example.com",
+		WorkerID:        "worker-0",
+		AgentType:       domain.CloudAgentTypeClaudeCode,
+		ModelPublicName: "gpt-5.4",
+		ContainerName:   "aiyolo-cloud-agent-worker-0",
+		WorkspacePath:   "/srv/aiyolo/workspace/session-shell",
+		Credential:      "aiyolo_live_test",
+		Status:          domain.CloudAgentStatusRunning,
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
+		ID:            consoleChatCloudAgentSessionID("session-shell"),
+		UserID:        "admin@example.com",
+		WorkerID:      "worker-0",
+		AccountID:     accountID,
+		AgentType:     domain.CloudAgentTypeClaudeCode,
+		ChatSessionID: "session-shell",
+		WorkspacePath: "/srv/aiyolo/workspace/session-shell",
+		Status:        domain.CloudAgentSessionStatusActive,
+		CreatedAt:     now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(Config{
+		SecretKey:     "test-secret",
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "password",
+	}, store)
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestBody := []byte(`{"sessionID":"session-shell","activeTerminalID":"term-two","hidden":false,"instances":[{"terminalID":"term-one","label":"Terminal 1","sessionID":"stale"},{"terminalID":"term-two","label":"Terminal 2","sessionID":"stale","meta":{"workerID":"old-worker","currentWorkingDirectory":"/srv/aiyolo/workspace/session-shell/app"}}]}`)
+	response, err := client.Post(server.URL+"/console/chat/shell/state", "application/json", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("save shell state status=%d body=%s", response.StatusCode, body)
+	}
+	var saved consoleChatShellStateResponse
+	if err := json.NewDecoder(response.Body).Decode(&saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.ShellState.ActiveTerminalID != "term-two" || len(saved.ShellState.Instances) != 2 {
+		t.Fatalf("unexpected saved shell state: %+v", saved.ShellState)
+	}
+	if saved.ShellState.Instances[0].SessionID != "session-shell" || saved.ShellState.Instances[0].Meta.WorkerID != "worker-0" {
+		t.Fatalf("shell state should be normalized to the active cloud session: %+v", saved.ShellState.Instances[0])
+	}
+	if saved.ShellState.Instances[1].CurrentWorkingDirectory != "/srv/aiyolo/workspace/session-shell/app" || saved.ShellState.Instances[1].Meta.CurrentWorkingDirectory != "/srv/aiyolo/workspace/session-shell/app" {
+		t.Fatalf("shell state should preserve the terminal cwd: %+v", saved.ShellState.Instances[1])
+	}
+
+	stored, err := store.GetCloudAgentSession(ctx, "admin@example.com", consoleChatCloudAgentSessionID("session-shell"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stored.ShellStateJSON, `"terminalID":"term-two"`) || !strings.Contains(stored.ShellStateJSON, `"socketURL":"/console/chat/shell/ws?session=session-shell`) || !strings.Contains(stored.ShellStateJSON, `"currentWorkingDirectory":"/srv/aiyolo/workspace/session-shell/app"`) {
+		t.Fatalf("shell state was not persisted with normalized terminal metadata: %s", stored.ShellStateJSON)
+	}
+
+	getResponse, err := client.Get(server.URL + "/console/chat/shell/state?session=session-shell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer getResponse.Body.Close()
+	if getResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(getResponse.Body)
+		t.Fatalf("get shell state status=%d body=%s", getResponse.StatusCode, body)
+	}
+	var loaded consoleChatShellStateResponse
+	if err := json.NewDecoder(getResponse.Body).Decode(&loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ShellState.ActiveTerminalID != "term-two" || len(loaded.ShellState.Instances) != 2 {
+		t.Fatalf("unexpected loaded shell state: %+v", loaded.ShellState)
+	}
+	if loaded.ShellState.Instances[1].SocketURL != "/console/chat/shell/ws?session=session-shell&terminal=term-two" {
+		t.Fatalf("unexpected terminal socket URL: %+v", loaded.ShellState.Instances[1])
+	}
+
+	clearResponse, err := client.Post(server.URL+"/console/chat/shell/state", "application/json", strings.NewReader(`{"sessionID":"session-shell","instances":[],"hidden":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearResponse.Body.Close()
+	if clearResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(clearResponse.Body)
+		t.Fatalf("clear shell state status=%d body=%s", clearResponse.StatusCode, body)
+	}
+	stored, err = store.GetCloudAgentSession(ctx, "admin@example.com", consoleChatCloudAgentSessionID("session-shell"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ShellStateJSON != "" {
+		t.Fatalf("closed shell state should be cleared, got %s", stored.ShellStateJSON)
+	}
+}
+
 func TestChatWorkspaceTreeEndpointLoadsCloudAgentSession(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
@@ -2273,7 +2479,15 @@ func TestChatShellSocketBridgesInteractiveShell(t *testing.T) {
 			WorkspacePath: options.WorkspacePath,
 		}, nil
 	}
-	handler.openCloudAgentShell = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error) {
+	var openContextHadDeadline atomic.Bool
+	var openContextHadDone atomic.Bool
+	handler.openCloudAgentShell = func(openCtx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error) {
+		if _, ok := openCtx.Deadline(); ok {
+			openContextHadDeadline.Store(true)
+		}
+		if openCtx.Done() != nil {
+			openContextHadDone.Store(true)
+		}
 		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
 			t.Fatalf("unexpected shell bridge inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
 		}
@@ -2346,6 +2560,9 @@ func TestChatShellSocketBridgesInteractiveShell(t *testing.T) {
 	}
 	if ensureCalls.Load() != 1 {
 		t.Fatalf("ensure calls=%d, want 1", ensureCalls.Load())
+	}
+	if openContextHadDeadline.Load() || openContextHadDone.Load() {
+		t.Fatal("interactive shell open context must not expire and close the terminal after connection")
 	}
 }
 

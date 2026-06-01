@@ -3,6 +3,8 @@ package console
 import (
 	"strings"
 	"testing"
+
+	"github.com/zltl/aiyolo/internal/domain"
 )
 
 func TestConsoleCloudAgentCurrentPromptIsInteractive(t *testing.T) {
@@ -35,5 +37,28 @@ func TestConsoleCloudAgentInitialPromptKeepsTranscriptAndInteractiveContract(t *
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("initial cloud agent prompt is missing %q: %s", expected, prompt)
 		}
+	}
+}
+
+func TestConsoleCloudAgentWorkingDirectoryUsesActiveTerminalCWD(t *testing.T) {
+	cloudSession := domain.CloudAgentSession{
+		ChatSessionID:  "session-shell",
+		WorkspacePath:  "/workspace",
+		ShellStateJSON: `{"activeTerminalID":"term-two","instances":[{"terminalID":"term-one","sessionID":"session-shell","meta":{"currentWorkingDirectory":"/workspace/one"}},{"terminalID":"term-two","sessionID":"session-shell","meta":{"currentWorkingDirectory":"/workspace/two"}}]}`,
+	}
+	account := domain.CloudAgentAccount{
+		WorkerID:      "worker-0",
+		ContainerName: "aiyolo-cloud-agent-worker-0",
+		WorkspacePath: "/workspace",
+	}
+
+	if got := consoleCloudAgentWorkingDirectory(account, cloudSession, "term-two", ""); got != "/workspace/two" {
+		t.Fatalf("working directory = %q, want active terminal cwd", got)
+	}
+	if got := consoleCloudAgentWorkingDirectory(account, cloudSession, "term-one", "/workspace/submitted"); got != "/workspace/submitted" {
+		t.Fatalf("working directory = %q, want submitted cwd", got)
+	}
+	if got := consoleCloudAgentWorkingDirectory(account, cloudSession, "term-one", "relative/path"); got != "/workspace/one" {
+		t.Fatalf("working directory = %q, want persisted terminal cwd fallback", got)
 	}
 }

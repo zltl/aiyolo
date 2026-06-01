@@ -15,8 +15,8 @@ import (
 
 	"github.com/sashabaranov/go-openai"
 
-	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/artifacts"
+	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
 )
@@ -39,13 +39,15 @@ type consoleChatRouteView struct {
 }
 
 type consoleChatFormView struct {
-	ClientSessionID string                      `json:"clientSessionId"`
-	PublicName      string                      `json:"publicName"`
-	Environment     string                      `json:"environment,omitempty"`
-	ReasoningEffort string                      `json:"reasoningEffort,omitempty"`
-	SystemPrompt    string                      `json:"systemPrompt"`
-	Draft           string                      `json:"draft"`
-	Attachments     []consoleChatAttachmentView `json:"attachments,omitempty"`
+	ClientSessionID              string                      `json:"clientSessionId"`
+	PublicName                   string                      `json:"publicName"`
+	Environment                  string                      `json:"environment,omitempty"`
+	ReasoningEffort              string                      `json:"reasoningEffort,omitempty"`
+	SystemPrompt                 string                      `json:"systemPrompt"`
+	Draft                        string                      `json:"draft"`
+	Attachments                  []consoleChatAttachmentView `json:"attachments,omitempty"`
+	ShellActiveTerminalID        string                      `json:"shellActiveTerminalId,omitempty"`
+	ShellCurrentWorkingDirectory string                      `json:"shellCurrentWorkingDirectory,omitempty"`
 }
 
 type consoleChatAttachmentView struct {
@@ -166,6 +168,7 @@ func (state consoleChatPageState) data() map[string]any {
 		"ChatRoutes":                  state.Routes,
 		"ChatShellPageURL":            consoleChatShellPagePath,
 		"ChatShellSocketURL":          consoleChatShellSocketPath,
+		"ChatShellStateURL":           consoleChatShellStatePath,
 		"ChatAttachmentTreeURL":       consoleChatAttachmentTreePath,
 		"ChatAttachmentTreeEnabled":   state.AttachmentTreeEnabled,
 		"ChatWorkspaceTreeURL":        consoleChatWorkspaceTreePath,
@@ -629,13 +632,15 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 	}
 	state := consoleChatPageState{
 		Form: consoleChatFormView{
-			ClientSessionID: consoleChatRequestedSessionID(r),
-			PublicName:      strings.TrimSpace(r.FormValue("chat_public_name")),
-			Environment:     strings.TrimSpace(r.FormValue("chat_environment")),
-			ReasoningEffort: strings.TrimSpace(r.FormValue("chat_reasoning_effort")),
-			SystemPrompt:    strings.TrimSpace(r.FormValue("chat_system_prompt")),
-			Draft:           strings.TrimSpace(r.FormValue("chat_draft")),
-			Attachments:     parseConsoleChatDraftAttachments(r, handler.cfg.ChatAttachments),
+			ClientSessionID:              consoleChatRequestedSessionID(r),
+			PublicName:                   strings.TrimSpace(r.FormValue("chat_public_name")),
+			Environment:                  strings.TrimSpace(r.FormValue("chat_environment")),
+			ReasoningEffort:              strings.TrimSpace(r.FormValue("chat_reasoning_effort")),
+			SystemPrompt:                 strings.TrimSpace(r.FormValue("chat_system_prompt")),
+			Draft:                        strings.TrimSpace(r.FormValue("chat_draft")),
+			Attachments:                  parseConsoleChatDraftAttachments(r, handler.cfg.ChatAttachments),
+			ShellActiveTerminalID:        normalizeConsoleChatOptionalShellTerminalID(r.FormValue("chat_shell_active_terminal_id")),
+			ShellCurrentWorkingDirectory: normalizeConsoleChatShellWorkingDirectory(r.FormValue("chat_shell_current_working_directory")),
 		},
 		EnvironmentOptions:      environmentOptions,
 		Routes:                  consoleChatRoutes(routes, providers),
@@ -751,10 +756,12 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		execution, executionErr = handler.runCloudAgentChat(r.Context(), worker, key, account, cloudSession, consoleCloudAgentChatRequest{
-			PublicName:  state.Form.PublicName,
-			History:     history,
-			UserInput:   state.Form.Draft,
-			Attachments: state.Form.Attachments,
+			PublicName:                   state.Form.PublicName,
+			History:                      history,
+			UserInput:                    state.Form.Draft,
+			Attachments:                  state.Form.Attachments,
+			ShellActiveTerminalID:        state.Form.ShellActiveTerminalID,
+			ShellCurrentWorkingDirectory: state.Form.ShellCurrentWorkingDirectory,
 		})
 	} else {
 		target, errorMessage := handler.resolveConsoleChatTarget(r.Context(), r, state.Form.PublicName)

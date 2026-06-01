@@ -104,10 +104,12 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		}
 		_ = stdoutWriter.Close()
 	}()
-	go func() {
-		<-ctx.Done()
-		_ = shell.Close()
-	}()
+	if done := ctx.Done(); done != nil {
+		go func() {
+			<-done
+			_ = shell.Close()
+		}()
+	}
 	return shell, nil
 }
 
@@ -165,6 +167,20 @@ alias la='ls -A --color=auto'
 alias l='ls -CF --color=auto'
 alias grep='grep --color=auto'
 alias diff='diff --color=auto'
+
+__aiyolo_report_cwd() {
+	local __aiyolo_cwd_b64
+	__aiyolo_cwd_b64="$(printf '%s' "$PWD" | base64 2>/dev/null | tr -d '\n' 2>/dev/null || true)"
+	if [[ -n "$__aiyolo_cwd_b64" ]]; then
+		printf '\033]6973;AiyoloCwd=%s\007' "$__aiyolo_cwd_b64"
+	fi
+}
+
+if declare -p PROMPT_COMMAND 2>/dev/null | grep -q '^declare -[aA]'; then
+	PROMPT_COMMAND=(__aiyolo_report_cwd "${PROMPT_COMMAND[@]}")
+elif [[ "${PROMPT_COMMAND:-}" != *"__aiyolo_report_cwd"* ]]; then
+	PROMPT_COMMAND="__aiyolo_report_cwd${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+fi
 
 case "${PS1:-}" in
   *"\\e["*|*"\\033["*) ;;

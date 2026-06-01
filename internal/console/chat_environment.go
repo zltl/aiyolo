@@ -19,9 +19,8 @@ import (
 )
 
 const (
-	consoleChatEnvironmentLocal             = "local"
-	consoleChatEnvironmentCloudAgentPrefix  = "cloud-agent:"
-	consoleChatEnvironmentEnsureReuseWindow = 2 * time.Minute
+	consoleChatEnvironmentLocal            = "local"
+	consoleChatEnvironmentCloudAgentPrefix = "cloud-agent:"
 )
 
 var consoleChatPreferredImageModels = []string{
@@ -357,14 +356,6 @@ func (handler *Handler) closeConsoleChatEnvironmentSession(ctx context.Context, 
 	return handler.store.UpsertCloudAgentSession(ctx, session)
 }
 
-func consoleChatCloudAgentRecent(timestamp *time.Time, now time.Time) bool {
-	if timestamp == nil {
-		return false
-	}
-	age := now.Sub(timestamp.UTC())
-	return age <= consoleChatEnvironmentEnsureReuseWindow
-}
-
 func consoleChatCloudAgentReusable(account domain.CloudAgentAccount, workerID string, publicName string, now time.Time) bool {
 	if strings.TrimSpace(account.WorkerID) != strings.TrimSpace(workerID) {
 		return false
@@ -378,7 +369,7 @@ func consoleChatCloudAgentReusable(account domain.CloudAgentAccount, workerID st
 	if currentModel := strings.TrimSpace(account.ModelPublicName); currentModel != "" && strings.TrimSpace(publicName) != "" && currentModel != strings.TrimSpace(publicName) {
 		return false
 	}
-	return consoleChatCloudAgentRecent(account.LastSeenAt, now) || consoleChatCloudAgentRecent(account.LastStartedAt, now)
+	return true
 }
 
 func (handler *Handler) reusableConsoleChatCloudAgentEnvironment(ctx context.Context, userID string, chatSessionID string, workerID string, publicName string, account domain.CloudAgentAccount, now time.Time) (domain.CloudAgentAccount, domain.CloudAgentSession, bool, error) {

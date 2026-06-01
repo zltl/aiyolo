@@ -69,7 +69,7 @@ func TestMemoryStoreCloudWorkersRoundTrip(t *testing.T) {
 	if err := store.UpsertCloudAgentAccount(ctx, accountB); err != nil {
 		t.Fatal(err)
 	}
-	sessionA := domain.CloudAgentSession{ID: "sess-1", UserID: "user-a", WorkerID: worker.ID, AccountID: accountA.ID}
+	sessionA := domain.CloudAgentSession{ID: "sess-1", UserID: "user-a", WorkerID: worker.ID, AccountID: accountA.ID, ShellStateJSON: `{"instances":[{"terminalID":"term-a"}]}`}
 	sessionB := domain.CloudAgentSession{ID: "sess-2", UserID: "user-b", WorkerID: worker.ID, AccountID: accountB.ID}
 	if err := store.UpsertCloudAgentSession(ctx, sessionA); err != nil {
 		t.Fatal(err)
@@ -97,6 +97,13 @@ func TestMemoryStoreCloudWorkersRoundTrip(t *testing.T) {
 	}
 	if storedAccount.Credential != accountA.Credential {
 		t.Fatalf("unexpected credential: %q", storedAccount.Credential)
+	}
+	storedSession, err := store.GetCloudAgentSession(ctx, "user-a", sessionA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedSession.ShellStateJSON != sessionA.ShellStateJSON {
+		t.Fatalf("unexpected shell state json: %q", storedSession.ShellStateJSON)
 	}
 }
 

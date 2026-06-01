@@ -11,11 +11,12 @@ import (
 )
 
 type CloudAgentClaudeCodeOptions struct {
-	SessionID     string
-	Prompt        string
-	InitialPrompt string
-	Model         string
-	Stream        bool
+	SessionID        string
+	Prompt           string
+	InitialPrompt    string
+	Model            string
+	WorkingDirectory string
+	Stream           bool
 }
 
 type cloudAgentChunkWriter struct {
@@ -65,6 +66,10 @@ func RunCloudAgentClaudeCode(ctx context.Context, worker domain.WorkerServer, ke
 	if err != nil {
 		return "", err
 	}
+	workingDirectory := normalizeCloudAgentWorkingDirectory(options.WorkingDirectory)
+	if workingDirectory == "" {
+		workingDirectory = target.workspacePath
+	}
 	options.SessionID = strings.TrimSpace(options.SessionID)
 	if options.SessionID == "" {
 		return "", fmt.Errorf("cloud agent claude session id is required")
@@ -95,7 +100,7 @@ func RunCloudAgentClaudeCode(ctx context.Context, worker domain.WorkerServer, ke
 	var stderr bytes.Buffer
 	session.Stdout = stdoutWriter
 	session.Stderr = &stderr
-	session.Stdin = strings.NewReader(buildCloudAgentClaudeCodeRemoteScript(target.containerName, target.workspacePath, options))
+	session.Stdin = strings.NewReader(buildCloudAgentClaudeCodeRemoteScript(target.containerName, workingDirectory, options))
 	if err := session.Start("bash -s --"); err != nil {
 		return "", fmt.Errorf("start cloud agent claude code: %w", err)
 	}
@@ -121,6 +126,14 @@ func RunCloudAgentClaudeCode(ctx context.Context, worker domain.WorkerServer, ke
 		return stdoutWriter.String(), fmt.Errorf("run cloud agent claude code: %w: %s", waitErr, detail)
 	}
 	return stdoutWriter.String(), nil
+}
+
+func normalizeCloudAgentWorkingDirectory(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || strings.ContainsAny(trimmed, "\x00\r\n") || !strings.HasPrefix(trimmed, "/") {
+		return ""
+	}
+	return trimmed
 }
 
 func buildCloudAgentClaudeCodeRemoteScript(containerName, workspacePath string, options CloudAgentClaudeCodeOptions) string {

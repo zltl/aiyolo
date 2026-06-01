@@ -387,7 +387,7 @@ func TestNormalizeCloudAgentStartOptionsKeepsValidCustomContainerName(t *testing
 }
 
 func TestBuildCloudAgentClaudeCodeRemoteScriptIncludesSessionRecoveryAndFlags(t *testing.T) {
-	script := buildCloudAgentClaudeCodeRemoteScript("aiyolo-cloud-agent-user", "/workspace", CloudAgentClaudeCodeOptions{
+	script := buildCloudAgentClaudeCodeRemoteScript("aiyolo-cloud-agent-user", "/workspace/subdir", CloudAgentClaudeCodeOptions{
 		SessionID:     "550e8400-e29b-41d4-a716-446655440000",
 		Prompt:        "continue from the current state",
 		InitialPrompt: "reconstruct the chat transcript first",
@@ -396,6 +396,9 @@ func TestBuildCloudAgentClaudeCodeRemoteScriptIncludesSessionRecoveryAndFlags(t 
 	})
 	if !strings.Contains(script, `session_args=(--resume "$session_id")`) {
 		t.Fatalf("script should resume an existing claude session: %s", script)
+	}
+	if !strings.Contains(script, `workspace_path='/workspace/subdir'`) {
+		t.Fatalf("script should launch claude in the requested working directory: %s", script)
 	}
 	if !strings.Contains(script, `session_args=(--session-id "$session_id")`) {
 		t.Fatalf("script should bootstrap a new claude session when missing: %s", script)
@@ -443,7 +446,7 @@ func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
 			t.Fatalf("shell command should export terminal color setting %s: %s", expected, script)
 		}
 	}
-	for _, expected := range []string{`force_color_prompt=yes`, `dircolors -b`, `ls --color=auto`, `grep --color=auto`, `PS1=`, `\[\e[01;32m\]`} {
+	for _, expected := range []string{`force_color_prompt=yes`, `dircolors -b`, `ls --color=auto`, `grep --color=auto`, `AiyoloCwd=`, `PROMPT_COMMAND`, `PS1=`, `\[\e[01;32m\]`} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("shell command should install colorful interactive shell defaults %s: %s", expected, script)
 		}
@@ -453,6 +456,17 @@ func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
 	}
 	if !strings.Contains(script, `bash is not installed in this container`) {
 		t.Fatalf("shell command should surface a clear bash-missing error: %s", script)
+	}
+}
+
+func TestNormalizeCloudAgentWorkingDirectoryRequiresAbsolutePath(t *testing.T) {
+	if got := normalizeCloudAgentWorkingDirectory("/workspace/app"); got != "/workspace/app" {
+		t.Fatalf("working directory = %q, want absolute path preserved", got)
+	}
+	for _, value := range []string{"", "relative", "/workspace\napp", "/workspace\x00app"} {
+		if got := normalizeCloudAgentWorkingDirectory(value); got != "" {
+			t.Fatalf("working directory = %q for %q, want empty", got, value)
+		}
 	}
 }
 
@@ -468,11 +482,11 @@ func TestBuildCloudAgentRemoteCommandSerializesContainerEnsure(t *testing.T) {
 	if !strings.Contains(script, `def acquire_container_lock():`) || !strings.Contains(script, `fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)`) {
 		t.Fatalf("remote script should serialize same-container ensure operations with an exclusive lock: %s", script)
 	}
-	if !strings.Contains(script, `def remove_container():`) || !strings.Contains(script, `failed to remove stale cloud agent container`) {
-		t.Fatalf("remote script should retry and surface clear errors when removing a stale container: %s", script)
+	if strings.Contains(script, `"rm", "-f"`) || strings.Contains(script, `remove_container()`) {
+		t.Fatalf("remote script should not automatically remove an existing cloud-agent container: %s", script)
 	}
-	if !strings.Contains(script, `if not exact_container_id():`) {
-		t.Fatalf("remote script should tolerate containers disappearing during removal races: %s", script)
+	if !strings.Contains(script, `stop and remove it manually before starting a replacement`) {
+		t.Fatalf("remote script should ask for manual stop/rm on container identity mismatch: %s", script)
 	}
 	if !strings.Contains(script, `lock_handle = acquire_container_lock()`) {
 		t.Fatalf("remote script should hold the container lock around ensure_image and ensure_container: %s", script)
@@ -485,8 +499,11 @@ func TestBuildCloudAgentRemoteCommandWaitsForReusedContainerRuntime(t *testing.T
 	if !strings.Contains(script, `def wait_for_container_runtime():`) {
 		t.Fatalf("remote script should factor runtime readiness checks into a helper: %s", script)
 	}
-	if !regexp.MustCompile(`if inspected is not None and inspected.get\("State", \{\}\).get\("Running"\) and container_matches\(inspected\):\n            wait_for_container_runtime\(\)\n            return container_summary\(inspect_container\(\)\)`).MatchString(script) {
-		t.Fatalf("reused containers should wait for runtime readiness before returning: %s", script)
+	if !strings.Contains(script, `if not container_matches(inspected):`) {
+		t.Fatalf("remote script should validate existing container identity before reuse: %s", script)
+	}
+	if !regexp.MustCompile(`if not inspected.get\("State", \{\}\).get\("Running"\):\n            run\(\["docker", "start", payload\["container_name"\]\]\)\n        wait_for_container_runtime\(\)\n        return container_summary\(inspect_container\(\)\)`).MatchString(script) {
+		t.Fatalf("reused containers should be started if stopped and wait for runtime readiness before returning: %s", script)
 	}
 	if !strings.Contains(script, `wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "test -S ${AIYOLO_ASS_SOCKET_PATH:-/run/aiyolo/ass.sock}"], 30)`) {
 		t.Fatalf("remote script should wait for the aiyolo-ass socket: %s", script)
@@ -496,6 +513,23 @@ func TestBuildCloudAgentRemoteCommandWaitsForReusedContainerRuntime(t *testing.T
 	}
 	if strings.Contains(script, `"docker info >/dev/null 2>&1"`) || strings.Contains(script, `nc -z 127.0.0.1 {payload['container_chrome_port']}`) {
 		t.Fatalf("remote runtime readiness should not block chat startup on dockerd or Chrome: %s", script)
+	}
+}
+
+func TestBuildCloudAgentRemoteCommandIgnoresRuntimeEnvDrift(t *testing.T) {
+	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user"}`)
+
+	if strings.Contains(script, `for key, expected in (payload.get("container_env") or {}).items():`) || strings.Contains(script, `current_env.get(key) != expected`) {
+		t.Fatalf("remote script should not compare container env when deciding whether to reuse an existing container: %s", script)
+	}
+	for _, unexpected := range []string{
+		`labels.get("aiyolo.cloud_agent.build_revision") !=`,
+		`labels.get("aiyolo.ass.sha256") !=`,
+		`inspected.get("Config", {}).get("Image") != payload["image"]`,
+	} {
+		if strings.Contains(script, unexpected) {
+			t.Fatalf("remote script should not replace an existing container for runtime drift %s: %s", unexpected, script)
+		}
 	}
 }
 
