@@ -149,6 +149,7 @@ type consoleChatPageState struct {
 	EnvironmentOptions      []consoleChatEnvironmentOption
 	Routes                  []consoleChatRouteView
 	Messages                []consoleChatMessageView
+	LastResponseID          string
 	Presets                 []consoleChatPromptView
 	SelectedRoute           consoleChatRouteView
 	Result                  *consoleChatResultView
@@ -656,6 +657,9 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 		return consoleChatPageState{}, err
 	}
 	state.SessionStore = sessionStore
+	if activeSession != nil {
+		state.LastResponseID = strings.TrimSpace(activeSession.LastResponseID)
+	}
 	if activeSession != nil && !consoleChatRequestHasSubmittedState(r) {
 		state.Form.ClientSessionID = activeSession.ID
 		state.Form.PublicName = firstNonEmpty(state.Form.PublicName, activeSession.PublicName)
@@ -757,6 +761,7 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 		}
 		execution, executionErr = handler.runCloudAgentChat(r.Context(), worker, key, account, cloudSession, consoleCloudAgentChatRequest{
 			PublicName:                   state.Form.PublicName,
+			PreviousResponseID:           state.LastResponseID,
 			History:                      history,
 			UserInput:                    state.Form.Draft,
 			Attachments:                  state.Form.Attachments,

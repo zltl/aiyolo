@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-claude_user="${AIYOLO_CLAUDE_USER:-aiyolo}"
-claude_home="${AIYOLO_CLAUDE_HOME:-/workspace}"
+agent_user="${AIYOLO_AGENT_USER:-${AIYOLO_CLAUDE_USER:-aiyolo}}"
+agent_home="${AIYOLO_AGENT_HOME:-${AIYOLO_CLAUDE_HOME:-/workspace}}"
+codex_home="${CODEX_HOME:-${agent_home}/.codex}"
 
 as_root=()
 if [[ "${EUID}" -ne 0 ]]; then
@@ -10,8 +11,8 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 "${as_root[@]}" install -d -m 0755 /tmp/.X11-unix
-"${as_root[@]}" install -d -o "$claude_user" -g "$claude_user" -m 0755 "${XDG_RUNTIME_DIR:-/tmp/runtime-aiyolo}" /run/aiyolo /workspace "$claude_home" "$claude_home/.claude"
-"${as_root[@]}" chown -R "$claude_user:$claude_user" /workspace "$claude_home/.claude"
+"${as_root[@]}" install -d -o "$agent_user" -g "$agent_user" -m 0755 "${XDG_RUNTIME_DIR:-/tmp/runtime-aiyolo}" /run/aiyolo /workspace "$agent_home" "$codex_home"
+"${as_root[@]}" chown -R "$agent_user:$agent_user" /workspace "$codex_home"
 "${as_root[@]}" chmod 1777 /tmp/.X11-unix
 
 if [[ $# -eq 0 ]]; then

@@ -186,6 +186,7 @@ func codexCommandEnv(baseEnv []string, cfg launcherConfig) []string {
 	env := append([]string{}, baseEnv...)
 	env = append(env,
 		"OPENAI_API_KEY="+cfg.APIKey,
+		"CODEX_API_KEY="+cfg.APIKey,
 		"OPENAI_BASE_URL="+cfg.APIBaseURL,
 	)
 	if strings.TrimSpace(cfg.DefaultModel) != "" {

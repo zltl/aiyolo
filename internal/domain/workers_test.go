@@ -79,8 +79,8 @@ func TestNormalizeWorkerDisksDeduplicatesEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.AgentType != CloudAgentTypeClaudeCode {
-		t.Fatalf("AgentType=%q, want %q", session.AgentType, CloudAgentTypeClaudeCode)
+	if session.AgentType != CloudAgentTypeCodex {
+		t.Fatalf("AgentType=%q, want %q", session.AgentType, CloudAgentTypeCodex)
 	}
 	if session.Status != CloudAgentSessionStatusPending {
 		t.Fatalf("Status=%q, want %q", session.Status, CloudAgentSessionStatusPending)

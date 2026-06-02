@@ -36,8 +36,9 @@ const (
 	defaultCloudAgentDisplay             = ":99"
 	defaultCloudAgentSHMSize             = "2g"
 	defaultCloudAgentDockerStorageDriver = "vfs"
-	defaultCloudAgentClaudeUser          = "aiyolo"
-	defaultCloudAgentClaudeHome          = "/workspace"
+	defaultCloudAgentUser                = "aiyolo"
+	defaultCloudAgentHome                = "/workspace"
+	defaultCloudAgentCodexHome           = "/workspace/.codex"
 	cloudAgentImageBuildRevisionLabel    = "aiyolo.cloud_agent.build_revision"
 	cloudAgentImageASSSHA256Label        = "aiyolo.ass.sha256"
 )
@@ -242,7 +243,7 @@ func normalizeCloudAgentStartOptions(worker domain.WorkerServer, options CloudAg
 	}
 	options.AgentType = strings.TrimSpace(options.AgentType)
 	if options.AgentType == "" {
-		options.AgentType = domain.CloudAgentTypeClaudeCode
+		options.AgentType = domain.CloudAgentTypeCodex
 	}
 	options.Image = strings.TrimSpace(options.Image)
 	if options.Image == "" {
@@ -491,6 +492,8 @@ func cloudAgentContainerEnv(options CloudAgentStartOptions) map[string]string {
 		"OPENAI_BASE_URL":                      options.APIBaseURL,
 		"OPENAI_API_BASE":                      options.APIBaseURL,
 		"OPENAI_API_KEY":                       options.APIKey,
+		"CODEX_API_KEY":                        options.APIKey,
+		"CODEX_HOME":                           defaultCloudAgentCodexHome,
 		"ANTHROPIC_API_KEY":                    options.APIKey,
 		"ANTHROPIC_BASE_URL":                   apiRoot,
 		"ANTHROPIC_API_URL":                    apiRoot,
@@ -499,8 +502,8 @@ func cloudAgentContainerEnv(options CloudAgentStartOptions) map[string]string {
 		"AIYOLO_CLOUD_AGENT_AUTO_START_CHROME": boolString(options.AutoStartChrome),
 		"AIYOLO_CLOUD_AGENT_CHROME_URL":        options.OpenURL,
 		"AIYOLO_ASS_WORKSPACE_ROOT":            options.WorkspacePath,
-		"AIYOLO_ASS_USER":                      defaultCloudAgentClaudeUser,
-		"AIYOLO_ASS_HOME":                      defaultCloudAgentClaudeHome,
+		"AIYOLO_ASS_USER":                      defaultCloudAgentUser,
+		"AIYOLO_ASS_HOME":                      defaultCloudAgentHome,
 		"AIYOLO_ASS_SOCKET_PATH":               cloudAgentASSSocketPath,
 		"AIYOLO_ASS_HTTP_ADDR":                 fmt.Sprintf("0.0.0.0:%d", containerASSPort),
 		"AIYOLO_DISPLAY":                       options.Display,

@@ -31,6 +31,7 @@ type consoleChatSessionView struct {
 	CustomTitle      bool                        `json:"customTitle"`
 	PublicName       string                      `json:"publicName"`
 	SystemPrompt     string                      `json:"systemPrompt"`
+	LastResponseID   string                      `json:"-"`
 	Draft            string                      `json:"draft,omitempty"`
 	DraftAttachments []consoleChatAttachmentView `json:"draftAttachments,omitempty"`
 	Messages         []consoleChatMessageView    `json:"messages"`
@@ -131,6 +132,7 @@ func consoleChatSessionViewFromDomain(locale string, session domain.ConsoleChatS
 		CustomTitle:      session.CustomTitle,
 		PublicName:       session.PublicName,
 		SystemPrompt:     session.SystemPrompt,
+		LastResponseID:   session.LastResponseID,
 		Draft:            session.Draft,
 		DraftAttachments: decodeConsoleChatSessionAttachments(session.DraftAttachmentsJSON, cfg),
 		Messages:         decodeConsoleChatSessionMessages(locale, session.MessagesJSON, cfg),

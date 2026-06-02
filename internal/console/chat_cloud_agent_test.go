@@ -40,6 +40,52 @@ func TestConsoleCloudAgentInitialPromptKeepsTranscriptAndInteractiveContract(t *
 	}
 }
 
+func TestConsoleCloudAgentCodexParserConsumesJSONLines(t *testing.T) {
+	parser := &consoleCloudAgentStreamParser{}
+	raw := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"550e8400-e29b-41d4-a716-446655440000"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"Codex finished."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18}}`,
+	}, "\n")
+
+	if err := parser.consumeJSONResult(raw); err != nil {
+		t.Fatal(err)
+	}
+	if parser.sessionID != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Fatalf("sessionID=%q", parser.sessionID)
+	}
+	if got := parser.resultText(); got != "Codex finished." {
+		t.Fatalf("resultText=%q", got)
+	}
+	if parser.inputTokens != 11 || parser.outputTokens != 7 || parser.totalTokens != 18 {
+		t.Fatalf("unexpected usage input=%d output=%d total=%d", parser.inputTokens, parser.outputTokens, parser.totalTokens)
+	}
+}
+
+func TestConsoleCloudAgentCodexParserStreamsCompletedMessageWhenNoDelta(t *testing.T) {
+	parser := &consoleCloudAgentStreamParser{}
+	var deltas []string
+	err := parser.consumeLine(`{"type":"item.completed","item":{"type":"agent_message","content":[{"type":"output_text","text":"final text"}]}}`, func(delta string) error {
+		deltas = append(deltas, delta)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(deltas, "") != "final text" {
+		t.Fatalf("deltas=%q", deltas)
+	}
+}
+
+func TestConsoleCloudAgentCodexThreadIDRequiresUUID(t *testing.T) {
+	if got := consoleCloudAgentCodexThreadID("chatcmpl-local-response"); got != "" {
+		t.Fatalf("local response id should not be treated as codex thread id: %q", got)
+	}
+	if got := consoleCloudAgentCodexThreadID("550e8400-e29b-41d4-a716-446655440000"); got != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Fatalf("codex thread id=%q", got)
+	}
+}
+
 func TestConsoleCloudAgentWorkingDirectoryUsesActiveTerminalCWD(t *testing.T) {
 	cloudSession := domain.CloudAgentSession{
 		ChatSessionID:  "session-shell",

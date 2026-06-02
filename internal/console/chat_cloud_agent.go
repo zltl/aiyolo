@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/zltl/aiyolo/internal/domain"
 	workerops "github.com/zltl/aiyolo/internal/workers"
 )
 
 type consoleCloudAgentChatRequest struct {
 	PublicName                   string
+	PreviousResponseID           string
 	History                      []consoleChatMessageView
 	UserInput                    string
 	Attachments                  []consoleChatAttachmentView
@@ -29,15 +32,18 @@ type consoleCloudAgentStreamParser struct {
 	sessionID    string
 	finishReason string
 	durationMS   int64
+	inputTokens  int
+	outputTokens int
+	totalTokens  int
 	errMessage   string
 }
 
 func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error) {
 	publicName := firstNonEmpty(strings.TrimSpace(request.PublicName), strings.TrimSpace(account.ModelPublicName))
-	sessionID := domain.CloudAgentClaudeSessionID(account.UserID, cloudSession.ChatSessionID)
+	threadID := consoleCloudAgentCodexThreadID(request.PreviousResponseID)
 	parser := &consoleCloudAgentStreamParser{}
-	output, err := workerops.RunCloudAgentClaudeCode(ctx, worker, key, account, cloudSession, workerops.CloudAgentClaudeCodeOptions{
-		SessionID:        sessionID,
+	output, err := workerops.RunCloudAgentCodex(ctx, worker, key, account, cloudSession, workerops.CloudAgentCodexOptions{
+		ThreadID:         threadID,
 		Prompt:           consoleCloudAgentCurrentPrompt(request.UserInput, request.Attachments),
 		InitialPrompt:    consoleCloudAgentInitialPrompt(request.History, request.UserInput, request.Attachments),
 		Model:            publicName,
@@ -62,16 +68,20 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 		Result: consoleChatResultView{
 			PublicName:    publicName,
 			ProviderID:    "cloud-agent:" + strings.TrimSpace(worker.ID),
-			ProviderName:  "Claude Code · " + strings.TrimSpace(worker.ID),
+			ProviderName:  "Codex · " + strings.TrimSpace(worker.ID),
 			UpstreamModel: firstNonEmpty(publicName, strings.TrimSpace(account.ModelPublicName)),
 			Output:        parser.resultText(),
-			ResponseID:    firstNonEmpty(parser.sessionID, sessionID),
+			ResponseID:    firstNonEmpty(parser.sessionID, threadID),
 			FinishReason:  parser.finishReason,
 			DurationMS:    parser.durationMS,
+			TotalTokens:   parser.totalTokens,
 		},
 		Usage: domain.UsageRecord{
-			Currency: domain.DefaultBillingCurrency,
-			Stream:   request.Stream,
+			Currency:     domain.DefaultBillingCurrency,
+			InputTokens:  parser.inputTokens,
+			OutputTokens: parser.outputTokens,
+			TotalTokens:  parser.totalTokens,
+			Stream:       request.Stream,
 		},
 	}
 	if result.Result.Output == "" {
@@ -94,6 +104,17 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 	result.StatusCode = 200
 	result.Usage.StatusCode = 200
 	return result, nil
+}
+
+func consoleCloudAgentCodexThreadID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(value); err != nil {
+		return ""
+	}
+	return value
 }
 
 func consoleCloudAgentWorkingDirectory(account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, activeTerminalID string, requestedWorkingDirectory string) string {
@@ -140,9 +161,9 @@ func consoleCloudAgentInitialPrompt(history []consoleChatMessageView, userInput 
 
 func consoleCloudAgentInteractivePromptSections() []string {
 	return []string{
-		"Continue this AIYolo chat session inside Claude Code as an interactive collaboration, not a one-shot completion.",
+		"Continue this AIYolo chat session inside Codex as an interactive collaboration, not a one-shot completion.",
 		"Work on the latest user message in the current workspace when you have enough information.",
-		"If the request is ambiguous, missing a decision, requires credentials, or could reasonably branch into different implementations, ask a concise clarification question and stop. The user will answer in the AIYolo chat input, and the next turn will resume this same Claude Code session.",
+		"If the request is ambiguous, missing a decision, requires credentials, or could reasonably branch into different implementations, ask a concise clarification question and stop. The user will answer in the AIYolo chat input, and the next turn will resume this same Codex session.",
 		"Do not invent missing requirements or mark the task complete while you are waiting for the user's answer.",
 	}
 }
@@ -242,7 +263,12 @@ func (parser *consoleCloudAgentStreamParser) consumeJSONResult(raw string) error
 	if raw == "" {
 		return nil
 	}
-	return parser.consumeLine(raw, nil)
+	for _, line := range strings.Split(raw, "\n") {
+		if err := parser.consumeLine(line, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, onDelta func(string) error) error {
@@ -257,10 +283,33 @@ func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, onDelta fun
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return nil
 	}
-	if parser.sessionID == "" {
-		parser.sessionID = strings.TrimSpace(stringValue(payload["session_id"]))
-	}
+	parser.captureSessionID(payload)
 	switch strings.TrimSpace(stringValue(payload["type"])) {
+	case "thread.started":
+		parser.captureSessionID(payload)
+	case "item.delta", "item.updated", "message.delta", "agent_message.delta", "agent_message_delta":
+		if text := codexDeltaText(payload); text != "" {
+			parser.output.WriteString(text)
+			if onDelta != nil {
+				return onDelta(text)
+			}
+		}
+	case "item.completed":
+		item, _ := payload["item"].(map[string]any)
+		if text := codexAssistantItemText(item); text != "" {
+			parser.finalOutput = text
+			if onDelta != nil && parser.output.Len() == 0 {
+				parser.output.WriteString(text)
+				return onDelta(text)
+			}
+		}
+	case "turn.completed":
+		parser.applyUsage(payload["usage"])
+		parser.finishReason = firstNonEmpty(strings.TrimSpace(stringValue(payload["finish_reason"])), parser.finishReason, "stop")
+	case "turn.failed":
+		parser.errMessage = firstNonEmpty(codexErrorMessage(payload["error"]), strings.TrimSpace(stringValue(payload["message"])), "codex execution failed")
+	case "error":
+		parser.errMessage = firstNonEmpty(codexErrorMessage(payload["error"]), strings.TrimSpace(stringValue(payload["message"])), "codex execution failed")
 	case "stream_event":
 		event, _ := payload["event"].(map[string]any)
 		if strings.TrimSpace(stringValue(event["type"])) == "content_block_delta" {
@@ -290,11 +339,128 @@ func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, onDelta fun
 			parser.durationMS = duration
 		}
 		if isTrueValue(payload["is_error"]) {
-			parser.errMessage = firstNonEmpty(strings.TrimSpace(stringValue(payload["error"])), strings.TrimSpace(stringValue(payload["result"])), "claude code execution failed")
+			parser.errMessage = firstNonEmpty(strings.TrimSpace(stringValue(payload["error"])), strings.TrimSpace(stringValue(payload["result"])), "codex execution failed")
 		}
 	case "system":
 		if strings.TrimSpace(stringValue(payload["subtype"])) == "init" {
 			parser.sessionID = firstNonEmpty(strings.TrimSpace(stringValue(payload["session_id"])), parser.sessionID)
+		}
+	}
+	return nil
+}
+
+func (parser *consoleCloudAgentStreamParser) captureSessionID(payload map[string]any) {
+	if parser == nil || parser.sessionID != "" || payload == nil {
+		return
+	}
+	parser.sessionID = firstNonEmpty(
+		strings.TrimSpace(stringValue(payload["thread_id"])),
+		strings.TrimSpace(stringValue(payload["session_id"])),
+		strings.TrimSpace(stringValue(payload["conversation_id"])),
+	)
+	if parser.sessionID != "" {
+		return
+	}
+	thread, _ := payload["thread"].(map[string]any)
+	parser.sessionID = firstNonEmpty(strings.TrimSpace(stringValue(thread["id"])), strings.TrimSpace(stringValue(thread["thread_id"])))
+}
+
+func (parser *consoleCloudAgentStreamParser) applyUsage(value any) {
+	if parser == nil {
+		return
+	}
+	usage, _ := value.(map[string]any)
+	if len(usage) == 0 {
+		return
+	}
+	inputTokens := intValue(firstNonNil(usage["input_tokens"], usage["prompt_tokens"]))
+	outputTokens := intValue(firstNonNil(usage["output_tokens"], usage["completion_tokens"]))
+	totalTokens := intValue(usage["total_tokens"])
+	if totalTokens == 0 && inputTokens+outputTokens > 0 {
+		totalTokens = inputTokens + outputTokens
+	}
+	if inputTokens > 0 {
+		parser.inputTokens = inputTokens
+	}
+	if outputTokens > 0 {
+		parser.outputTokens = outputTokens
+	}
+	if totalTokens > 0 {
+		parser.totalTokens = totalTokens
+	}
+}
+
+func codexDeltaText(payload map[string]any) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	for _, key := range []string{"delta", "text", "content"} {
+		if text := codexTextFromValue(payload[key]); text != "" {
+			return text
+		}
+	}
+	item, _ := payload["item"].(map[string]any)
+	return codexAssistantItemText(item)
+}
+
+func codexAssistantItemText(item map[string]any) string {
+	if len(item) == 0 {
+		return ""
+	}
+	itemType := strings.ToLower(strings.TrimSpace(stringValue(item["type"])))
+	role := strings.ToLower(strings.TrimSpace(stringValue(item["role"])))
+	if itemType != "agent_message" && itemType != "message" && role != "assistant" {
+		return ""
+	}
+	for _, key := range []string{"text", "content", "message"} {
+		if text := codexTextFromValue(item[key]); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func codexTextFromValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := codexTextFromValue(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "")
+	case map[string]any:
+		blockType := strings.ToLower(strings.TrimSpace(stringValue(typed["type"])))
+		if blockType == "tool_call" || blockType == "function_call" || blockType == "reasoning" {
+			return ""
+		}
+		for _, key := range []string{"text", "content", "value"} {
+			if text := codexTextFromValue(typed[key]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func codexErrorMessage(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]any:
+		return firstNonEmpty(strings.TrimSpace(stringValue(typed["message"])), strings.TrimSpace(stringValue(typed["code"])), strings.TrimSpace(stringValue(typed["type"])))
+	default:
+		return ""
+	}
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
 		}
 	}
 	return nil
@@ -337,6 +503,10 @@ func int64Value(value any) int64 {
 	default:
 		return 0
 	}
+}
+
+func intValue(value any) int {
+	return int(int64Value(value))
 }
 
 func isTrueValue(value any) bool {

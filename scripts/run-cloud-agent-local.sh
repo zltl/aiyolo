@@ -21,6 +21,7 @@ need_cmd timeout
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 user_id="${AIYOLO_CLOUD_AGENT_USER_ID:-aiyolo}"
+agent_type="${AIYOLO_CLOUD_AGENT_TYPE:-${AIYOLO_AGENT_TYPE:-codex}}"
 safe_user="${user_id//@/-}"
 safe_user="${safe_user//[^A-Za-z0-9_-]/-}"
 container_name="${AIYOLO_CLOUD_AGENT_CONTAINER_NAME:-aiyolo-cloud-agent-${safe_user}}"
@@ -46,6 +47,7 @@ fi
 install -d -m 0755 "$workspace_root" "$repo_snapshot_dir" "$docker_data_root"
 AIYOLO_CLOUD_AGENT_METADATA_PATH="$workspace_root/.aiyolo-cloud-agent.json" \
 AIYOLO_CLOUD_AGENT_METADATA_USER="$user_id" \
+AIYOLO_CLOUD_AGENT_METADATA_AGENT_TYPE="$agent_type" \
 AIYOLO_CLOUD_AGENT_METADATA_IMAGE="$image" \
 python3 <<'PY'
 import json
@@ -53,7 +55,7 @@ import os
 
 payload = {
     "user_id": os.environ["AIYOLO_CLOUD_AGENT_METADATA_USER"],
-    "agent_type": "claude-code",
+  "agent_type": os.environ["AIYOLO_CLOUD_AGENT_METADATA_AGENT_TYPE"],
     "workspace_path": "/workspace",
     "created_by": "local-cloud-agent-runner",
     "image": os.environ["AIYOLO_CLOUD_AGENT_METADATA_IMAGE"],
@@ -77,10 +79,10 @@ docker_run_args=(
   --privileged \
   --shm-size "${AIYOLO_CLOUD_AGENT_SHM_SIZE:-2g}" \
   --label aiyolo.user_id="$user_id" \
-  --label aiyolo.agent_type='claude-code' \
+  --label aiyolo.agent_type="$agent_type" \
   --label aiyolo.workspace_path='/workspace' \
   -e AIYOLO_USER_ID="$user_id" \
-  -e AIYOLO_AGENT_TYPE='claude-code' \
+  -e AIYOLO_AGENT_TYPE="$agent_type" \
   -e AIYOLO_CLOUD_AGENT_ENABLE_DISPLAY="$enable_display" \
   -e AIYOLO_CLOUD_AGENT_ENABLE_DOCKERD="$enable_dockerd" \
   -e AIYOLO_CLOUD_AGENT_AUTO_START_CHROME="$auto_start_chrome" \

@@ -665,10 +665,10 @@ func TestSendChatEnsuresCloudAgentEnvironment(t *testing.T) {
 			Result: consoleChatResultView{
 				PublicName:    request.PublicName,
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Claude Code · worker-0",
+				ProviderName:  "Codex · worker-0",
 				UpstreamModel: request.PublicName,
 				Output:        "Cloud container is ready.",
-				ResponseID:    "claude-session-send",
+				ResponseID:    "codex-thread-send",
 			},
 			StatusCode: http.StatusOK,
 			Usage:      domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK},
@@ -767,10 +767,10 @@ func TestStreamChatEnsuresCloudAgentEnvironment(t *testing.T) {
 			Result: consoleChatResultView{
 				PublicName:    request.PublicName,
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Claude Code · worker-0",
+				ProviderName:  "Codex · worker-0",
 				UpstreamModel: request.PublicName,
 				Output:        "Cloud agent is live.",
-				ResponseID:    "claude-session-stream",
+				ResponseID:    "codex-thread-stream",
 			},
 			StatusCode: http.StatusOK,
 			Usage:      domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK, Stream: true},
@@ -860,10 +860,10 @@ func TestStreamChatReusesRecentlyEnsuredCloudAgentEnvironment(t *testing.T) {
 			Result: consoleChatResultView{
 				PublicName:    request.PublicName,
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Claude Code · worker-0",
+				ProviderName:  "Codex · worker-0",
 				UpstreamModel: request.PublicName,
 				Output:        "reused cloud agent",
-				ResponseID:    "claude-session-stream-reuse",
+				ResponseID:    "codex-thread-stream-reuse",
 			},
 			StatusCode: http.StatusOK,
 			Usage:      domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK, Stream: true},
@@ -920,7 +920,7 @@ func TestStreamChatReusesRecentlyEnsuredCloudAgentEnvironment(t *testing.T) {
 	}
 }
 
-func TestSendChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
+func TestSendChatRoutesThroughCloudAgentCodex(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
 		t.Fatal(err)
@@ -948,9 +948,9 @@ func TestSendChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 		return workerops.CloudAgentInstance{
 			Status:        domain.CloudAgentStatusRunning,
 			WorkerID:      worker.ID,
-			ContainerID:   "container-send-claude",
+			ContainerID:   "container-send-codex",
 			ContainerName: "aiyolo-cloud-agent-worker-0",
-			WorkspacePath: "/srv/aiyolo/workspace/session-claude-send",
+			WorkspacePath: "/srv/aiyolo/workspace/session-codex-send",
 		}, nil
 	}
 	handler.runCloudAgentChat = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error) {
@@ -958,20 +958,20 @@ func TestSendChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 		if worker.ID != "worker-0" || key.ID != "ssh-key-1" {
 			t.Fatalf("unexpected cloud chat target worker=%+v key=%+v", worker, key)
 		}
-		if account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-claude-send" {
+		if account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-codex-send" {
 			t.Fatalf("unexpected cloud chat account/session account=%+v session=%+v", account, session)
 		}
-		if request.PublicName != "gpt-5.4" || request.UserInput != "请直接让 Claude Code 帮我看这个仓库" || request.Stream {
+		if request.PublicName != "gpt-5.4" || request.UserInput != "请直接让 Codex 帮我看这个仓库" || request.Stream {
 			t.Fatalf("unexpected cloud chat request: %+v", request)
 		}
 		return consoleChatExecution{
 			Result: consoleChatResultView{
 				PublicName:    "gpt-5.4",
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Claude Code · worker-0",
+				ProviderName:  "Codex · worker-0",
 				UpstreamModel: "gpt-5.4",
-				Output:        "Claude Code 已接管当前 Cloud Agent，会在容器里继续工作。",
-				ResponseID:    "claude-session-send",
+				Output:        "Codex 已接管当前 Cloud Agent，会在容器里继续工作。",
+				ResponseID:    "codex-thread-send",
 			},
 			StatusCode: http.StatusOK,
 			Usage:      domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK},
@@ -987,10 +987,10 @@ func TestSendChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 	}
 
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat", strings.NewReader(url.Values{
-		"chat_client_session_id": {"session-claude-send"},
+		"chat_client_session_id": {"session-codex-send"},
 		"chat_public_name":       {"gpt-5.4"},
 		"chat_environment":       {consoleChatEnvironmentValue("worker-0")},
-		"chat_draft":             {"请直接让 Claude Code 帮我看这个仓库"},
+		"chat_draft":             {"请直接让 Codex 帮我看这个仓库"},
 	}.Encode()))
 	if err != nil {
 		t.Fatal(err)
@@ -1007,7 +1007,7 @@ func TestSendChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 		t.Fatalf("send status=%d body=%s", response.StatusCode, body)
 	}
 	body, _ := io.ReadAll(response.Body)
-	if !strings.Contains(string(body), "Claude Code 已接管当前 Cloud Agent") {
+	if !strings.Contains(string(body), "Codex 已接管当前 Cloud Agent") {
 		t.Fatalf("assistant output missing from cloud agent send response: %s", body)
 	}
 	if ensureCalls.Load() != 1 || cloudChatCalls.Load() != 1 {
@@ -1015,7 +1015,7 @@ func TestSendChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 	}
 }
 
-func TestStreamChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
+func TestStreamChatRoutesThroughCloudAgentCodex(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
 		t.Fatal(err)
@@ -1037,9 +1037,9 @@ func TestStreamChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 		return workerops.CloudAgentInstance{
 			Status:        domain.CloudAgentStatusRunning,
 			WorkerID:      worker.ID,
-			ContainerID:   "container-stream-claude",
+			ContainerID:   "container-stream-codex",
 			ContainerName: "aiyolo-cloud-agent-worker-0",
-			WorkspacePath: "/srv/aiyolo/workspace/session-claude-stream",
+			WorkspacePath: "/srv/aiyolo/workspace/session-codex-stream",
 		}, nil
 	}
 	handler.runCloudAgentChat = func(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error) {
@@ -1047,20 +1047,20 @@ func TestStreamChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 		if !request.Stream || request.OnDelta == nil {
 			t.Fatalf("expected stream request with delta callback: %+v", request)
 		}
-		if err := request.OnDelta("Claude "); err != nil {
+		if err := request.OnDelta("Codex "); err != nil {
 			return consoleChatExecution{}, err
 		}
-		if err := request.OnDelta("Code 已经开始处理。"); err != nil {
+		if err := request.OnDelta("已经开始处理。"); err != nil {
 			return consoleChatExecution{}, err
 		}
 		return consoleChatExecution{
 			Result: consoleChatResultView{
 				PublicName:    "gpt-5.4",
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Claude Code · worker-0",
+				ProviderName:  "Codex · worker-0",
 				UpstreamModel: "gpt-5.4",
-				Output:        "Claude Code 已经开始处理。",
-				ResponseID:    "claude-session-stream",
+				Output:        "Codex 已经开始处理。",
+				ResponseID:    "codex-thread-stream",
 			},
 			StatusCode: http.StatusOK,
 			Usage:      domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK, Stream: true},
@@ -1076,10 +1076,10 @@ func TestStreamChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 	}
 
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(url.Values{
-		"chat_client_session_id": {"session-claude-stream"},
+		"chat_client_session_id": {"session-codex-stream"},
 		"chat_public_name":       {"gpt-5.4"},
 		"chat_environment":       {consoleChatEnvironmentValue("worker-0")},
-		"chat_draft":             {"请让 Claude Code 直接处理这个任务"},
+		"chat_draft":             {"请让 Codex 直接处理这个任务"},
 	}.Encode()))
 	if err != nil {
 		t.Fatal(err)
@@ -1096,7 +1096,7 @@ func TestStreamChatRoutesThroughCloudAgentClaudeCode(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	text := string(body)
-	if !strings.Contains(text, `"type":"delta","delta":"Claude "`) || !strings.Contains(text, `"type":"done"`) || !strings.Contains(text, "Claude Code 已经开始处理。") {
+	if !strings.Contains(text, `"type":"delta","delta":"Codex "`) || !strings.Contains(text, `"type":"done"`) || !strings.Contains(text, "Codex 已经开始处理。") {
 		t.Fatalf("unexpected cloud agent stream body: %s", text)
 	}
 	if ensureCalls.Load() != 1 || cloudChatCalls.Load() != 1 {

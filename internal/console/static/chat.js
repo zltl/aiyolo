@@ -3300,7 +3300,8 @@
   const openChatShell = async (form, options = {}) => {
     const root = currentRoot();
     const baseSocketURL = shellSocketBaseURL(form);
-    const initialInput = String(options.initialInput || options.command || "");
+    const commandInput = ownProperty.call(options, "command") ? String(options.command || "").trim() : "";
+    const initialInput = commandInput !== "" ? `${commandInput}\n` : String(options.initialInput || "");
     if (!root || baseSocketURL === "") {
       return;
     }
@@ -3386,7 +3387,8 @@
     void openChatShell(currentForm(), {
       showProgress: detail.showProgress !== false,
       terminalID: detail.terminalID,
-      initialInput: detail.command || detail.initialInput || "",
+      command: detail.command,
+      initialInput: detail.initialInput,
     });
   });
 

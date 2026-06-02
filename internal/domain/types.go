@@ -57,6 +57,7 @@ const (
 	WorkerJobEventWarn  = "warn"
 	WorkerJobEventError = "error"
 
+	CloudAgentTypeCodex      = "codex"
 	CloudAgentTypeClaudeCode = "claude-code"
 
 	CloudAgentStatusStopped  = "stopped"
@@ -780,7 +781,7 @@ func NormalizeCloudAgentAccount(account CloudAgentAccount) (CloudAgentAccount, e
 		return CloudAgentAccount{}, fmt.Errorf("cloud agent account worker id is required")
 	}
 	if account.AgentType == "" {
-		account.AgentType = CloudAgentTypeClaudeCode
+		account.AgentType = CloudAgentTypeCodex
 	}
 	if account.WorkspacePath == "" || account.WorkspacePath == "." {
 		account.WorkspacePath = DefaultCloudAgentWorkspacePath
@@ -818,7 +819,7 @@ func NormalizeCloudAgentSession(session CloudAgentSession) (CloudAgentSession, e
 		return CloudAgentSession{}, fmt.Errorf("cloud agent session account id is required")
 	}
 	if session.AgentType == "" {
-		session.AgentType = CloudAgentTypeClaudeCode
+		session.AgentType = CloudAgentTypeCodex
 	}
 	if session.WorkspacePath == "" || session.WorkspacePath == "." {
 		session.WorkspacePath = DefaultCloudAgentWorkspacePath

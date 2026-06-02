@@ -351,7 +351,7 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
 	account.WorkerID = worker.ID
-	account.AgentType = firstNonEmpty(strings.TrimSpace(account.AgentType), domain.CloudAgentTypeClaudeCode)
+	account.AgentType = domain.CloudAgentTypeCodex
 	account.WorkspacePath = firstNonEmpty(strings.TrimSpace(account.WorkspacePath), strings.TrimSpace(cloudSession.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
 	account.Status = domain.CloudAgentStatusStarting
 	account.LastError = ""

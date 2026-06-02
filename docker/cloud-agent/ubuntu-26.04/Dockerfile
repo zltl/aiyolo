@@ -8,7 +8,7 @@ ARG CHROME_DEB_URL=https://dl.google.com/linux/direct/google-chrome-stable_curre
 ARG AIYOLO_ASS_SHA256=
 ARG AIYOLO_CLOUD_AGENT_BUILD_REVISION=dev
 ARG NODE_VERSION=20.20.2
-ARG CLAUDE_CODE_VERSION=2.1.150
+ARG CODEX_VERSION=latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
@@ -16,8 +16,9 @@ ENV LC_ALL=C.UTF-8
 ENV DISPLAY=:99
 ENV XDG_RUNTIME_DIR=/tmp/runtime-aiyolo
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
-ENV AIYOLO_CLAUDE_USER=aiyolo
-ENV AIYOLO_CLAUDE_HOME=/workspace
+ENV AIYOLO_AGENT_USER=aiyolo
+ENV AIYOLO_AGENT_HOME=/workspace
+ENV CODEX_HOME=/workspace/.codex
 ENV HOME=/workspace
 ENV USER=aiyolo
 
@@ -48,12 +49,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libxss1 libxtst6 lsof mesa-utils nano net-tools netcat-openbsd openssh-client pkg-config procps psmisc python3 python3-dev python3-pip \
     python3-venv ripgrep rsync strace sudo tini tmux tree tzdata uidmap unzip vim wget x11vnc xauth xdg-utils xterm xvfb zip \
     docker.io fuse-overlayfs \
- && groupadd --gid 1000 "${AIYOLO_CLAUDE_USER}" \
- && useradd --uid 1000 --gid 1000 --create-home --home-dir "${AIYOLO_CLAUDE_HOME}" --shell /bin/bash "${AIYOLO_CLAUDE_USER}" \
- && usermod -aG sudo,docker "${AIYOLO_CLAUDE_USER}" \
- && install -d -o "${AIYOLO_CLAUDE_USER}" -g "${AIYOLO_CLAUDE_USER}" -m 0755 /workspace "${AIYOLO_CLAUDE_HOME}/.claude" "${XDG_RUNTIME_DIR}" /run/aiyolo \
+ && groupadd --gid 1000 "${AIYOLO_AGENT_USER}" \
+ && useradd --uid 1000 --gid 1000 --create-home --home-dir "${AIYOLO_AGENT_HOME}" --shell /bin/bash "${AIYOLO_AGENT_USER}" \
+ && usermod -aG sudo,docker "${AIYOLO_AGENT_USER}" \
+ && install -d -o "${AIYOLO_AGENT_USER}" -g "${AIYOLO_AGENT_USER}" -m 0755 /workspace "${CODEX_HOME}" "${XDG_RUNTIME_DIR}" /run/aiyolo \
  && install -d -m 0755 /etc/aiyolo /etc/sudoers.d /usr/local/bin /opt \
- && printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${AIYOLO_CLAUDE_USER}" >/etc/sudoers.d/aiyolo \
+ && printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${AIYOLO_AGENT_USER}" >/etc/sudoers.d/aiyolo \
  && chmod 0440 /etc/sudoers.d/aiyolo \
  && if [ -x /usr/bin/fdfind ]; then ln -sf /usr/bin/fdfind /usr/local/bin/fd; fi \
  && wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
@@ -64,10 +65,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/node" /usr/local/bin/node \
  && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npm" /usr/local/bin/npm \
  && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npx" /usr/local/bin/npx \
- && npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" --cache /tmp/.npm-cache --fund=false --audit=false \
+ && npm install -g --prefix /usr/local "@openai/codex@${CODEX_VERSION}" --cache /tmp/.npm-cache --fund=false --audit=false \
  && node --version \
  && npm --version \
- && claude --version \
+ && codex --version \
  && rm -f /tmp/node.tar.gz \
  && rm -rf /tmp/.npm-cache \
  && rm -rf /var/lib/apt/lists/*
@@ -92,7 +93,7 @@ RUN chmod 0755 \
 
 WORKDIR /workspace
 
-USER ${AIYOLO_CLAUDE_USER}
+USER ${AIYOLO_AGENT_USER}
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/aiyolo-cloud-agent-entrypoint"]
 CMD ["/usr/local/bin/aiyolo-cloud-agent-start-services"]

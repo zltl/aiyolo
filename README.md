@@ -83,7 +83,7 @@ sudo -E AIYOLO_CLOUD_AGENT_CHROME_DEB_URL='https://<你的镜像>/google-chrome-
 - 入口路径是 `/console/chat`。
 - 使用控制台内置的服务端渲染 chat 页面和流式接口。
 - 复用现有 provider、模型路由、代理和 usage 链路。
-- 选择 Cloud Agent 环境后，chat 消息会直接接到对应 worker 容器里的 Claude Code；Claude Code 再通过 AIYolo gateway 的 Anthropic 兼容接口调用当前选中的 public model（例如 `deepseek-v4-pro`）。
+- 选择 Cloud Agent 环境后，chat 消息会直接接到对应 worker 容器里的 Codex；Codex 再通过 AIYolo gateway 的 OpenAI Responses 兼容接口调用当前选中的 public model（例如 `deepseek-v4-pro`）。
 - 本地会话历史保存在浏览器里，支持重命名、删除和多标签页同步。
 - 支持附件上传；多模态请求会按当前路由协议自动组装 content parts。
 - 当前保留的对话接口是 `POST /console/chat` 和 `POST /console/chat/stream`。

@@ -60,6 +60,9 @@ func TestCodexCommandEnvInjectsCredentials(t *testing.T) {
 	if !strings.Contains(joined, "OPENAI_API_KEY=aiyolo_live_1234567890") {
 		t.Fatalf("missing api key env: %s", joined)
 	}
+	if !strings.Contains(joined, "CODEX_API_KEY=aiyolo_live_1234567890") {
+		t.Fatalf("missing codex api key env: %s", joined)
+	}
 	if !strings.Contains(joined, "OPENAI_BASE_URL=https://gateway.example.com/v1") {
 		t.Fatalf("missing api base env: %s", joined)
 	}

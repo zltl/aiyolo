@@ -10,8 +10,8 @@ import (
 	"github.com/zltl/aiyolo/internal/domain"
 )
 
-type CloudAgentClaudeCodeOptions struct {
-	SessionID        string
+type CloudAgentCodexOptions struct {
+	ThreadID         string
 	Prompt           string
 	InitialPrompt    string
 	Model            string
@@ -55,7 +55,7 @@ func (writer *cloudAgentChunkWriter) Err() error {
 	return writer.err
 }
 
-func RunCloudAgentClaudeCode(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, options CloudAgentClaudeCodeOptions, onOutput func([]byte) error) (string, error) {
+func RunCloudAgentCodex(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, options CloudAgentCodexOptions, onOutput func([]byte) error) (string, error) {
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
@@ -70,14 +70,11 @@ func RunCloudAgentClaudeCode(ctx context.Context, worker domain.WorkerServer, ke
 	if workingDirectory == "" {
 		workingDirectory = target.workspacePath
 	}
-	options.SessionID = strings.TrimSpace(options.SessionID)
-	if options.SessionID == "" {
-		return "", fmt.Errorf("cloud agent claude session id is required")
-	}
+	options.ThreadID = strings.TrimSpace(options.ThreadID)
 	options.Prompt = strings.TrimSpace(options.Prompt)
 	options.InitialPrompt = strings.TrimSpace(options.InitialPrompt)
 	if options.Prompt == "" && options.InitialPrompt == "" {
-		return "", fmt.Errorf("cloud agent claude prompt is required")
+		return "", fmt.Errorf("cloud agent codex prompt is required")
 	}
 	if options.InitialPrompt == "" {
 		options.InitialPrompt = options.Prompt
@@ -100,9 +97,9 @@ func RunCloudAgentClaudeCode(ctx context.Context, worker domain.WorkerServer, ke
 	var stderr bytes.Buffer
 	session.Stdout = stdoutWriter
 	session.Stderr = &stderr
-	session.Stdin = strings.NewReader(buildCloudAgentClaudeCodeRemoteScript(target.containerName, workingDirectory, options))
+	session.Stdin = strings.NewReader(buildCloudAgentCodexRemoteScript(target.containerName, workingDirectory, options))
 	if err := session.Start("bash -s --"); err != nil {
-		return "", fmt.Errorf("start cloud agent claude code: %w", err)
+		return "", fmt.Errorf("start cloud agent codex: %w", err)
 	}
 
 	go func() {
@@ -121,9 +118,9 @@ func RunCloudAgentClaudeCode(ctx context.Context, worker domain.WorkerServer, ke
 			detail = strings.TrimSpace(stdoutWriter.String())
 		}
 		if detail == "" {
-			return stdoutWriter.String(), fmt.Errorf("run cloud agent claude code: %w", waitErr)
+			return stdoutWriter.String(), fmt.Errorf("run cloud agent codex: %w", waitErr)
 		}
-		return stdoutWriter.String(), fmt.Errorf("run cloud agent claude code: %w: %s", waitErr, detail)
+		return stdoutWriter.String(), fmt.Errorf("run cloud agent codex: %w: %s", waitErr, detail)
 	}
 	return stdoutWriter.String(), nil
 }
@@ -136,11 +133,7 @@ func normalizeCloudAgentWorkingDirectory(value string) string {
 	return trimmed
 }
 
-func buildCloudAgentClaudeCodeRemoteScript(containerName, workspacePath string, options CloudAgentClaudeCodeOptions) string {
-	streamMode := "0"
-	if options.Stream {
-		streamMode = "1"
-	}
+func buildCloudAgentCodexRemoteScript(containerName, workspacePath string, options CloudAgentCodexOptions) string {
 	return fmt.Sprintf(`set -euo pipefail
 
 container_name=%s
@@ -159,48 +152,37 @@ docker exec -i \
   -w "$workspace_path" \
   -e HOME=%s \
   -e USER=%s \
+	-e CODEX_HOME=%s \
   -e TERM=xterm-256color \
   -e COLORTERM=truecolor \
   -e SHELL=/bin/bash \
   -e LANG=C.UTF-8 \
   -e LC_ALL=C.UTF-8 \
   "$container_name" \
-  bash -s -- <<'CONTAINER_CLAUDE'
+	bash -s -- <<'CONTAINER_CODEX'
 set -euo pipefail
 
-session_id=%s
+thread_id=%s
 prompt=%s
 initial_prompt=%s
 model=%s
-stream_mode=%s
 
-project_key="$(python3 - <<'PY'
-import os
-import re
-
-print(re.sub(r'[^0-9A-Za-z]', '-', os.getcwd()))
-PY
-)"
-session_file="$HOME/.claude/projects/$project_key/${session_id}.jsonl"
-prompt_to_send="$prompt"
-session_args=(--session-id "$session_id")
-if [[ -f "$session_file" ]]; then
-  session_args=(--resume "$session_id")
-else
-  prompt_to_send="$initial_prompt"
-fi
-
-cmd=(claude -p "$prompt_to_send" --dangerously-skip-permissions)
-if [[ "$stream_mode" == "1" ]]; then
-  cmd+=(--output-format stream-json --verbose --include-partial-messages)
-else
-  cmd+=(--output-format json)
+mkdir -p "${CODEX_HOME:-$HOME/.codex}"
+prompt_to_send="$initial_prompt"
+cmd=(codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox)
+if [[ -n "${OPENAI_BASE_URL:-}" ]]; then
+  cmd+=(-c "openai_base_url=${OPENAI_BASE_URL}")
 fi
 if [[ -n "$model" ]]; then
-  cmd+=(--model "$model")
+  cmd+=(-m "$model")
 fi
-cmd+=("${session_args[@]}")
+if [[ -n "$thread_id" ]]; then
+  prompt_to_send="$prompt"
+  cmd+=(resume "$thread_id" "$prompt_to_send")
+else
+  cmd+=("$prompt_to_send")
+fi
 "${cmd[@]}"
-CONTAINER_CLAUDE
-`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(defaultCloudAgentClaudeUser), shellQuote(defaultCloudAgentClaudeHome), shellQuote(defaultCloudAgentClaudeUser), shellQuote(options.SessionID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model), shellQuote(streamMode))
+CONTAINER_CODEX
+`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentCodexHome), shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model))
 }

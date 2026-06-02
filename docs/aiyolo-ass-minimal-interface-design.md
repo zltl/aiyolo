@@ -13,7 +13,7 @@
 - Console workspace 前端调用在 [internal/console/static/chat-workspace.js](../internal/console/static/chat-workspace.js)
 - Cloud-agent 一次性命令执行在 [internal/workers/cloud_agent_command.go](../internal/workers/cloud_agent_command.go)
 - Cloud-agent 交互 shell 在 [internal/workers/cloud_agent_shell.go](../internal/workers/cloud_agent_shell.go)
-- Cloud-agent Claude Code 执行在 [internal/workers/cloud_agent_claude.go](../internal/workers/cloud_agent_claude.go)
+- Cloud-agent Codex 执行在 [internal/workers/cloud_agent_codex.go](../internal/workers/cloud_agent_codex.go)
 - Cloud-agent 镜像和启动脚本在 [internal/workers/cloud_agent.go](../internal/workers/cloud_agent.go)
 
 ## 1. 目标与非目标
@@ -23,7 +23,7 @@
 - 在 cloud-agent 容器内提供一个稳定、可版本化的内部接口，替换当前按请求动态拼接的 Python 脚本。
 - 保持当前 console 工作区接口和调用语义易于迁移，不要求前端先重写。
 - 让文件树、读写文件和一次性 shell exec 共享同一套路径约束、错误模型和运行时上下文。
-- 为后续扩展交互终端、搜索、patch、文件监听、Claude Code 编排预留统一入口。
+- 为后续扩展交互终端、搜索、patch、文件监听、Codex 编排预留统一入口。
 
 ### 1.2 非目标
 
@@ -421,7 +421,7 @@ sha256:<hex>
 这些先保持原样，不强行并入 P0：
 
 - 交互 shell websocket
-- Claude Code 长流式执行
+- Codex 长流式执行
 - 浏览器内嵌 terminal 多 tab 管理
 
 P1 可以在 aiyolo-ass 下追加：
@@ -454,7 +454,7 @@ P0 最小实现建议保持朴素，不提前抽象过度：
 
 - 追加交互 shell session API
 - 统一底部 terminal 和命令执行链路
-- 为 Claude Code / 其他容器内任务提供统一作业编排入口
+- 为 Codex / 其他容器内任务提供统一作业编排入口
 
 ### 7.3 P2
 
@@ -463,4 +463,4 @@ P0 最小实现建议保持朴素，不提前抽象过度：
 
 ## 8. 结论
 
-`aiyolo-ass` 的 P0 不需要一开始就接管 cloud-agent 里的所有事情。把接口面先收敛到四个能力已经足够替换掉当前最分散、最频繁、最适合稳定化的容器内操作：文件树、读文件、写文件、一次性 shell exec。只要这四个接口先稳定下来，后续交互终端、Claude Code、搜索和 patch 才有清晰的挂载点。
+`aiyolo-ass` 的 P0 不需要一开始就接管 cloud-agent 里的所有事情。把接口面先收敛到四个能力已经足够替换掉当前最分散、最频繁、最适合稳定化的容器内操作：文件树、读文件、写文件、一次性 shell exec。只要这四个接口先稳定下来，后续交互终端、Codex、搜索和 patch 才有清晰的挂载点。

@@ -270,6 +270,7 @@ func (handler *Handler) startConsoleCloudAgentRun(r *http.Request, state console
 			cloudSession: cloudSession,
 			request: consoleCloudAgentChatRequest{
 				PublicName:                   state.Form.PublicName,
+				PreviousResponseID:           state.LastResponseID,
 				History:                      cloneConsoleChatMessages(history),
 				UserInput:                    state.Form.Draft,
 				Attachments:                  cloneConsoleChatAttachments(state.Form.Attachments),

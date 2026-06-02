@@ -440,7 +440,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 			ID:            accountID,
 			UserID:        userID,
 			WorkerID:      workerID,
-			AgentType:     domain.CloudAgentTypeClaudeCode,
+			AgentType:     domain.CloudAgentTypeCodex,
 			WorkspacePath: domain.DefaultCloudAgentWorkspacePath,
 			CreatedAt:     now,
 		}
@@ -465,7 +465,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	if err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
-	account.AgentType = firstNonEmpty(strings.TrimSpace(account.AgentType), domain.CloudAgentTypeClaudeCode)
+	account.AgentType = domain.CloudAgentTypeCodex
 	account.ModelPublicName = firstNonEmpty(strings.TrimSpace(state.Form.PublicName), strings.TrimSpace(account.ModelPublicName))
 	account.WorkspacePath = firstNonEmpty(strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
 	account.Status = domain.CloudAgentStatusStarting

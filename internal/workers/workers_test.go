@@ -82,7 +82,7 @@ func TestInstallProxyEndpointAddressDefaultsHTTPPort(t *testing.T) {
 func TestCloudAgentContainerEnvUsesConsoleBaseURLAndCustomModel(t *testing.T) {
 	env := cloudAgentContainerEnv(CloudAgentStartOptions{
 		UserID:         "user-1",
-		AgentType:      domain.CloudAgentTypeClaudeCode,
+		AgentType:      domain.CloudAgentTypeCodex,
 		WorkspacePath:  domain.DefaultCloudAgentWorkspacePath,
 		APIBaseURL:     "https://aiyolo.quant67.com/v1",
 		ConsoleBaseURL: "https://aiyolo.quant67.com",
@@ -92,6 +92,9 @@ func TestCloudAgentContainerEnvUsesConsoleBaseURLAndCustomModel(t *testing.T) {
 	})
 	if env["ANTHROPIC_BASE_URL"] != "https://aiyolo.quant67.com" || env["ANTHROPIC_API_URL"] != "https://aiyolo.quant67.com" {
 		t.Fatalf("unexpected anthropic urls: %+v", env)
+	}
+	if env["CODEX_API_KEY"] != "test-key" || env["CODEX_HOME"] != "/workspace/.codex" {
+		t.Fatalf("missing codex env: %+v", env)
 	}
 	if env["ANTHROPIC_MODEL"] != "deepseek-v4-pro" {
 		t.Fatalf("unexpected anthropic model: %+v", env)
@@ -129,6 +132,9 @@ func TestCloudAgentDockerfileInstallsASS(t *testing.T) {
 	if !strings.Contains(dockerfile, "COPY aiyolo-ass /usr/local/bin/aiyolo-ass") {
 		t.Fatalf("cloud-agent Dockerfile should copy aiyolo-ass: %s", dockerfile)
 	}
+	if !strings.Contains(dockerfile, `@openai/codex@${CODEX_VERSION}`) || !strings.Contains(dockerfile, "codex --version") {
+		t.Fatalf("cloud-agent Dockerfile should install Codex CLI: %s", dockerfile)
+	}
 	if !strings.Contains(dockerfile, cloudAgentImageASSSHA256Label) || !strings.Contains(dockerfile, cloudAgentImageBuildRevisionLabel) {
 		t.Fatalf("cloud-agent Dockerfile should label aiyolo-ass builds: %s", dockerfile)
 	}
@@ -143,7 +149,7 @@ func TestCloudAgentDockerfileInstallsASS(t *testing.T) {
 
 func TestCloudAgentDockerfileDefaultsToAiyoloWithPasswordlessSudo(t *testing.T) {
 	dockerfile := cloudAgentAssetString("cloud-agent/Dockerfile")
-	if !strings.Contains(dockerfile, "USER ${AIYOLO_CLAUDE_USER}") {
+	if !strings.Contains(dockerfile, "USER ${AIYOLO_AGENT_USER}") {
 		t.Fatalf("cloud-agent Dockerfile should default to the aiyolo user: %s", dockerfile)
 	}
 	if !strings.Contains(dockerfile, "NOPASSWD:ALL") || !strings.Contains(dockerfile, "/etc/sudoers.d/aiyolo") {
@@ -197,6 +203,9 @@ func TestCloudAgentDockerfileInstallsCommonDeveloperTools(t *testing.T) {
 		if !features[packageName] {
 			t.Fatalf("cloud-agent manifest should include %s: %+v", packageName, manifest.Features)
 		}
+	}
+	if !features["codex-cli"] {
+		t.Fatalf("cloud-agent manifest should include codex-cli: %+v", manifest.Features)
 	}
 
 	infoScript := cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-info")
@@ -386,45 +395,42 @@ func TestNormalizeCloudAgentStartOptionsKeepsValidCustomContainerName(t *testing
 	}
 }
 
-func TestBuildCloudAgentClaudeCodeRemoteScriptIncludesSessionRecoveryAndFlags(t *testing.T) {
-	script := buildCloudAgentClaudeCodeRemoteScript("aiyolo-cloud-agent-user", "/workspace/subdir", CloudAgentClaudeCodeOptions{
-		SessionID:     "550e8400-e29b-41d4-a716-446655440000",
+func TestBuildCloudAgentCodexRemoteScriptIncludesResumeAndFlags(t *testing.T) {
+	script := buildCloudAgentCodexRemoteScript("aiyolo-cloud-agent-user", "/workspace/subdir", CloudAgentCodexOptions{
+		ThreadID:      "550e8400-e29b-41d4-a716-446655440000",
 		Prompt:        "continue from the current state",
 		InitialPrompt: "reconstruct the chat transcript first",
 		Model:         "deepseek-v4-pro",
 		Stream:        true,
 	})
-	if !strings.Contains(script, `session_args=(--resume "$session_id")`) {
-		t.Fatalf("script should resume an existing claude session: %s", script)
+	if !strings.Contains(script, `cmd=(codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox)`) {
+		t.Fatalf("script should run codex exec in JSON mode with approvals bypassed: %s", script)
 	}
 	if !strings.Contains(script, `workspace_path='/workspace/subdir'`) {
-		t.Fatalf("script should launch claude in the requested working directory: %s", script)
+		t.Fatalf("script should launch codex in the requested working directory: %s", script)
 	}
-	if !strings.Contains(script, `session_args=(--session-id "$session_id")`) {
-		t.Fatalf("script should bootstrap a new claude session when missing: %s", script)
+	if !strings.Contains(script, `cmd+=(resume "$thread_id" "$prompt_to_send")`) {
+		t.Fatalf("script should resume a previous codex thread when provided: %s", script)
 	}
-	if !strings.Contains(script, `cmd+=(--output-format stream-json --verbose --include-partial-messages)`) {
-		t.Fatalf("script should enable stream-json partial output: %s", script)
+	if !strings.Contains(script, `cmd+=("$prompt_to_send")`) {
+		t.Fatalf("script should start a new codex thread when no thread id exists: %s", script)
 	}
-	if !strings.Contains(script, `-u 'aiyolo'`) || !strings.Contains(script, `-e HOME='/workspace'`) {
-		t.Fatalf("script should run claude as the non-root cloud-agent user: %s", script)
+	if !strings.Contains(script, `-u 'aiyolo'`) || !strings.Contains(script, `-e HOME='/workspace'`) || !strings.Contains(script, `-e CODEX_HOME='/workspace/.codex'`) {
+		t.Fatalf("script should run codex as the non-root cloud-agent user: %s", script)
 	}
-	if !strings.Contains(script, `cmd+=(--model "$model")`) {
+	if !strings.Contains(script, `cmd+=(-m "$model")`) {
 		t.Fatalf("script should forward the selected model: %s", script)
 	}
+	if !strings.Contains(script, `cmd+=(-c "openai_base_url=${OPENAI_BASE_URL}")`) {
+		t.Fatalf("script should configure the OpenAI-compatible gateway base URL: %s", script)
+	}
 	if strings.Contains(script, `--append-system-prompt`) || strings.Contains(script, `system_prompt=`) {
-		t.Fatalf("script should not inject a system prompt into claude code: %s", script)
-	}
-	if !strings.Contains(script, `cmd=(claude -p "$prompt_to_send" --dangerously-skip-permissions)`) {
-		t.Fatalf("script should keep claude permission bypass enabled for agent tool use: %s", script)
-	}
-	if !strings.Contains(script, `re.sub(r'[^0-9A-Za-z]', '-', os.getcwd())`) {
-		t.Fatalf("script should derive the claude project key from cwd: %s", script)
+		t.Fatalf("script should not inject a system prompt into codex: %s", script)
 	}
 }
 
 func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
-	script := buildCloudAgentShellCommand("aiyolo-cloud-agent-user", "/workspace", "claude-session-1", "gpt-5.4")
+	script := buildCloudAgentShellCommand("aiyolo-cloud-agent-user", "/workspace", "agent-session-1", "gpt-5.4")
 
 	if !regexp.MustCompile(`(?m)-u .*aiyolo`).MatchString(script) {
 		t.Fatalf("shell command should exec as the non-root cloud-agent user: %s", script)

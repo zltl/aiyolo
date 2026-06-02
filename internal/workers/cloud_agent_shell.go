@@ -67,7 +67,7 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		client.Close()
 		return nil, fmt.Errorf("request pty: %w", err)
 	}
-	claudeSessionID := domain.CloudAgentClaudeSessionID(account.UserID, firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(cloudSession.ID)))
+	shellSessionID := domain.CloudAgentSessionID(account.UserID, firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(cloudSession.ID)))
 
 	stdoutReader, stdoutWriter := io.Pipe()
 	stdoutSink := &synchronizedPipeWriter{writer: stdoutWriter}
@@ -81,7 +81,7 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		client.Close()
 		return nil, fmt.Errorf("open stdin pipe: %w", err)
 	}
-	if err := session.Start(buildCloudAgentShellCommand(target.containerName, target.workspacePath, claudeSessionID, account.ModelPublicName)); err != nil {
+	if err := session.Start(buildCloudAgentShellCommand(target.containerName, target.workspacePath, shellSessionID, account.ModelPublicName)); err != nil {
 		stdin.Close()
 		stdoutReader.Close()
 		stdoutWriter.Close()
@@ -123,7 +123,7 @@ func normalizeCloudAgentShellSize(cols, rows int) (int, int) {
 	return cols, rows
 }
 
-func buildCloudAgentShellCommand(containerName, workspacePath, claudeSessionID, model string) string {
+func buildCloudAgentShellCommand(containerName, workspacePath, shellSessionID, model string) string {
 	innerScript := `set -euo pipefail
 
 export TERM="${TERM:-xterm-256color}"
@@ -197,7 +197,7 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 127
 fi
 if ! docker inspect --type container "$container_name" >/dev/null 2>&1; then
-	printf 'cloud agent container %%s is not available\n' "$container_name" >&2
+  printf 'cloud agent container %%s is not available\n' "$container_name" >&2
   exit 1
 fi
 exec docker exec -it \
@@ -216,7 +216,7 @@ exec docker exec -it \
   -e LC_ALL=C.UTF-8 \
   "$container_name" \
 	bash -lc %s
-`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(defaultCloudAgentClaudeUser), shellQuote(defaultCloudAgentClaudeHome), shellQuote(defaultCloudAgentClaudeUser), shellQuote(innerScript))
+`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(innerScript))
 	return bashCommand(script)
 }
 
