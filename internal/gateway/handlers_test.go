@@ -280,6 +280,128 @@ func TestStreamingAllowsActiveLongRunningStream(t *testing.T) {
 	}
 }
 
+func TestResponsesFallsBackToChatCompletionsWhenUnsupported(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/responses":
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "responses unsupported"}})
+		case "/v1/chat/completions":
+			assertHeader(t, r, "Authorization", "Bearer upstream-openai")
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["model"] != "upstream-chat" {
+				t.Fatalf("model=%#v", payload["model"])
+			}
+			messages, _ := payload["messages"].([]any)
+			if len(messages) != 2 {
+				t.Fatalf("messages=%#v", payload["messages"])
+			}
+			tools, _ := payload["tools"].([]any)
+			if len(tools) != 1 {
+				t.Fatalf("tools=%#v", payload["tools"])
+			}
+			tool, _ := tools[0].(map[string]any)
+			function, _ := tool["function"].(map[string]any)
+			if function["name"] != "shell_command" {
+				t.Fatalf("tools=%#v", payload["tools"])
+			}
+			writeJSON(t, w, map[string]any{"id": "chatcmpl_fallback", "object": "chat.completion", "created": int64(1760000000), "model": "upstream-chat", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "ok from chat fallback"}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store := testStore(t, upstream.URL)
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	body := []byte(`{"model":"public-chat","instructions":"You are concise.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[{"type":"function","name":"shell_command","description":"Run a shell command","parameters":{"type":"object"}}],"tool_choice":"auto"}`)
+	response := doRequest(t, server.URL+"/v1/responses", http.MethodPost, body, map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["object"] != "response" || payload["output_text"] != "ok from chat fallback" {
+		t.Fatalf("unexpected responses payload: %+v", payload)
+	}
+	usage := lastUsage(t, store)
+	if usage.Endpoint != "/v1/responses" || usage.TotalTokens != 5 {
+		t.Fatalf("unexpected fallback usage: %+v", usage)
+	}
+}
+
+func TestStreamingResponsesFallbackWrapsChatCompletionEvents(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/responses":
+			w.WriteHeader(http.StatusNotFound)
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]}}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3,\"total_tokens\":7}}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store := testStore(t, upstream.URL)
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	response := doRequest(t, server.URL+"/v1/responses", http.MethodPost, []byte(`{"model":"public-chat","stream":true,"input":"hi"}`), map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	payload := string(body)
+	for _, expected := range []string{"event: response.output_text.delta", `"delta":"he"`, `"delta":"llo"`, `"type":"function_call"`, `"call_id":"call_1"`, "event: response.completed", "data: [DONE]"} {
+		if !strings.Contains(payload, expected) {
+			t.Fatalf("missing %q in payload: %s", expected, payload)
+		}
+	}
+	usage := lastUsage(t, store)
+	if !usage.Stream || usage.Endpoint != "/v1/responses" || usage.TotalTokens != 7 {
+		t.Fatalf("unexpected streaming fallback usage: %+v", usage)
+	}
+}
+
+func TestResponsesWebsocketGetsUpgradeRequiredForHTTPFallback(t *testing.T) {
+	store := testStore(t, "https://upstream.example.com")
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUpgradeRequired {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+}
+
 func TestOpenRouterSupportsOpenAIAndAnthropic(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

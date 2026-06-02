@@ -169,10 +169,18 @@ func (handler *Handler) Routes() http.Handler {
 	router.Post("/chat/completions", handler.forwardOpenAI("/v1/chat/completions"))
 	router.Post("/completions", handler.forwardOpenAI("/v1/completions"))
 	router.Post("/embeddings", handler.forwardOpenAI("/v1/embeddings"))
+	router.Get("/responses", handler.responsesWebsocketUnsupported)
 	router.Post("/responses", handler.forwardOpenAI("/v1/responses"))
 	router.Post("/messages", handler.forwardAnthropic("/v1/messages"))
 	router.Post("/messages/count_tokens", handler.forwardAnthropic("/v1/messages/count_tokens"))
 	return router
+}
+
+func (handler *Handler) responsesWebsocketUnsupported(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Connection", "close")
+	w.WriteHeader(http.StatusUpgradeRequired)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "Responses websocket transport is not supported by this gateway; retry with HTTP Responses", "type": "invalid_request_error", "code": "responses_websocket_unsupported"}})
 }
 
 func (handler *Handler) listModels(w http.ResponseWriter, r *http.Request) {
@@ -355,8 +363,10 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 	selectedCandidate := primaryCandidate
 	var lastErr error
 	attempts := make([]routerMetadataAttempt, 0, len(candidates))
+	responseMode := upstreamResponseModeDirect
 	for index, candidate := range candidates {
 		selectedCandidate = candidate
+		responseMode = upstreamResponseModeDirect
 		client, err := handler.transports.HTTPClient(r.Context(), candidate.Provider, candidate.Profile, request.Stream)
 		if err != nil {
 			lastErr = err
@@ -384,6 +394,22 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 				continue
 			}
 			break
+		}
+		if shouldFallbackResponsesToChat(endpoint, response.StatusCode) {
+			_ = response.Body.Close()
+			fallbackResponse, fallbackErr := handler.forwardResponsesViaChatCompletions(r.Context(), r, client, candidate.Provider, rewritten)
+			if fallbackErr != nil {
+				lastErr = fallbackErr
+				attempts = append(attempts, routerMetadataAttempt{Index: index + 1, Provider: candidate.Provider.ID, Model: candidate.Route.UpstreamModel, Status: "failed", FailureClass: "responses_fallback_failed"})
+				if index < len(candidates)-1 {
+					response = nil
+					continue
+				}
+				response = nil
+				break
+			}
+			response = fallbackResponse
+			responseMode = upstreamResponseModeResponsesChatFallback
 		}
 		if retryableUpstreamStatus(response.StatusCode) && index < len(candidates)-1 {
 			attempts = append(attempts, routerMetadataAttempt{Index: index + 1, Provider: candidate.Provider.ID, Model: candidate.Route.UpstreamModel, Status: "failed", StatusCode: response.StatusCode, FailureClass: failureClassFromStatus(response.StatusCode)})
@@ -425,7 +451,11 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 	var usage domain.UsageRecord
 	var copyErr error
 	if request.Stream {
-		usage, copyErr = copyCompatibleResponse(w, response, protocol, responseMetadata)
+		if responseMode == upstreamResponseModeResponsesChatFallback {
+			usage, copyErr = copyChatCompletionsStreamAsResponses(w, response, responseMetadata)
+		} else {
+			usage, copyErr = copyCompatibleResponse(w, response, protocol, responseMetadata)
+		}
 	} else {
 		responseBody, readErr := io.ReadAll(response.Body)
 		if readErr != nil {
@@ -433,30 +463,44 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 		} else {
 			usage = parseUsageFromJSON(responseBody, protocol)
 			writtenBody := responseBody
+			if responseMode == upstreamResponseModeResponsesChatFallback {
+				convertedBody, convertedUsage, convertErr := chatCompletionResponseToResponses(responseBody, response.StatusCode)
+				if convertErr != nil {
+					copyErr = convertErr
+				} else {
+					writtenBody = convertedBody
+					mergeUsage(&usage, convertedUsage)
+				}
+			}
 			if responseMetadata != nil {
-				writtenBody = injectRouterMetadata(responseBody, *responseMetadata)
+				writtenBody = injectRouterMetadata(writtenBody, *responseMetadata)
 			}
-			copyResponseHeaders(w.Header(), response.Header)
-			if cacheControl.Enabled {
-				setResponseCacheHeaders(w.Header(), "MISS", 0, cacheControl.TTLSeconds)
-			}
-			w.WriteHeader(response.StatusCode)
-			if _, writeErr := w.Write(writtenBody); writeErr != nil {
-				copyErr = writeErr
-			} else if cacheControl.Enabled && response.StatusCode < http.StatusBadRequest {
-				handler.storeResponseCache(cacheKey, responseCacheEntry{
-					StatusCode:    response.StatusCode,
-					Headers:       response.Header.Clone(),
-					Body:          responseBody,
-					CreatedAt:     time.Now().UTC(),
-					TTLSeconds:    cacheControl.TTLSeconds,
-					ProviderID:    selectedCandidate.Provider.ID,
-					ModelAlias:    selectedCandidate.Route.PublicName,
-					UpstreamModel: selectedCandidate.Route.UpstreamModel,
-					Currency:      selectedCandidate.Pricing.Currency,
-					Protocol:      protocol,
-					Endpoint:      endpoint,
-				})
+			if copyErr == nil {
+				copyResponseHeaders(w.Header(), response.Header)
+				if responseMode == upstreamResponseModeResponsesChatFallback {
+					w.Header().Set("Content-Type", "application/json")
+				}
+				if cacheControl.Enabled {
+					setResponseCacheHeaders(w.Header(), "MISS", 0, cacheControl.TTLSeconds)
+				}
+				w.WriteHeader(response.StatusCode)
+				if _, writeErr := w.Write(writtenBody); writeErr != nil {
+					copyErr = writeErr
+				} else if cacheControl.Enabled && response.StatusCode < http.StatusBadRequest {
+					handler.storeResponseCache(cacheKey, responseCacheEntry{
+						StatusCode:    response.StatusCode,
+						Headers:       response.Header.Clone(),
+						Body:          writtenBody,
+						CreatedAt:     time.Now().UTC(),
+						TTLSeconds:    cacheControl.TTLSeconds,
+						ProviderID:    selectedCandidate.Provider.ID,
+						ModelAlias:    selectedCandidate.Route.PublicName,
+						UpstreamModel: selectedCandidate.Route.UpstreamModel,
+						Currency:      selectedCandidate.Pricing.Currency,
+						Protocol:      protocol,
+						Endpoint:      endpoint,
+					})
+				}
 			}
 		}
 	}
