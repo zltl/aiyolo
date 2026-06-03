@@ -344,6 +344,7 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 	if err != nil {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
+	allowedModels = consoleChatExpandAllowedModels(allowedModels)
 	assDownloadURL, assSHA256URL := handler.consoleChatCloudAgentASSArtifactURLs(baseURL)
 	now := time.Now().UTC()
 	account, err = handler.ensureConsoleChatEnvironmentAPIKey(ctx, userID, worker.ID, account, allowedModels, now)

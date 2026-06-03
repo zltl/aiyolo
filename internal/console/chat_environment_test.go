@@ -21,6 +21,7 @@ import (
 	"golang.org/x/net/websocket"
 
 	"github.com/zltl/aiyolo/internal/artifacts"
+	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
 	workerops "github.com/zltl/aiyolo/internal/workers"
@@ -335,6 +336,12 @@ func TestChatEnvironmentEnsureReusesActiveCloudAgentSessionAfterOldLastSeen(t *t
 	}
 	if account.LastSeenAt == nil || !account.LastSeenAt.After(oldSeen) {
 		t.Fatalf("expected reuse to refresh last seen timestamp: %+v", account)
+	}
+	if account.Credential == "sk-cloud-agent" || strings.TrimSpace(account.Credential) == "" {
+		t.Fatalf("expected reuse to reconcile stale cloud agent credential: %+v", account)
+	}
+	if _, err := store.FindAPIKeyByHash(ctx, auth.HashAPIKey(account.Credential)); err != nil {
+		t.Fatalf("expected reconciled credential to reference an active API key: %v", err)
 	}
 }
 
@@ -1306,6 +1313,40 @@ func TestChatEditorFallbackAssets(t *testing.T) {
 	} {
 		if !strings.Contains(js, marker) {
 			t.Fatalf("chat workspace js is missing editor fallback marker %s", marker)
+		}
+	}
+}
+
+func TestChatWorkdirRemembersWorkspaceAssets(t *testing.T) {
+	jsBytes, err := consoleAssets.ReadFile("static/chat.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(jsBytes)
+	for _, marker := range []string{
+		"aiyolo.console.chat.workspaces.v1",
+		"rememberWorkdirPath(resolvedWorkingDirectory)",
+		"rememberedWorkdirEntries(rawInput)",
+		"option.dataset.chatWorkdirApply = \"true\"",
+		"applyWorkdirOverride(form, target)",
+	} {
+		if !strings.Contains(js, marker) {
+			t.Fatalf("chat js is missing remembered workspace marker %s", marker)
+		}
+	}
+
+	cssBytes, err := consoleAssets.ReadFile("static/console.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(cssBytes)
+	for _, marker := range []string{
+		".chat-workdir-section-label",
+		".chat-workdir-option-copy",
+		".chat-workdir-option-meta",
+	} {
+		if !strings.Contains(css, marker) {
+			t.Fatalf("console css is missing remembered workspace marker %s", marker)
 		}
 	}
 }

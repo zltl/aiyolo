@@ -244,6 +244,13 @@ func (handler *Handler) forwardCompatible(w http.ResponseWriter, r *http.Request
 		return
 	}
 	_ = r.Body.Close()
+	if endpoint == "/v1/responses" {
+		body, err = normalizeResponsesRequestBody(body)
+		if err != nil {
+			writeProtocolError(w, http.StatusBadRequest, "invalid_json", err.Error(), protocol, nil)
+			return
+		}
+	}
 	request, err := parseCompatibleRequest(body)
 	if err != nil {
 		var reqErr *requestError

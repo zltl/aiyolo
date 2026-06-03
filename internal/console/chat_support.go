@@ -173,6 +173,7 @@ func (state consoleChatPageState) data() map[string]any {
 		"ChatAttachmentTreeURL":       consoleChatAttachmentTreePath,
 		"ChatAttachmentTreeEnabled":   state.AttachmentTreeEnabled,
 		"ChatWorkspaceTreeURL":        consoleChatWorkspaceTreePath,
+		"ChatWorkspaceListDirURL":     consoleChatWorkspaceListDirPath,
 		"ChatWorkspaceFileURL":        consoleChatWorkspaceFilePath,
 		"ChatWorkspaceDownloadURL":    consoleChatWorkspaceDownloadPath,
 		"ChatWorkspaceUploadURL":      consoleChatWorkspaceUploadPath,

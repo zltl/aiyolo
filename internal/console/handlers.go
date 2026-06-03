@@ -115,6 +115,7 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Handle("/chat/shell/ws", http.HandlerFunc(handler.chatShellSocket))
 		protected.Get("/chat/attachments/tree", handler.chatAttachmentTree)
 		protected.Get("/chat/workspace/tree", handler.chatWorkspaceTree)
+		protected.Get("/chat/workspace/listdir", handler.chatWorkspaceListDir)
 		protected.Get("/chat/workspace/file", handler.chatWorkspaceFile)
 		protected.Get("/chat/workspace/download", handler.downloadChatWorkspaceFile)
 		protected.Post("/chat/workspace/file", handler.saveChatWorkspaceFile)

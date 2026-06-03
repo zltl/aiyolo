@@ -97,7 +97,7 @@ func RunCloudAgentCodex(ctx context.Context, worker domain.WorkerServer, key dom
 	var stderr bytes.Buffer
 	session.Stdout = stdoutWriter
 	session.Stderr = &stderr
-	session.Stdin = strings.NewReader(buildCloudAgentCodexRemoteScript(target.containerName, workingDirectory, options))
+	session.Stdin = strings.NewReader(buildCloudAgentCodexRemoteScript(target.containerName, workingDirectory, target.account.Credential, options))
 	if err := session.Start("bash -s --"); err != nil {
 		return "", fmt.Errorf("start cloud agent codex: %w", err)
 	}
@@ -133,11 +133,12 @@ func normalizeCloudAgentWorkingDirectory(value string) string {
 	return trimmed
 }
 
-func buildCloudAgentCodexRemoteScript(containerName, workspacePath string, options CloudAgentCodexOptions) string {
+func buildCloudAgentCodexRemoteScript(containerName, workspacePath string, apiKey string, options CloudAgentCodexOptions) string {
 	return fmt.Sprintf(`set -euo pipefail
 
 container_name=%s
 workspace_path=%s
+api_key=%s
 if ! command -v docker >/dev/null 2>&1; then
   printf 'docker is not installed on this worker\n' >&2
   exit 127
@@ -146,6 +147,15 @@ if ! docker inspect --type container "$container_name" >/dev/null 2>&1; then
   printf 'cloud agent container %%s is not available\n' "$container_name" >&2
   exit 1
 fi
+credential_env_args=()
+if [[ -n "$api_key" ]]; then
+	credential_env_args=(
+		-e "AIYOLO_API_KEY=$api_key"
+		-e "OPENAI_API_KEY=$api_key"
+		-e "CODEX_API_KEY=$api_key"
+		-e "ANTHROPIC_API_KEY=$api_key"
+	)
+fi
 
 docker exec -i \
   -u %s \
@@ -153,6 +163,7 @@ docker exec -i \
   -e HOME=%s \
   -e USER=%s \
 	-e CODEX_HOME=%s \
+	"${credential_env_args[@]}" \
   -e TERM=xterm-256color \
   -e COLORTERM=truecolor \
   -e SHELL=/bin/bash \
@@ -184,5 +195,5 @@ else
 fi
 "${cmd[@]}"
 CONTAINER_CODEX
-`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentCodexHome), shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model))
+`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(strings.TrimSpace(apiKey)), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentCodexHome), shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model))
 }

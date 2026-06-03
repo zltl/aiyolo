@@ -3,7 +3,9 @@ package gateway_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -336,6 +338,152 @@ func TestResponsesFallsBackToChatCompletionsWhenUnsupported(t *testing.T) {
 	usage := lastUsage(t, store)
 	if usage.Endpoint != "/v1/responses" || usage.TotalTokens != 5 {
 		t.Fatalf("unexpected fallback usage: %+v", usage)
+	}
+}
+
+func TestResponsesNormalizesCodexDeveloperRoleBeforeForwarding(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		messages, _ := payload["messages"].([]any)
+		if len(messages) != 3 {
+			t.Fatalf("messages=%#v", payload["messages"])
+		}
+		developer, _ := messages[1].(map[string]any)
+		if developer["role"] != "system" {
+			t.Fatalf("developer role was not normalized: %#v", developer)
+		}
+		assertHeader(t, r, "Authorization", "Bearer upstream-openai")
+		writeJSON(t, w, map[string]any{"id": "resp_codex", "object": "response", "usage": map[string]any{"input_tokens": 4, "output_tokens": 1, "total_tokens": 5}})
+	}))
+	defer upstream.Close()
+
+	store := testStore(t, upstream.URL)
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	body := []byte(`{"model":"public-chat","messages":[{"role":"user","content":"hi"},{"role":"developer","content":"stay concise"},{"role":"latest_reminder","content":"answer now"}]}`)
+	response := doRequest(t, server.URL+"/v1/responses", http.MethodPost, body, map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	usage := lastUsage(t, store)
+	if usage.Endpoint != "/v1/responses" || usage.TotalTokens != 5 {
+		t.Fatalf("unexpected responses usage: %+v", usage)
+	}
+}
+
+func TestResponsesFallbackPreservesCodexMessages(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/responses":
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case "/v1/chat/completions":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			messages, _ := payload["messages"].([]any)
+			if len(messages) != 3 {
+				t.Fatalf("messages=%#v", payload["messages"])
+			}
+			developer, _ := messages[1].(map[string]any)
+			latestReminder, _ := messages[2].(map[string]any)
+			if developer["role"] != "system" || latestReminder["role"] != "user" {
+				t.Fatalf("unexpected roles after fallback: %#v", messages)
+			}
+			writeJSON(t, w, map[string]any{"id": "chatcmpl_codex_messages", "object": "chat.completion", "model": "upstream-chat", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "kept codex messages"}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store := testStore(t, upstream.URL)
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	body := []byte(`{"model":"public-chat","messages":[{"role":"user","content":"hi"},{"role":"developer","content":"stay concise"},{"role":"latest_reminder","content":"answer now"}]}`)
+	response := doRequest(t, server.URL+"/v1/responses", http.MethodPost, body, map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["output_text"] != "kept codex messages" {
+		t.Fatalf("unexpected response payload: %+v", payload)
+	}
+}
+
+func TestResponsesFallbackRepairsToolCallMessageSequence(t *testing.T) {
+	forwardedMessages := make(chan []any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/responses":
+			w.WriteHeader(http.StatusNotFound)
+		case "/v1/chat/completions":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			messages, _ := payload["messages"].([]any)
+			forwardedMessages <- messages
+			if err := validateChatToolCallMessages(messages); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(t, w, map[string]any{"error": map[string]any{"message": err.Error(), "type": "invalid_request_error"}})
+				return
+			}
+			writeJSON(t, w, map[string]any{"id": "chatcmpl_codex_tools", "object": "chat.completion", "model": "upstream-chat", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "tools repaired"}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store := testStore(t, upstream.URL)
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	body := []byte(`{"model":"public-chat","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect workspace"}]},` +
+		`{"type":"function_call","call_id":"call_1","name":"shell_command","arguments":"{\"command\":\"pwd\"}"},` +
+		`{"type":"function_call","call_id":"call_2","name":"shell_command","arguments":"{\"command\":\"ls\"}"},` +
+		`{"type":"function_call_output","call_id":"call_1","output":"/workspace"},` +
+		`{"type":"function_call_output","call_id":"call_2","output":"README.md"},` +
+		`{"type":"function_call","call_id":"call_unanswered","name":"shell_command","arguments":"{\"command\":\"whoami\"}"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}` +
+		`]}`)
+	response := doRequest(t, server.URL+"/v1/responses", http.MethodPost, body, map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+
+	messages := <-forwardedMessages
+	if len(messages) != 5 {
+		t.Fatalf("messages=%#v", messages)
+	}
+	assistantMessage, _ := messages[1].(map[string]any)
+	toolCalls, _ := assistantMessage["tool_calls"].([]any)
+	if len(toolCalls) != 2 {
+		t.Fatalf("assistant tool calls were not coalesced: %#v", assistantMessage)
+	}
+	lastMessage, _ := messages[4].(map[string]any)
+	if lastMessage["role"] != "user" || strings.Contains(stringifyTestJSON(t, messages), "call_unanswered") {
+		t.Fatalf("unexpected repaired messages: %#v", messages)
 	}
 }
 
@@ -1137,6 +1285,43 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+func validateChatToolCallMessages(messages []any) error {
+	for index := 0; index < len(messages); index++ {
+		message, _ := messages[index].(map[string]any)
+		role, _ := message["role"].(string)
+		toolCalls, _ := message["tool_calls"].([]any)
+		if role == "tool" {
+			return fmt.Errorf("orphan tool message at index %d", index)
+		}
+		if role != "assistant" || len(toolCalls) == 0 {
+			continue
+		}
+		for offset, rawToolCall := range toolCalls {
+			toolCall, _ := rawToolCall.(map[string]any)
+			callID, _ := toolCall["id"].(string)
+			toolIndex := index + 1 + offset
+			if toolIndex >= len(messages) {
+				return fmt.Errorf("assistant tool_calls at index %d have insufficient tool messages", index)
+			}
+			toolMessage, _ := messages[toolIndex].(map[string]any)
+			if toolMessage["role"] != "tool" || toolMessage["tool_call_id"] != callID {
+				return fmt.Errorf("tool message at index %d does not answer %s", toolIndex, callID)
+			}
+		}
+		index += len(toolCalls)
+	}
+	return nil
+}
+
+func stringifyTestJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
 func lastUsage(t *testing.T, store *storage.MemoryStore) domain.UsageRecord {
 	t.Helper()
 	items, err := store.ListUsage(context.Background(), 1)
@@ -1147,4 +1332,133 @@ func lastUsage(t *testing.T, store *storage.MemoryStore) domain.UsageRecord {
 		t.Fatal("usage ledger is empty")
 	}
 	return items[0]
+}
+
+func deepSeekTestStore(t *testing.T, upstreamURL string) *storage.MemoryStore {
+	t.Helper()
+	store := storage.NewMemoryStore()
+	ctx := context.Background()
+	if err := store.SeedDefaults(ctx, storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAPIKey(ctx, domain.APIKey{ID: "test-key", Name: "test", KeyHash: auth.HashAPIKey(testAPIKey), Prefix: auth.Prefix(testAPIKey), UserID: "user-1", OrganizationID: "org-1", ProjectID: "proj-1", Status: domain.StatusActive, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "deepseek", Name: "DeepSeek", BaseURL: upstreamURL, Protocol: domain.ProtocolOpenAI, MasterKey: "upstream-deepseek", DefaultProxyID: "direct", Status: domain.StatusEnabled, TimeoutSeconds: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "deepseek-public", ProviderID: "deepseek", UpstreamModel: "deepseek-v4-pro", Protocol: domain.ProtocolOpenAI, ProxyProfileID: "direct", Enabled: true, ContextTokens: 128000}); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+// TestResponsesFallbackPassesDeepSeekReasoningContentBack ensures that prior-turn
+// reasoning items in a Responses request are re-attached to the assistant chat
+// message as reasoning_content, which DeepSeek thinking mode requires for
+// multi-turn tool use.
+func TestResponsesFallbackPassesDeepSeekReasoningContentBack(t *testing.T) {
+	encodedReasoning := "aiyolo-reasoning:v1:" + base64.StdEncoding.EncodeToString([]byte("inspect the working tree first"))
+	var forwardedReasoning string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/responses":
+			w.WriteHeader(http.StatusNotFound)
+		case "/v1/chat/completions":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			messages, _ := payload["messages"].([]any)
+			for _, raw := range messages {
+				message, _ := raw.(map[string]any)
+				if message["role"] == "assistant" {
+					if reasoning, ok := message["reasoning_content"].(string); ok {
+						forwardedReasoning = reasoning
+					}
+				}
+			}
+			writeJSON(t, w, map[string]any{"id": "chatcmpl_ds", "object": "chat.completion", "model": "deepseek-v4-pro", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "done"}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store := deepSeekTestStore(t, upstream.URL)
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	body := []byte(`{"model":"deepseek-public","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"run ls"}]},` +
+		`{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"` + encodedReasoning + `"},` +
+		`{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"call_1","output":"ok"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}` +
+		`]}`)
+	response := doRequest(t, server.URL+"/v1/responses", http.MethodPost, body, map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	if forwardedReasoning != "inspect the working tree first" {
+		t.Fatalf("reasoning_content not forwarded to DeepSeek: %q", forwardedReasoning)
+	}
+}
+
+// TestResponsesFallbackEmitsReasoningItemForDeepSeek ensures the gateway surfaces
+// DeepSeek reasoning_content as a Responses reasoning item whose encrypted_content
+// round-trips back to plain reasoning text.
+func TestResponsesFallbackEmitsReasoningItemForDeepSeek(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/responses":
+			w.WriteHeader(http.StatusNotFound)
+		case "/v1/chat/completions":
+			writeJSON(t, w, map[string]any{"id": "chatcmpl_ds", "object": "chat.completion", "model": "deepseek-v4-pro", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "reasoning_content": "weigh both options", "content": "final answer"}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	store := deepSeekTestStore(t, upstream.URL)
+	server := httptest.NewServer(app.NewServer(testConfig(), store).Handler())
+	defer server.Close()
+
+	body := []byte(`{"model":"deepseek-public","input":"think then answer"}`)
+	response := doRequest(t, server.URL+"/v1/responses", http.MethodPost, body, map[string]string{"Authorization": "Bearer " + testAPIKey})
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	output, _ := payload["output"].([]any)
+	var reasoningItem map[string]any
+	for _, raw := range output {
+		item, _ := raw.(map[string]any)
+		if item["type"] == "reasoning" {
+			reasoningItem = item
+			break
+		}
+	}
+	if reasoningItem == nil {
+		t.Fatalf("reasoning item missing from output: %+v", output)
+	}
+	encrypted, _ := reasoningItem["encrypted_content"].(string)
+	if !strings.HasPrefix(encrypted, "aiyolo-reasoning:v1:") {
+		t.Fatalf("unexpected encrypted_content: %q", encrypted)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encrypted, "aiyolo-reasoning:v1:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != "weigh both options" {
+		t.Fatalf("reasoning text did not round-trip: %q", decoded)
+	}
 }

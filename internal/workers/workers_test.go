@@ -396,7 +396,7 @@ func TestNormalizeCloudAgentStartOptionsKeepsValidCustomContainerName(t *testing
 }
 
 func TestBuildCloudAgentCodexRemoteScriptIncludesResumeAndFlags(t *testing.T) {
-	script := buildCloudAgentCodexRemoteScript("aiyolo-cloud-agent-user", "/workspace/subdir", CloudAgentCodexOptions{
+	script := buildCloudAgentCodexRemoteScript("aiyolo-cloud-agent-user", "/workspace/subdir", "aiyolo_live_current", CloudAgentCodexOptions{
 		ThreadID:      "550e8400-e29b-41d4-a716-446655440000",
 		Prompt:        "continue from the current state",
 		InitialPrompt: "reconstruct the chat transcript first",
@@ -418,6 +418,11 @@ func TestBuildCloudAgentCodexRemoteScriptIncludesResumeAndFlags(t *testing.T) {
 	if !strings.Contains(script, `-u 'aiyolo'`) || !strings.Contains(script, `-e HOME='/workspace'`) || !strings.Contains(script, `-e CODEX_HOME='/workspace/.codex'`) {
 		t.Fatalf("script should run codex as the non-root cloud-agent user: %s", script)
 	}
+	for _, expected := range []string{`api_key='aiyolo_live_current'`, `-e "OPENAI_API_KEY=$api_key"`, `-e "CODEX_API_KEY=$api_key"`} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("script should inject fresh codex credentials %s: %s", expected, script)
+		}
+	}
 	if !strings.Contains(script, `cmd+=(-m "$model")`) {
 		t.Fatalf("script should forward the selected model: %s", script)
 	}
@@ -430,7 +435,7 @@ func TestBuildCloudAgentCodexRemoteScriptIncludesResumeAndFlags(t *testing.T) {
 }
 
 func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
-	script := buildCloudAgentShellCommand("aiyolo-cloud-agent-user", "/workspace", "agent-session-1", "gpt-5.4")
+	script := buildCloudAgentShellCommand("aiyolo-cloud-agent-user", "/workspace", "agent-session-1", "gpt-5.4", "aiyolo_live_current")
 
 	if !regexp.MustCompile(`(?m)-u .*aiyolo`).MatchString(script) {
 		t.Fatalf("shell command should exec as the non-root cloud-agent user: %s", script)
@@ -450,6 +455,11 @@ func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
 	for _, expected := range []string{`-e TERM=xterm-256color`, `-e COLORTERM=truecolor`, `-e CLICOLOR=1`, `-e CLICOLOR_FORCE=1`, `-e FORCE_COLOR=1`, `-e npm_config_color=always`} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("shell command should export terminal color setting %s: %s", expected, script)
+		}
+	}
+	for _, expected := range []string{`api_key=`, `aiyolo_live_current`, `-e "OPENAI_API_KEY=$api_key"`, `-e "CODEX_API_KEY=$api_key"`} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("shell command should inject fresh credentials %s: %s", expected, script)
 		}
 	}
 	for _, expected := range []string{`force_color_prompt=yes`, `dircolors -b`, `ls --color=auto`, `grep --color=auto`, `AiyoloCwd=`, `PROMPT_COMMAND`, `PS1=`, `\[\e[01;32m\]`} {

@@ -7,7 +7,7 @@
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
   <link rel="stylesheet" href="https://unpkg.com/file-icons-js@1.1.0/css/style.css">
   <link rel="stylesheet" href="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css">
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260531r">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260603a">
   <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body class="chat-workspace-body">
@@ -18,7 +18,7 @@
 
 {{define "chat-content"}}
 <div id="chat-content" class="chat-workspace-page">
-  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-shell-state-url="{{.ChatShellStateURL}}" data-chat-attachment-tree-url="{{.ChatAttachmentTreeURL}}" data-chat-attachment-tree-enabled="{{if .ChatAttachmentTreeEnabled}}true{{else}}false{{end}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-workspace-download-url="{{.ChatWorkspaceDownloadURL}}" data-chat-workspace-upload-url="{{.ChatWorkspaceUploadURL}}" data-chat-workspace-upload-max-bytes="{{.ChatWorkspaceUploadMaxBytes}}" data-chat-workspace-directory-url="{{.ChatWorkspaceDirectoryURL}}" data-chat-workspace-copy-url="{{.ChatWorkspaceCopyURL}}" data-chat-workspace-rename-url="{{.ChatWorkspaceRenameURL}}" data-chat-workspace-delete-url="{{.ChatWorkspaceDeleteURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
+  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-shell-state-url="{{.ChatShellStateURL}}" data-chat-attachment-tree-url="{{.ChatAttachmentTreeURL}}" data-chat-attachment-tree-enabled="{{if .ChatAttachmentTreeEnabled}}true{{else}}false{{end}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-listdir-url="{{.ChatWorkspaceListDirURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-workspace-download-url="{{.ChatWorkspaceDownloadURL}}" data-chat-workspace-upload-url="{{.ChatWorkspaceUploadURL}}" data-chat-workspace-upload-max-bytes="{{.ChatWorkspaceUploadMaxBytes}}" data-chat-workspace-directory-url="{{.ChatWorkspaceDirectoryURL}}" data-chat-workspace-copy-url="{{.ChatWorkspaceCopyURL}}" data-chat-workspace-rename-url="{{.ChatWorkspaceRenameURL}}" data-chat-workspace-delete-url="{{.ChatWorkspaceDeleteURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
     <div class="chat-workbench">
       <div class="chat-sidebar-column">
         <nav class="chat-activitybar" aria-label="{{msg .Locale "工作台导航" "Workbench navigation"}}">
@@ -31,6 +31,9 @@
             </button>
             <button class="chat-activitybar-item" type="button" data-chat-action="switch-sidebar-view" data-chat-sidebar-view="sessions" aria-label="{{msg .Locale "会话列表" "Session list"}}" title="{{msg .Locale "会话列表" "Session list"}}">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 6.75h12A2.25 2.25 0 0 1 20.25 9v7A2.25 2.25 0 0 1 18 18.25H9.91a1.5 1.5 0 0 0-.95.34l-2.86 2.33a.5.5 0 0 1-.82-.38v-2.29A2.25 2.25 0 0 1 3.75 16V9A2.25 2.25 0 0 1 6 6.75Z"></path><path d="M8 11h8"></path><path d="M8 14h5"></path></svg>
+            </button>
+            <button class="chat-activitybar-item chat-activitybar-terminal-toggle" type="button" data-chat-action="toggle-terminal" hidden aria-label="{{msg .Locale "切换终端" "Toggle terminal"}}" title="{{msg .Locale "切换终端" "Toggle terminal"}}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4.75 6.25A1.25 1.25 0 0 1 6 5h12a1.25 1.25 0 0 1 1.25 1.25v11.5A1.25 1.25 0 0 1 18 19H6a1.25 1.25 0 0 1-1.25-1.25z"></path><path d="m8.5 9.5 2.75 2.5-2.75 2.5"></path><path d="M13.5 14.5h2.75"></path></svg>
             </button>
           </div>
         </nav>
@@ -248,6 +251,28 @@
                   <span class="chat-visually-hidden">{{msg .Locale "打开容器终端" "Open container terminal"}}</span>
                 </button>
               </div>
+              <div class="chat-composer-toolbar-group chat-composer-toolbar-group-workdir" data-chat-workdir-group {{if eq .ChatForm.Environment "local"}}hidden{{end}}>
+                <input type="hidden" name="chat_shell_current_working_directory" value="" data-chat-workdir-input-hidden>
+                <details class="chat-model-picker chat-workdir-picker" data-chat-workdir-picker>
+                  <summary class="chat-model-picker-trigger chat-workdir-picker-trigger" aria-label="{{msg .Locale "选择工作目录" "Choose working directory"}}" title="{{msg .Locale "工作目录" "Working directory"}}">
+                    <span class="chat-workdir-picker-leading" aria-hidden="true"><i class="chat-control-icon" data-lucide="folder"></i></span>
+                    <span class="chat-model-picker-value chat-workdir-picker-value" data-chat-workdir-value>/workspace</span>
+                    <span class="chat-model-picker-icon chat-workdir-picker-icon" aria-hidden="true"><i class="chat-control-icon" data-lucide="chevron-down"></i></span>
+                  </summary>
+                  <div class="chat-model-picker-menu chat-workdir-picker-menu" role="dialog" aria-label="{{msg .Locale "工作目录" "Working directory"}}">
+                    <label class="chat-workdir-field">
+                      <span class="chat-visually-hidden">{{msg .Locale "工作目录路径" "Working directory path"}}</span>
+                      <input type="text" class="chat-workdir-input" data-chat-workdir-input placeholder="/workspace" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text">
+                    </label>
+                    <div class="chat-workdir-suggestions" data-chat-workdir-suggestions role="listbox" aria-label="{{msg .Locale "目录建议" "Directory suggestions"}}"></div>
+                    <div class="chat-workdir-status" data-chat-workdir-status hidden></div>
+                    <div class="chat-workdir-actions">
+                      <button type="button" class="chat-workdir-reset" data-chat-workdir-reset>{{msg .Locale "重置为工作区" "Reset to workspace"}}</button>
+                      <button type="button" class="chat-workdir-apply primary-button" data-chat-workdir-apply>{{msg .Locale "确定" "Apply"}}</button>
+                    </div>
+                  </div>
+                </details>
+              </div>
               {{end}}
               {{if .ChatRoutes}}
               <div class="chat-composer-toolbar-group chat-composer-toolbar-group-route">
@@ -330,7 +355,7 @@
   <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
   <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
   <script src="/console/static/chat-shell.js?v=chat-shell-20260601a"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260602a"></script>
+  <script src="/console/static/chat.js?v=chat-gemini-20260603d"></script>
   <script src="/console/static/chat-workspace.js?v=chat-workspace-20260602a"></script>
 </div>
 {{end}}

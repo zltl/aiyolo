@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/zltl/aiyolo/internal/domain"
@@ -17,6 +18,7 @@ import (
 
 const (
 	consoleChatWorkspaceTreePath       = "/console/chat/workspace/tree"
+	consoleChatWorkspaceListDirPath    = "/console/chat/workspace/listdir"
 	consoleChatWorkspaceFilePath       = "/console/chat/workspace/file"
 	consoleChatWorkspaceDownloadPath   = "/console/chat/workspace/download"
 	consoleChatWorkspaceUploadPath     = "/console/chat/workspace/upload"
@@ -66,6 +68,18 @@ type consoleChatWorkspaceTreeResponse struct {
 	Entries       []consoleChatWorkspaceEntry            `json:"entries,omitempty"`
 	Children      map[string][]consoleChatWorkspaceEntry `json:"children,omitempty"`
 	Error         string                                 `json:"error,omitempty"`
+}
+
+type consoleChatWorkspaceListDirResponse struct {
+	Status        string   `json:"status"`
+	SessionID     string   `json:"sessionId,omitempty"`
+	Environment   string   `json:"environment,omitempty"`
+	WorkerID      string   `json:"workerId,omitempty"`
+	ContainerName string   `json:"containerName,omitempty"`
+	WorkspacePath string   `json:"workspacePath,omitempty"`
+	Path          string   `json:"path,omitempty"`
+	Directories   []string `json:"directories,omitempty"`
+	Error         string   `json:"error,omitempty"`
 }
 
 type consoleChatWorkspaceFileResult struct {
@@ -271,6 +285,50 @@ func (handler *Handler) chatWorkspaceTree(w http.ResponseWriter, r *http.Request
 		Path:          result.Path,
 		Entries:       result.Entries,
 		Children:      result.Children,
+	})
+}
+
+func (handler *Handler) chatWorkspaceListDir(w http.ResponseWriter, r *http.Request) {
+	target, err := handler.resolveConsoleChatWorkspaceTarget(r.Context(), r, false)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceListDirResponse{Status: "error", Error: err.Error()})
+		return
+	}
+	requested := consoleChatWorkspaceAbsoluteDirectory(r.URL.Query().Get("path"), target.WorkspacePath)
+	resolved, directories, err := handler.listConsoleChatAbsoluteDirectories(r.Context(), target, requested)
+	if err != nil {
+		if retryTarget, retried, retryErr := handler.restoreConsoleChatWorkspaceRuntime(r.Context(), r, target, err); retryErr != nil {
+			err = retryErr
+		} else if retried {
+			target = retryTarget
+			resolved, directories, err = handler.listConsoleChatAbsoluteDirectories(r.Context(), target, requested)
+		}
+	}
+	if err != nil {
+		w.WriteHeader(consoleChatWorkspaceErrorStatus(err))
+		_ = json.NewEncoder(w).Encode(consoleChatWorkspaceListDirResponse{
+			Status:        "error",
+			SessionID:     target.SessionID,
+			Environment:   target.Environment,
+			WorkerID:      target.WorkerID,
+			ContainerName: target.ContainerName,
+			WorkspacePath: target.WorkspacePath,
+			Path:          requested,
+			Error:         err.Error(),
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(consoleChatWorkspaceListDirResponse{
+		Status:        "ready",
+		SessionID:     target.SessionID,
+		Environment:   target.Environment,
+		WorkerID:      target.WorkerID,
+		ContainerName: target.ContainerName,
+		WorkspacePath: target.WorkspacePath,
+		Path:          resolved,
+		Directories:   directories,
 	})
 }
 
@@ -834,6 +892,89 @@ func (handler *Handler) listConsoleChatWorkspace(ctx context.Context, target con
 		return consoleChatWorkspaceTreeResult{}, err
 	}
 	return consoleChatWorkspaceTreeResult{Path: result.Path, Entries: consoleChatWorkspaceEntries(result.Entries), Children: consoleChatWorkspaceChildren(result.Children)}, nil
+}
+
+func (handler *Handler) listConsoleChatAbsoluteDirectories(ctx context.Context, target consoleChatWorkspaceTarget, absolutePath string) (string, []string, error) {
+	result, err := workerops.RunCloudAgentShellExec(ctx, target.Worker, target.Key, target.Account, target.CloudSession, workerops.CloudAgentShellExecRequest{
+		Mode:           "bash",
+		Script:         consoleChatWorkspaceListDirScript(absolutePath),
+		TimeoutMS:      8000,
+		MaxOutputBytes: 256 * 1024,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	if result.TimedOut {
+		return "", nil, errors.New("directory listing timed out")
+	}
+	resolved, directories, ok := parseConsoleChatWorkspaceListDir(result.Stdout)
+	if !ok {
+		return absolutePath, nil, nil
+	}
+	return resolved, directories, nil
+}
+
+func consoleChatWorkspaceAbsoluteDirectory(raw string, fallback string) string {
+	value := strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/")
+	if value == "" || !strings.HasPrefix(value, "/") || strings.ContainsRune(value, '\x00') {
+		fallback = strings.TrimSpace(fallback)
+		if fallback == "" || !strings.HasPrefix(fallback, "/") {
+			return domain.DefaultCloudAgentWorkspacePath
+		}
+		return path.Clean(fallback)
+	}
+	return path.Clean(value)
+}
+
+func consoleChatWorkspaceListDirScript(absolutePath string) string {
+	return strings.Join([]string{
+		"set -u",
+		"dir=" + consoleChatWorkspaceShellQuote(absolutePath),
+		"if cd \"$dir\" 2>/dev/null; then",
+		"  printf 'OK\\t%s\\n' \"$(pwd -P)\"",
+		"  for entry in */ .*/; do",
+		"    [ -d \"$entry\" ] || continue",
+		"    name=${entry%/}",
+		"    case \"$name\" in .|..) continue;; esac",
+		"    printf 'D\\t%s\\n' \"$name\"",
+		"  done",
+		"else",
+		"  printf 'ERR\\tnot_a_directory\\n'",
+		"fi",
+	}, "\n")
+}
+
+func parseConsoleChatWorkspaceListDir(stdout string) (string, []string, bool) {
+	resolved := ""
+	ok := false
+	directories := make([]string, 0, 16)
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		tag, value, found := strings.Cut(line, "\t")
+		if !found {
+			continue
+		}
+		switch tag {
+		case "OK":
+			resolved = strings.TrimSpace(value)
+			ok = true
+		case "D":
+			name := strings.TrimSpace(value)
+			if name != "" && name != "." && name != ".." {
+				directories = append(directories, name)
+			}
+		case "ERR":
+			return "", nil, false
+		}
+	}
+	if !ok {
+		return "", nil, false
+	}
+	sort.Strings(directories)
+	return resolved, directories, true
 }
 
 func (handler *Handler) readConsoleChatWorkspaceFile(ctx context.Context, target consoleChatWorkspaceTarget, relativePath string) (consoleChatWorkspaceFileResult, error) {

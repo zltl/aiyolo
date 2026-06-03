@@ -81,7 +81,7 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		client.Close()
 		return nil, fmt.Errorf("open stdin pipe: %w", err)
 	}
-	if err := session.Start(buildCloudAgentShellCommand(target.containerName, target.workspacePath, shellSessionID, account.ModelPublicName)); err != nil {
+	if err := session.Start(buildCloudAgentShellCommand(target.containerName, target.workspacePath, shellSessionID, account.ModelPublicName, target.account.Credential)); err != nil {
 		stdin.Close()
 		stdoutReader.Close()
 		stdoutWriter.Close()
@@ -123,7 +123,7 @@ func normalizeCloudAgentShellSize(cols, rows int) (int, int) {
 	return cols, rows
 }
 
-func buildCloudAgentShellCommand(containerName, workspacePath, shellSessionID, model string) string {
+func buildCloudAgentShellCommand(containerName, workspacePath, shellSessionID, model string, apiKey string) string {
 	innerScript := `set -euo pipefail
 
 export TERM="${TERM:-xterm-256color}"
@@ -192,6 +192,7 @@ exec bash --rcfile "$aiyolo_shell_rc" -i
 `
 	script := fmt.Sprintf(`container_name=%s
 workspace_path=%s
+api_key=%s
 if ! command -v docker >/dev/null 2>&1; then
   printf 'docker is not installed on this worker\n' >&2
   exit 127
@@ -200,11 +201,21 @@ if ! docker inspect --type container "$container_name" >/dev/null 2>&1; then
   printf 'cloud agent container %%s is not available\n' "$container_name" >&2
   exit 1
 fi
+credential_env_args=()
+if [[ -n "$api_key" ]]; then
+	credential_env_args=(
+		-e "AIYOLO_API_KEY=$api_key"
+		-e "OPENAI_API_KEY=$api_key"
+		-e "CODEX_API_KEY=$api_key"
+		-e "ANTHROPIC_API_KEY=$api_key"
+	)
+fi
 exec docker exec -it \
 	-u %s \
   -w "$workspace_path" \
 	-e HOME=%s \
 	-e USER=%s \
+	"${credential_env_args[@]}" \
   -e TERM=xterm-256color \
   -e COLORTERM=truecolor \
 	-e CLICOLOR=1 \
@@ -216,7 +227,7 @@ exec docker exec -it \
   -e LC_ALL=C.UTF-8 \
   "$container_name" \
 	bash -lc %s
-`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(innerScript))
+`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(strings.TrimSpace(apiKey)), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(innerScript))
 	return bashCommand(script)
 }
 

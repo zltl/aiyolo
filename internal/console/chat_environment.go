@@ -309,6 +309,10 @@ func (handler *Handler) ensureConsoleChatEnvironmentAPIKey(ctx context.Context, 
 			return domain.CloudAgentAccount{}, err
 		}
 	}
+	expiresAt := existingKey.ExpiresAt
+	if expiresAt != nil && !expiresAt.After(now) {
+		expiresAt = nil
+	}
 	clearKey, apiKey, err := newConsoleAPIKey(apiKeySpec{
 		ID:                 strings.TrimSpace(existingKey.ID),
 		Name:               firstNonEmpty(strings.TrimSpace(existingKey.Name), fmt.Sprintf("Cloud Agent %s %s", workerID, now.Format("2006-01-02 15:04:05"))),
@@ -324,7 +328,7 @@ func (handler *Handler) ensureConsoleChatEnvironmentAPIKey(ctx context.Context, 
 		ConcurrentLimit:    existingKey.ConcurrentLimit,
 		DailyBudgetCents:   existingKey.DailyBudgetCents,
 		MonthlyBudgetCents: existingKey.MonthlyBudgetCents,
-		ExpiresAt:          existingKey.ExpiresAt,
+		ExpiresAt:          expiresAt,
 		CreatedAt:          existingKey.CreatedAt,
 	})
 	if err != nil {
@@ -447,6 +451,11 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	} else if err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
+	account.WorkerID = workerID
+	account, err = handler.ensureConsoleChatEnvironmentAPIKey(ctx, userID, workerID, account, allowedModels, now)
+	if err != nil {
+		return consoleChatEnvironmentEnsureResponse{}, err
+	}
 	if account, cloudSession, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, userID, state.Form.ClientSessionID, workerID, state.Form.PublicName, account, now); err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	} else if ok {
@@ -459,11 +468,6 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 			WorkspacePath: firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath)),
 			Notice:        handler.requestText(r, "Cloud Agent 已在 "+workerID+" 就绪", "Cloud agent is ready on "+workerID),
 		}, nil
-	}
-	account.WorkerID = workerID
-	account, err = handler.ensureConsoleChatEnvironmentAPIKey(ctx, userID, workerID, account, allowedModels, now)
-	if err != nil {
-		return consoleChatEnvironmentEnsureResponse{}, err
 	}
 	account.AgentType = domain.CloudAgentTypeCodex
 	account.ModelPublicName = firstNonEmpty(strings.TrimSpace(state.Form.PublicName), strings.TrimSpace(account.ModelPublicName))

@@ -905,6 +905,8 @@
   let shellResizeState = null;
   let shellInstanceCounter = 0;
   let shellOpenInFlight = false;
+  let environmentEnsureInFlight = null;
+  let environmentEnsureKey = "";
   let shellStatePersistTimer = null;
 
   const syncDraftFieldHeight = (field) => {
@@ -1138,6 +1140,7 @@
     instance.meta.currentWorkingDirectory = currentWorkingDirectory;
     renderShellMeta(instance);
     writeShellState(form);
+    rememberWorkdirPath(currentWorkingDirectory);
   };
 
   const processShellCwdReports = (form, instance, chunk) => {
@@ -1199,15 +1202,469 @@
       return { terminalID: "", currentWorkingDirectory: "" };
     }
     const context = currentShellChatContext();
+    const overrideWorkingDirectory = normalizeShellWorkingDirectory(form.dataset.chatWorkdirOverride || "");
+    const resolvedWorkingDirectory = overrideWorkingDirectory || context.currentWorkingDirectory || lastRememberedWorkdir();
     const terminalField = ensureHiddenFormField(form, "chat_shell_active_terminal_id");
     const cwdField = ensureHiddenFormField(form, "chat_shell_current_working_directory");
     if (terminalField instanceof HTMLInputElement) {
       terminalField.value = context.terminalID;
     }
     if (cwdField instanceof HTMLInputElement) {
-      cwdField.value = context.currentWorkingDirectory;
+      cwdField.value = resolvedWorkingDirectory;
     }
-    return context;
+    rememberWorkdirPath(resolvedWorkingDirectory);
+    return { terminalID: context.terminalID, currentWorkingDirectory: resolvedWorkingDirectory };
+  };
+
+  const workdirDefaultPath = "/workspace";
+  const workdirHistoryPreferenceKey = "aiyolo.console.chat.workspaces.v1";
+  const workdirHistoryLimit = 16;
+  const workdirListCache = new Map();
+  let workdirListToken = 0;
+  const workdirGroup = (form = currentForm()) => form?.querySelector("[data-chat-workdir-group]") || null;
+  const workdirPicker = (form = currentForm()) => form?.querySelector("[data-chat-workdir-picker]") || null;
+  const workdirValueNode = (form = currentForm()) => form?.querySelector("[data-chat-workdir-value]") || null;
+  const workdirMenuNode = (form = currentForm()) => {
+    const picker = workdirPicker(form);
+    return picker instanceof HTMLDetailsElement ? pickerMenu(picker) : null;
+  };
+  const workdirInput = (form = currentForm()) => workdirMenuNode(form)?.querySelector("[data-chat-workdir-input]") || null;
+  const workdirSuggestionsNode = (form = currentForm()) => workdirMenuNode(form)?.querySelector("[data-chat-workdir-suggestions]") || null;
+  const workdirStatusNode = (form = currentForm()) => workdirMenuNode(form)?.querySelector("[data-chat-workdir-status]") || null;
+
+  const normalizeWorkdirHistoryPath = (value) => {
+    let normalized = normalizeShellWorkingDirectory(String(value || "").trim().replace(/\\/g, "/"));
+    if (normalized === "") {
+      return "";
+    }
+    normalized = normalized.replace(/\/{2,}/g, "/");
+    if (normalized.length > 1) {
+      normalized = normalized.replace(/\/+$/, "");
+    }
+    return normalized || "/";
+  };
+
+  const emptyWorkdirHistory = () => ({ last: "", items: [] });
+
+  const normalizeWorkdirHistoryItem = (item) => {
+    const parsed = item && typeof item === "object" ? item : { path: item };
+    const workspacePath = normalizeWorkdirHistoryPath(parsed.path || parsed.workspacePath || parsed.value || "");
+    if (workspacePath === "") {
+      return null;
+    }
+    const count = Number.parseInt(String(parsed.count || parsed.uses || 0), 10);
+    return {
+      path: workspacePath,
+      count: Number.isFinite(count) && count > 0 ? count : 1,
+      updatedAt: String(parsed.updatedAt || parsed.lastUsedAt || "").trim(),
+    };
+  };
+
+  const normalizeWorkdirHistory = (value) => {
+    const parsed = value && typeof value === "object" ? value : {};
+    const sourceItems = Array.isArray(parsed.items)
+      ? parsed.items
+      : Array.isArray(parsed.workspaces)
+        ? parsed.workspaces
+        : Array.isArray(value)
+          ? value
+          : [];
+    const byPath = new Map();
+    sourceItems.map(normalizeWorkdirHistoryItem).filter(Boolean).forEach((item) => {
+      const existing = byPath.get(item.path);
+      if (!existing) {
+        byPath.set(item.path, item);
+        return;
+      }
+      existing.count = Math.max(existing.count, item.count);
+      if (String(item.updatedAt || "") > String(existing.updatedAt || "")) {
+        existing.updatedAt = item.updatedAt;
+      }
+    });
+    const last = normalizeWorkdirHistoryPath(parsed.last || parsed.lastWorkspacePath || parsed.lastPath || "");
+    if (last !== "" && !byPath.has(last)) {
+      byPath.set(last, { path: last, count: 1, updatedAt: "" });
+    }
+    const items = Array.from(byPath.values())
+      .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")) || left.path.localeCompare(right.path))
+      .slice(0, workdirHistoryLimit);
+    return { last, items };
+  };
+
+  const readWorkdirHistory = () => {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return emptyWorkdirHistory();
+    }
+    try {
+      return normalizeWorkdirHistory(safeParseJSON(window.localStorage.getItem(workdirHistoryPreferenceKey), emptyWorkdirHistory()));
+    } catch (_error) {
+      return emptyWorkdirHistory();
+    }
+  };
+
+  const writeWorkdirHistory = (history) => {
+    if (typeof window === "undefined" || !window.localStorage) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(workdirHistoryPreferenceKey, JSON.stringify(normalizeWorkdirHistory(history)));
+    } catch (_error) {
+      // Ignore storage failures; the current form still carries the selected path.
+    }
+  };
+
+  const rememberWorkdirPath = (value) => {
+    const workspacePath = normalizeWorkdirHistoryPath(value);
+    if (workspacePath === "") {
+      return emptyWorkdirHistory();
+    }
+    const history = readWorkdirHistory();
+    const now = new Date().toISOString();
+    const byPath = new Map(history.items.map((item) => [item.path, { ...item }]));
+    const item = byPath.get(workspacePath) || { path: workspacePath, count: 0, updatedAt: "" };
+    item.count += 1;
+    item.updatedAt = now;
+    byPath.set(workspacePath, item);
+    const next = {
+      last: workspacePath,
+      items: Array.from(byPath.values())
+        .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")) || left.path.localeCompare(right.path))
+        .slice(0, workdirHistoryLimit),
+    };
+    writeWorkdirHistory(next);
+    return next;
+  };
+
+  const lastRememberedWorkdir = () => readWorkdirHistory().last;
+
+  const effectiveWorkingDirectory = (form = currentForm()) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return workdirDefaultPath;
+    }
+    const override = normalizeShellWorkingDirectory(form.dataset.chatWorkdirOverride || "");
+    if (override !== "") {
+      return override;
+    }
+    const shellCwd = normalizeShellWorkingDirectory(activeShellInstance()?.meta?.currentWorkingDirectory || "");
+    if (shellCwd !== "") {
+      return shellCwd;
+    }
+    const remembered = lastRememberedWorkdir();
+    if (remembered !== "") {
+      return remembered;
+    }
+    return workdirDefaultPath;
+  };
+
+  const renderWorkdirControl = (form = currentForm()) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const current = effectiveWorkingDirectory(form);
+    const valueNode = workdirValueNode(form);
+    if (valueNode instanceof HTMLElement) {
+      valueNode.textContent = current;
+      valueNode.title = current;
+    }
+    const picker = workdirPicker(form);
+    const overridden = normalizeShellWorkingDirectory(form.dataset.chatWorkdirOverride || "") !== "";
+    if (picker instanceof HTMLElement) {
+      picker.classList.toggle("is-overridden", overridden);
+    }
+  };
+
+  const setWorkdirStatus = (form, message, isError = false) => {
+    const node = workdirStatusNode(form);
+    if (!(node instanceof HTMLElement)) {
+      return;
+    }
+    const text = String(message || "").trim();
+    node.textContent = text;
+    node.hidden = text === "";
+    node.classList.toggle("is-error", Boolean(isError) && text !== "");
+  };
+
+  const splitWorkdirInput = (raw) => {
+    let value = String(raw || "").trim().replace(/\\/g, "/");
+    if (value === "") {
+      return { dir: workdirDefaultPath, prefix: "" };
+    }
+    if (!value.startsWith("/")) {
+      value = "/" + value;
+    }
+    if (value.endsWith("/")) {
+      const dir = value.length > 1 ? value.replace(/\/+$/, "") : "/";
+      return { dir: dir === "" ? "/" : dir, prefix: "" };
+    }
+    const lastSlash = value.lastIndexOf("/");
+    const dir = lastSlash <= 0 ? "/" : value.slice(0, lastSlash);
+    const prefix = value.slice(lastSlash + 1);
+    return { dir, prefix };
+  };
+
+  const joinWorkdirPath = (dir, name) => {
+    const base = dir === "/" ? "" : String(dir || "").replace(/\/+$/, "");
+    return base + "/" + String(name || "");
+  };
+
+  const workdirListDirURL = (form) => String(form?.dataset.chatWorkspaceListdirUrl || "").trim();
+
+  const fetchWorkdirDirectories = async (form, dir) => {
+    const sessionID = readClientSessionID(form);
+    const endpoint = workdirListDirURL(form);
+    if (sessionID === "" || endpoint === "") {
+      return null;
+    }
+    const cacheKey = `${sessionID}|${dir}`;
+    if (workdirListCache.has(cacheKey)) {
+      return workdirListCache.get(cacheKey);
+    }
+    const url = new URL(endpoint, window.location.href);
+    url.searchParams.set("session", sessionID);
+    url.searchParams.set("path", dir);
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.status !== "ready") {
+      const error = new Error(String(payload?.error || `HTTP ${response.status}`));
+      throw error;
+    }
+    const result = {
+      path: String(payload.path || dir || "").trim() || dir,
+      directories: Array.isArray(payload.directories) ? payload.directories.map((name) => String(name || "").trim()).filter(Boolean) : [],
+    };
+    workdirListCache.set(cacheKey, result);
+    return result;
+  };
+
+  const workdirInputMatchesPath = (rawInput, workspacePath) => {
+    const pathValue = normalizeWorkdirHistoryPath(workspacePath).toLowerCase();
+    const raw = String(rawInput || "").trim().replace(/\\/g, "/").toLowerCase();
+    if (pathValue === "") {
+      return false;
+    }
+    if (raw === "") {
+      return true;
+    }
+    const normalizedRaw = raw.startsWith("/") ? raw : `/${raw}`;
+    return pathValue.startsWith(normalizedRaw.replace(/\/{2,}/g, "/"));
+  };
+
+  const rememberedWorkdirEntries = (rawInput) => {
+    const history = readWorkdirHistory();
+    const entries = [];
+    const seen = new Set();
+    const add = (entry, label, icon) => {
+      const workspacePath = normalizeWorkdirHistoryPath(entry?.path || "");
+      if (workspacePath === "" || seen.has(workspacePath) || !workdirInputMatchesPath(rawInput, workspacePath)) {
+        return;
+      }
+      seen.add(workspacePath);
+      entries.push({
+        path: workspacePath,
+        label,
+        icon,
+        count: Number.isFinite(entry.count) ? entry.count : 1,
+        updatedAt: String(entry.updatedAt || ""),
+      });
+    };
+    const last = history.items.find((item) => item.path === history.last) || (history.last === "" ? null : { path: history.last, count: 1 });
+    add(last, t("上次工作区", "Last workspace"), "history");
+    history.items
+      .filter((item) => item.path !== history.last)
+      .sort((left, right) => (right.count - left.count) || String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")) || left.path.localeCompare(right.path))
+      .slice(0, 8)
+      .forEach((item) => add(item, item.path, "folder-clock"));
+    return entries;
+  };
+
+  const appendWorkdirOption = (host, options) => {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "chat-workdir-option";
+    option.dataset.chatWorkdirOption = options.path;
+    if (options.apply) {
+      option.dataset.chatWorkdirApply = "true";
+    }
+    option.setAttribute("role", "option");
+    option.title = options.path;
+    const icon = document.createElement("i");
+    icon.className = "chat-control-icon";
+    icon.dataset.lucide = options.icon || "folder";
+    icon.setAttribute("aria-hidden", "true");
+    const copy = document.createElement("span");
+    copy.className = "chat-workdir-option-copy";
+    const label = document.createElement("span");
+    label.className = "chat-workdir-option-name";
+    label.textContent = options.label || options.path;
+    copy.appendChild(label);
+    if (options.meta) {
+      const meta = document.createElement("span");
+      meta.className = "chat-workdir-option-meta";
+      meta.textContent = options.meta;
+      copy.appendChild(meta);
+    }
+    option.appendChild(icon);
+    option.appendChild(copy);
+    host.appendChild(option);
+    return option;
+  };
+
+  const appendWorkdirSectionLabel = (host, label) => {
+    const node = document.createElement("div");
+    node.className = "chat-workdir-section-label";
+    node.textContent = label;
+    host.appendChild(node);
+  };
+
+  const renderWorkdirSuggestions = (form, dir, prefix, directories, rawInput = "") => {
+    const host = workdirSuggestionsNode(form);
+    if (!(host instanceof HTMLElement)) {
+      return;
+    }
+    const remembered = rememberedWorkdirEntries(rawInput);
+    const rememberedPaths = new Set(remembered.map((entry) => entry.path));
+    const lowerPrefix = String(prefix || "").toLowerCase();
+    const matches = directories
+      .filter((name) => lowerPrefix === "" || name.toLowerCase().startsWith(lowerPrefix))
+      .filter((name) => !rememberedPaths.has(normalizeWorkdirHistoryPath(joinWorkdirPath(dir, name))))
+      .slice(0, 80);
+    host.textContent = "";
+    if (remembered.length > 0) {
+      appendWorkdirSectionLabel(host, t("常用工作区", "Frequent workspaces"));
+      remembered.forEach((entry) => {
+        appendWorkdirOption(host, {
+          path: entry.path,
+          label: entry.label,
+          meta: entry.label === entry.path ? (entry.count > 1 ? t(`使用 ${entry.count} 次`, `Used ${entry.count} times`) : "") : entry.path,
+          icon: entry.icon,
+          apply: true,
+        });
+      });
+    }
+    if (matches.length > 0) {
+      appendWorkdirSectionLabel(host, t("子目录", "Subdirectories"));
+    }
+    if (remembered.length === 0 && matches.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "chat-workdir-empty";
+      empty.textContent = t("没有匹配的子目录", "No matching subdirectories");
+      host.appendChild(empty);
+      return;
+    }
+    matches.forEach((name) => {
+      const fullPath = joinWorkdirPath(dir, name);
+      appendWorkdirOption(host, { path: fullPath, label: name, icon: "folder" });
+    });
+    syncLucideIcons();
+  };
+
+  const updateWorkdirSuggestions = async (form = currentForm()) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const input = workdirInput(form);
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+    const rawInput = input.value;
+    const { dir, prefix } = splitWorkdirInput(rawInput);
+    const token = ++workdirListToken;
+    if (rememberedWorkdirEntries(rawInput).length > 0) {
+      renderWorkdirSuggestions(form, dir, prefix, [], rawInput);
+    }
+    setWorkdirStatus(form, t("正在加载目录…", "Loading directories..."));
+    try {
+      const result = await fetchWorkdirDirectories(form, dir);
+      if (token !== workdirListToken) {
+        return;
+      }
+      if (!result) {
+        setWorkdirStatus(form, t("请先打开 Cloud Agent 会话", "Open a Cloud Agent session first"), true);
+        renderWorkdirSuggestions(form, dir, prefix, [], rawInput);
+        return;
+      }
+      setWorkdirStatus(form, "");
+      renderWorkdirSuggestions(form, dir, prefix, result.directories, rawInput);
+    } catch (error) {
+      if (token !== workdirListToken) {
+        return;
+      }
+      setWorkdirStatus(form, String(error?.message || t("无法读取目录", "Unable to read the directory")), true);
+      renderWorkdirSuggestions(form, dir, prefix, [], rawInput);
+    }
+  };
+
+  let workdirSuggestionTimer = null;
+  const scheduleWorkdirSuggestions = (form) => {
+    if (workdirSuggestionTimer) {
+      window.clearTimeout(workdirSuggestionTimer);
+    }
+    workdirSuggestionTimer = window.setTimeout(() => {
+      workdirSuggestionTimer = null;
+      void updateWorkdirSuggestions(form);
+    }, 160);
+  };
+
+  const applyWorkdirOverride = (form, rawValue, { close = true } = {}) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return false;
+    }
+    const normalized = normalizeShellWorkingDirectory(rawValue);
+    if (normalized === "") {
+      setWorkdirStatus(form, t("请输入以 / 开头的绝对路径", "Enter an absolute path starting with /"), true);
+      return false;
+    }
+    form.dataset.chatWorkdirOverride = normalized;
+    syncShellContextFields(form);
+    renderWorkdirControl(form);
+    setWorkdirStatus(form, "");
+    if (close) {
+      const picker = workdirPicker(form);
+      if (picker instanceof HTMLDetailsElement) {
+        picker.open = false;
+      }
+    }
+    return true;
+  };
+
+  const resetWorkdirOverride = (form, { close = true } = {}) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    delete form.dataset.chatWorkdirOverride;
+    workdirListCache.clear();
+    syncShellContextFields(form);
+    renderWorkdirControl(form);
+    const input = workdirInput(form);
+    if (input instanceof HTMLInputElement) {
+      input.value = effectiveWorkingDirectory(form);
+    }
+    setWorkdirStatus(form, "");
+    if (close) {
+      const picker = workdirPicker(form);
+      if (picker instanceof HTMLDetailsElement) {
+        picker.open = false;
+      }
+    }
+  };
+
+  const openWorkdirPicker = (form = currentForm()) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+    const input = workdirInput(form);
+    if (input instanceof HTMLInputElement) {
+      input.value = effectiveWorkingDirectory(form);
+      window.requestAnimationFrame(() => {
+        input.focus();
+        input.select();
+      });
+    }
+    void updateWorkdirSuggestions(form);
   };
 
   const normalizeShellHeight = (value) => {
@@ -1786,11 +2243,14 @@
       const hasShellSocket = shellSocketBaseURL(form) !== "";
       const showShellButton = hasShellSocket && isCloudAgentEnvironment(currentSelectedEnvironment(form));
       const hiddenShellReady = isShellDockHidden(form);
-      const canOpenShell = showShellButton && (hiddenShellReady || (currentSelectedModel(form) !== "" && !shellOpenInFlight));
+      const environmentOpening = environmentEnsureInFlight !== null;
+      const canOpenShell = showShellButton && (hiddenShellReady || (currentSelectedModel(form) !== "" && !shellOpenInFlight && !environmentOpening));
       shellButton.hidden = !showShellButton;
       shellButton.disabled = !canOpenShell;
       shellButton.title = hiddenShellReady
         ? t("显示 Claude Code 终端", "Show the Claude Code terminal")
+        : environmentOpening
+        ? t("正在启动 Cloud Agent…", "Starting the Cloud Agent…")
         : shellOpenInFlight
         ? t("正在打开 cloud agent…", "Opening the cloud agent…")
         : canOpenShell
@@ -1799,6 +2259,24 @@
       shellButton.setAttribute("aria-label", hiddenShellReady
         ? t("显示 Claude Code 终端", "Show the Claude Code terminal")
         : t("打开 Claude Code 终端", "Open the Claude Code terminal"));
+    }
+    const activitybarTerminalButton = form.querySelector(".chat-activitybar-terminal-toggle");
+    if (activitybarTerminalButton instanceof HTMLButtonElement) {
+      const hasShellSocket = shellSocketBaseURL(form) !== "";
+      const showTerminalToggle = hasShellSocket && isCloudAgentEnvironment(currentSelectedEnvironment(form));
+      activitybarTerminalButton.hidden = !showTerminalToggle;
+      const dockVisible = !isShellDockHidden(form);
+      activitybarTerminalButton.classList.toggle("is-active", dockVisible);
+    }
+    const workdirGroupNode = workdirGroup(form);
+    if (workdirGroupNode instanceof HTMLElement) {
+      const showWorkdir = isCloudAgentEnvironment(currentSelectedEnvironment(form));
+      workdirGroupNode.hidden = !showWorkdir;
+      if (showWorkdir) {
+        renderWorkdirControl(form);
+      } else if (form.dataset.chatWorkdirOverride) {
+        delete form.dataset.chatWorkdirOverride;
+      }
     }
   };
 
@@ -3195,6 +3673,15 @@
     if (environment !== "local" && readClientSessionID(form) === "") {
       writeClientSessionID(form, makeID("chat"));
     }
+    const requestKey = [
+      readClientSessionID(form),
+      environment,
+      currentSelectedModel(form),
+      currentSelectedReasoningEffort(form),
+    ].join("\u001f");
+    if (environmentEnsureInFlight && environmentEnsureKey === requestKey) {
+      return environmentEnsureInFlight;
+    }
     const payload = new FormData();
     if (readClientSessionID(form) !== "") {
       payload.set("chat_client_session_id", readClientSessionID(form));
@@ -3208,43 +3695,80 @@
     setAttachmentStatus(root, environment === "local"
       ? t("正在切回本地环境…", "Switching back to local chat…")
       : t("正在启动 Cloud Agent…", "Starting cloud agent…"), false);
+    let ensurePromise = null;
+    ensurePromise = (async () => {
+      try {
+        const response = await fetch(ensureURL, {
+          method: "POST",
+          body: payload,
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        });
+        const raw = await response.text();
+        const parsed = safeParseJSON(raw, null);
+        if (!response.ok || !parsed || typeof parsed !== "object") {
+          throw new Error(String(parsed?.error || t("环境准备失败。", "Failed to prepare the selected environment.")));
+        }
+        if (typeof parsed.environment === "string" && parsed.environment.trim() !== "") {
+          setSelectedEnvironment(form, parsed.environment.trim());
+        }
+        if (typeof parsed.sessionId === "string" && parsed.sessionId.trim() !== "") {
+          writeClientSessionID(form, parsed.sessionId.trim());
+        }
+        setAttachmentStatus(root, "", false);
+        const notice = String(parsed.notice || "").trim();
+        if (notice === "") {
+          setInlineFlash(root, "", false);
+        } else if (!suppressSuccessNotice) {
+          setInlineFlash(root, notice, false);
+        }
+        queuePersist();
+        emitChatState({ source: "ensure-environment", ensured: parsed });
+        return parsed;
+      } catch (error) {
+        setAttachmentStatus(root, "", false);
+        setInlineFlash(root, String(error?.message || t("环境准备失败。", "Failed to prepare the selected environment.")), true);
+        throw error;
+      } finally {
+        if (environmentEnsureInFlight === ensurePromise) {
+          field.disabled = previousDisabled;
+          setEnvironmentPickerBusy(form, false);
+          updateComposerControls(form);
+        }
+      }
+    })();
+    environmentEnsureInFlight = ensurePromise;
+    environmentEnsureKey = requestKey;
+    updateComposerControls(form);
     try {
-      const response = await fetch(ensureURL, {
-        method: "POST",
-        body: payload,
-        credentials: "same-origin",
-        headers: { Accept: "application/json" },
-      });
-      const raw = await response.text();
-      const parsed = safeParseJSON(raw, null);
-      if (!response.ok || !parsed || typeof parsed !== "object") {
-        throw new Error(String(parsed?.error || t("环境准备失败。", "Failed to prepare the selected environment.")));
-      }
-      if (typeof parsed.environment === "string" && parsed.environment.trim() !== "") {
-        setSelectedEnvironment(form, parsed.environment.trim());
-      }
-      if (typeof parsed.sessionId === "string" && parsed.sessionId.trim() !== "") {
-        writeClientSessionID(form, parsed.sessionId.trim());
-      }
-      setAttachmentStatus(root, "", false);
-      const notice = String(parsed.notice || "").trim();
-      if (notice === "") {
-        setInlineFlash(root, "", false);
-      } else if (!suppressSuccessNotice) {
-        setInlineFlash(root, notice, false);
-      }
-      queuePersist();
-      emitChatState({ source: "ensure-environment", ensured: parsed });
-      return parsed;
-    } catch (error) {
-      setAttachmentStatus(root, "", false);
-      setInlineFlash(root, String(error?.message || t("环境准备失败。", "Failed to prepare the selected environment.")), true);
-      throw error;
+      return await ensurePromise;
     } finally {
-      field.disabled = previousDisabled;
-      setEnvironmentPickerBusy(form, false);
-      updateComposerControls(form);
+      if (environmentEnsureInFlight === ensurePromise) {
+        environmentEnsureInFlight = null;
+        environmentEnsureKey = "";
+        updateComposerControls(form);
+      }
     }
+  };
+
+  const switchChatEnvironment = async (form, value) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return null;
+    }
+    if (typeof value === "string") {
+      setSelectedEnvironment(form, value);
+    }
+    if (shellInstances.length > 0) {
+      closeAllChatShells(form, { terminate: false, forget: false });
+    }
+    updateComposerControls(form);
+    queuePersist();
+    const ensured = await ensureChatEnvironment(form);
+    if (isCloudAgentEnvironment(currentSelectedEnvironment(form))) {
+      restoreShellInstancesOrLoadServer(form);
+    }
+    updateComposerControls(form);
+    return ensured;
   };
 
   const fetchWithTimeout = async (url, options, timeoutMs) => {
@@ -3834,6 +4358,21 @@
         void openChatShell(form);
         return;
       }
+      case "toggle-terminal": {
+        event.preventDefault();
+        if (!isShellDockHidden(form)) {
+          hideShellDock(form);
+          return;
+        }
+        if (shellInstances.length > 0) {
+          setShellDockVisible(form, true);
+          writeShellState(form);
+          updateComposerControls(form);
+          return;
+        }
+        void openChatShell(form);
+        return;
+      }
       case "pick-attachments": {
         event.preventDefault();
         const input = root.querySelector("#chat-attachment-input");
@@ -3909,35 +4448,16 @@
       return;
     }
     if (target instanceof HTMLInputElement && target.matches("[data-chat-environment-option]")) {
-      setSelectedEnvironment(form, target.value);
       const picker = pickerFromTarget(target);
       if (picker instanceof HTMLDetailsElement) {
         picker.open = false;
       }
-      if (shellInstances.length > 0) {
-        closeAllChatShells(form, { terminate: false, forget: false });
-      }
-      updateComposerControls(form);
-      queuePersist();
-      void ensureChatEnvironment(form)
-        .then(() => {
-          restoreShellInstancesOrLoadServer(form);
-          updateComposerControls(form);
-        })
+      void switchChatEnvironment(form, target.value)
         .catch(() => {});
       return;
     }
     if (target instanceof HTMLSelectElement && target.name === "chat_environment") {
-      if (shellInstances.length > 0) {
-        closeAllChatShells(form, { terminate: false, forget: false });
-      }
-      updateComposerControls(form);
-      queuePersist();
-      void ensureChatEnvironment(form)
-        .then(() => {
-          restoreShellInstancesOrLoadServer(form);
-          updateComposerControls(form);
-        })
+      void switchChatEnvironment(form)
         .catch(() => {});
       return;
     }
@@ -3972,6 +4492,12 @@
     }
     if (target.name === "chat_system_prompt") {
       queuePersist();
+      return;
+    }
+    if (target.matches("[data-chat-workdir-input]")) {
+      const form = currentForm();
+      scheduleWorkdirSuggestions(form);
+      return;
     }
   });
 
@@ -4013,8 +4539,67 @@
     clearPickerMenuPlacement(picker);
   }, true);
 
+  document.addEventListener("toggle", (event) => {
+    const picker = event.target;
+    if (!(picker instanceof HTMLDetailsElement) || !picker.matches("[data-chat-workdir-picker]")) {
+      return;
+    }
+    if (picker.open) {
+      openWorkdirPicker(picker.closest("form") instanceof HTMLFormElement ? picker.closest("form") : currentForm());
+    }
+  }, true);
+
   document.addEventListener("scroll", syncOpenPickerMenus, true);
   window.addEventListener("resize", syncOpenPickerMenus);
+
+  document.addEventListener("click", (event) => {
+    const node = event.target;
+    if (!(node instanceof Element)) {
+      return;
+    }
+    const optionTarget = node.closest("[data-chat-workdir-option]");
+    if (optionTarget instanceof HTMLElement) {
+      event.preventDefault();
+      const form = currentForm();
+      const input = workdirInput(form);
+      const target = String(optionTarget.dataset.chatWorkdirOption || "").trim();
+      if (optionTarget.dataset.chatWorkdirApply === "true") {
+        applyWorkdirOverride(form, target);
+        return;
+      }
+      if (input instanceof HTMLInputElement && target !== "") {
+        input.value = target.replace(/\/+$/, "") + "/";
+        input.focus();
+        void updateWorkdirSuggestions(form);
+      }
+      return;
+    }
+    const applyTarget = node.closest("[data-chat-workdir-apply]");
+    if (applyTarget instanceof HTMLElement) {
+      event.preventDefault();
+      const form = currentForm();
+      const input = workdirInput(form);
+      applyWorkdirOverride(form, input instanceof HTMLInputElement ? input.value : "");
+      return;
+    }
+    const resetTarget = node.closest("[data-chat-workdir-reset]");
+    if (resetTarget instanceof HTMLElement) {
+      event.preventDefault();
+      resetWorkdirOverride(currentForm());
+      return;
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || !target.matches("[data-chat-workdir-input]")) {
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applyWorkdirOverride(currentForm(), target.value);
+    }
+  });
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") {
