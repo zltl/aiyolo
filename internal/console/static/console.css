@@ -3949,6 +3949,8 @@ textarea:focus-visible,
   width: 100%;
   display: grid;
   align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.12rem;
   min-height: 2.5rem;
   padding: 0.48rem 2.85rem 0.48rem 0.75rem;
   border: none;
@@ -3973,6 +3975,23 @@ textarea:focus-visible,
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #202636;
+}
+
+.chat-session-streaming-badge {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.08rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(77, 102, 255, 0.14);
+  color: #4d66ff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.chat-session-entry.is-streaming .chat-session-title {
+  color: #334155;
 }
 
 .chat-session-menu {

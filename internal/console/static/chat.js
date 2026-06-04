@@ -243,9 +243,179 @@
   };
   const sidebarPreferenceKey = "aiyolo.console.chat.sidebarCollapsed.v2";
   const ownProperty = Object.prototype.hasOwnProperty;
-  let activeStreamController = null;
-  let activeStreamStopRequested = false;
-  const queuedTurns = [];
+  const sessionStreamStates = new Map();
+
+  const normalizeSessionStreamID = (sessionID) => String(sessionID || "").trim();
+
+  const getSessionStreamState = (sessionID) => {
+    const id = normalizeSessionStreamID(sessionID);
+    return id === "" ? null : sessionStreamStates.get(id) || null;
+  };
+
+  const ensureSessionStreamState = (sessionID) => {
+    const id = normalizeSessionStreamID(sessionID);
+    if (id === "") {
+      return null;
+    }
+    let state = sessionStreamStates.get(id);
+    if (!state) {
+      state = {
+        sessionID: id,
+        controller: null,
+        stopRequested: false,
+        queuedTurns: [],
+        active: false,
+        assistantHistoryMessage: null,
+        baseMessages: [],
+        userHistoryMessage: null,
+        promptValue: "",
+        draftValue: "",
+        attachments: [],
+        ui: null,
+        streamOpened: false,
+        sawStreamEvent: false,
+        streamCompleted: false,
+        streamErrored: false,
+        streamInterrupted: false,
+        reconnectAttempt: 0,
+        allowReconnect: false,
+        resumeURL: "",
+        publicName: "",
+        environment: "",
+        preserveLocalTranscript: false,
+        replaced: false,
+      };
+      sessionStreamStates.set(id, state);
+    }
+    return state;
+  };
+
+  const isSessionStreamActive = (sessionID) => {
+    const state = getSessionStreamState(sessionID);
+    return Boolean(state?.active && !state.streamCompleted && !state.streamErrored && !state.streamInterrupted);
+  };
+
+  const isSessionVisible = (sessionID) => readClientSessionID(currentForm()) === normalizeSessionStreamID(sessionID);
+
+  const syncFormStreamingUI = (form = currentForm()) => {
+    if (!form) {
+      return;
+    }
+    const streaming = isSessionStreamActive(readClientSessionID(form));
+    form.dataset.streaming = streaming ? "true" : "false";
+    form.classList.toggle("is-streaming", streaming);
+    updateComposerControls(form);
+  };
+
+  const detachSessionStreamUI = (sessionID) => {
+    const state = getSessionStreamState(sessionID);
+    if (!state) {
+      return;
+    }
+    state.ui = null;
+  };
+
+  const streamAssistantUI = (state) => state?.ui?.assistantMessage || null;
+
+  const streamThreadUI = (state) => state?.ui?.thread || null;
+
+  const updateStreamAssistantUI = (state, updateFn) => {
+    const assistantMessage = streamAssistantUI(state);
+    if (!assistantMessage) {
+      return;
+    }
+    updateFn(assistantMessage);
+    const thread = streamThreadUI(state);
+    if (thread) {
+      scrollThread(thread);
+    }
+  };
+
+  const persistSessionStreamProgress = (state, metadata = {}) => {
+    if (!state) {
+      return;
+    }
+    const form = currentForm();
+    if (!form) {
+      return;
+    }
+    const routes = routeMap(form);
+    let store = normalizeStore(loadStore(), form, routes);
+    const existing = store.sessions.find((item) => item.id === state.sessionID);
+    if (!existing) {
+      return;
+    }
+    const history = [...state.baseMessages];
+    if (state.userHistoryMessage) {
+      history.push(normalizeMessage(state.userHistoryMessage));
+    }
+    if (state.assistantHistoryMessage) {
+      history.push(normalizeMessage(state.assistantHistoryMessage));
+    }
+    const nextSession = normalizeSession({
+      ...existing,
+      ...metadata,
+      messages: history.filter(Boolean),
+      status: String(metadata.status || existing.status || "streaming").trim(),
+      updatedAt: nowISO(),
+    }, form, routes, existing);
+    store = upsertSession(store, nextSession);
+    saveStore(store, true);
+    const root = currentRoot();
+    if (root) {
+      renderSessionList(root, store);
+    }
+    if (isSessionVisible(state.sessionID)) {
+      writeHiddenJSON(form, "chat_history_json", nextSession.messages);
+    }
+    void saveSessionToServer(nextSession);
+  };
+
+  const updateStreamSessionMetadata = (state, updates = {}) => {
+    if (isSessionVisible(state.sessionID)) {
+      updateCurrentSessionMetadata(updates);
+      return;
+    }
+    persistSessionStreamProgress(state, updates);
+  };
+
+  const mountStreamUI = (state, form) => {
+    const root = currentRoot();
+    const thread = form?.querySelector("[data-chat-scroll]");
+    if (!root || !thread || !state?.assistantHistoryMessage) {
+      return;
+    }
+    const routes = routeMap(form);
+    const route = routes.get(state.publicName || currentSelectedModel(form)) || null;
+    const history = [...state.baseMessages];
+    if (state.userHistoryMessage) {
+      history.push(normalizeMessage(state.userHistoryMessage));
+    }
+    renderThread(root, history.filter(Boolean), route);
+    const assistantNode = buildMessageNode(
+      "assistant",
+      roleLabel("assistant"),
+      state.assistantHistoryMessage.content || "",
+      form.dataset.chatStreamingLabel || "Streaming",
+      [],
+      state.assistantHistoryMessage.reasoning || "",
+    );
+    thread.appendChild(assistantNode.article);
+    scrollThread(thread);
+    state.ui = { form, thread, assistantMessage: assistantNode };
+    syncFormStreamingUI(form);
+  };
+
+  const stopSessionStream = (sessionID) => {
+    const state = getSessionStreamState(sessionID);
+    if (!state?.controller) {
+      sessionStreamStates.delete(normalizeSessionStreamID(sessionID));
+      return false;
+    }
+    state.stopRequested = true;
+    state.controller.abort();
+    return true;
+  };
 
   const cloneValue = (value) => {
     if (value === undefined) {
@@ -2211,7 +2381,7 @@
     const stopGlyph = composerPrimaryStopGlyph(form);
     const indicator = composerQueueIndicator(form);
     const shellButton = shellLaunchButton(form);
-    const streaming = form.dataset.streaming === "true";
+    const streaming = isSessionStreamActive(readClientSessionID(form));
     const payload = readDraftPayload(form);
 
     if (button instanceof HTMLButtonElement) {
@@ -2235,7 +2405,9 @@
       stopGlyph.hidden = !streaming;
     }
     if (indicator instanceof HTMLElement) {
-      const queuedCount = queuedTurns.length;
+      const sessionID = readClientSessionID(form);
+      const streamState = getSessionStreamState(sessionID);
+      const queuedCount = streamState?.queuedTurns?.length || 0;
       indicator.hidden = queuedCount === 0;
       indicator.textContent = queuedCount > 0 ? t(`已排队 ${queuedCount} 条`, `Queued ${queuedCount}`) : "";
     }
@@ -3076,8 +3248,6 @@
     if (!form) {
       return;
     }
-    form.dataset.streaming = "false";
-    form.classList.remove("is-streaming");
     writeClientSessionID(form, session.id);
     setSelectedModel(form, session.publicName);
     setSelectedEnvironment(form, session.environment);
@@ -3111,9 +3281,9 @@
     }
     syncSessionURL(session);
     scrollThread(root.querySelector("[data-chat-scroll]"));
-    updateComposerControls(form);
     syncChatShellSession(form);
     emitChatState({ source: "apply-session", session });
+    syncFormStreamingUI(form);
   };
 
   const renderSessionList = (root, store) => {
@@ -3149,6 +3319,14 @@
       title.textContent = session.title || t("新会话", "New chat");
 
       select.appendChild(title);
+
+      if (sessionIsStreaming(session) || isSessionStreamActive(session.id)) {
+        const badge = document.createElement("span");
+        badge.className = "chat-session-streaming-badge";
+        badge.textContent = t("生成中", "Streaming");
+        select.appendChild(badge);
+        entry.classList.add("is-streaming");
+      }
 
       const actions = document.createElement("details");
       actions.className = "chat-session-menu";
@@ -3204,6 +3382,86 @@
     });
   };
 
+  const attachSessionStream = async (form, session) => {
+    const sessionID = normalizeSessionStreamID(session?.id);
+    if (sessionID === "" || !form) {
+      return;
+    }
+    const state = getSessionStreamState(sessionID);
+    syncFormStreamingUI(form);
+    if (state && isSessionStreamActive(sessionID)) {
+      mountStreamUI(state, form);
+      return;
+    }
+    if (!sessionIsStreaming(session) || !isCloudAgentEnvironment(session.environment)) {
+      startQueuedTurnForSession(sessionID);
+      return;
+    }
+    const resumeURL = String(form.dataset.chatStreamResumeUrl || "").trim();
+    if (resumeURL === "") {
+      startQueuedTurnForSession(sessionID);
+      return;
+    }
+    await resumeDetachedSessionStream(form, session);
+    startQueuedTurnForSession(sessionID);
+  };
+
+  const resumeDetachedSessionStream = async (form, session) => {
+    const sessionID = normalizeSessionStreamID(session?.id);
+    if (sessionID === "" || isSessionStreamActive(sessionID)) {
+      return;
+    }
+    const messages = Array.isArray(session.messages) ? session.messages.map(normalizeMessage).filter(Boolean) : [];
+    let baseMessages = [...messages];
+    let userHistoryMessage = null;
+    let assistantHistoryMessage = null;
+    const lastMessage = baseMessages[baseMessages.length - 1];
+    if (lastMessage?.role === "assistant") {
+      assistantHistoryMessage = { ...lastMessage };
+      baseMessages = baseMessages.slice(0, -1);
+      const previousMessage = baseMessages[baseMessages.length - 1];
+      if (previousMessage?.role === "user") {
+        userHistoryMessage = { ...previousMessage };
+        baseMessages = baseMessages.slice(0, -1);
+      }
+    }
+    if (!assistantHistoryMessage) {
+      assistantHistoryMessage = {
+        id: makeID("msg"),
+        role: "assistant",
+        label: roleLabel("assistant"),
+        content: "",
+        reasoning: "",
+        attachments: [],
+      };
+    }
+    const state = ensureSessionStreamState(sessionID);
+    state.active = true;
+    state.stopRequested = false;
+    state.streamCompleted = false;
+    state.streamErrored = false;
+    state.streamInterrupted = false;
+    state.streamOpened = false;
+    state.sawStreamEvent = false;
+    state.reconnectAttempt = 1;
+    state.replaced = false;
+    state.preserveLocalTranscript = false;
+    state.baseMessages = baseMessages;
+    state.userHistoryMessage = userHistoryMessage;
+    state.assistantHistoryMessage = assistantHistoryMessage;
+    state.promptValue = String(userHistoryMessage?.content || "").trim();
+    state.draftValue = state.promptValue;
+    state.attachments = Array.isArray(userHistoryMessage?.attachments) ? userHistoryMessage.attachments : [];
+    state.allowReconnect = true;
+    state.resumeURL = String(form.dataset.chatStreamResumeUrl || "").trim();
+    state.publicName = session.publicName;
+    state.environment = session.environment;
+    const abortController = new AbortController();
+    state.controller = abortController;
+    mountStreamUI(state, form);
+    await runSessionStreamFetchLoop(state, form, { resumeOnly: true });
+  };
+
   const activateSession = (sessionID, broadcast = true) => {
     const root = currentRoot();
     const form = currentForm();
@@ -3216,10 +3474,13 @@
     if (!session) {
       return;
     }
+    persistCurrentSession(broadcast);
+    detachSessionStreamUI(readClientSessionID(form));
     store.activeSessionId = sessionID;
     saveStore(store, broadcast);
     renderSessionList(root, store);
     applySession(root, session, routes);
+    void attachSessionStream(form, session);
   };
 
   const renameSession = (sessionID) => {
@@ -3267,6 +3528,7 @@
     if (!confirmed) {
       return;
     }
+    stopSessionStream(sessionID);
     store.sessions = store.sessions.filter((item) => item.id !== sessionID);
     void deleteSessionOnServer(sessionID);
     if (!store.sessions.length) {
@@ -3293,6 +3555,8 @@
     if (!root || !form) {
       return;
     }
+    persistCurrentSession(true);
+    detachSessionStreamUI(readClientSessionID(form));
     const routes = routeMap(form);
     let store = normalizeStore(loadStore(), form, routes);
     const session = createBlankSession(form, routes);
@@ -3445,20 +3709,6 @@
     form.submit();
   };
 
-  const canInteractWhileStreaming = (element, draftField) => {
-    if (element === draftField) {
-      return true;
-    }
-    if (element instanceof HTMLInputElement && element.id === "chat-attachment-input") {
-      return true;
-    }
-    if (!(element instanceof HTMLButtonElement)) {
-      return false;
-    }
-    const action = String(element.dataset.chatAction || "").trim();
-    return action === "composer-primary" || action === "pick-attachments" || action === "remove-attachment";
-  };
-
   const clearComposerDraft = (form) => {
     const root = currentRoot();
     const draftField = form?.querySelector("#chat-draft");
@@ -3479,18 +3729,23 @@
     if (!root || !form) {
       return false;
     }
+    const sessionID = readClientSessionID(form);
+    const streamState = ensureSessionStreamState(sessionID);
+    if (!streamState) {
+      return false;
+    }
     const payload = readDraftPayload(form, options);
     if (!hasDraftPayload(payload)) {
       updateComposerControls(form);
       return false;
     }
-    queuedTurns.push({
+    streamState.queuedTurns.push({
       prompt: payload.prompt,
       userVisibleText: payload.userVisibleText,
       attachments: payload.attachments,
     });
     clearComposerDraft(form);
-    const queuedCount = queuedTurns.length;
+    const queuedCount = streamState.queuedTurns.length;
     setAttachmentStatus(
       root,
       queuedCount === 1
@@ -3503,27 +3758,23 @@
     return true;
   };
 
-  const stopActiveStream = () => {
-    if (!(activeStreamController instanceof AbortController)) {
-      return false;
-    }
-    activeStreamStopRequested = true;
-    activeStreamController.abort();
-    return true;
-  };
+  const stopActiveStream = () => stopSessionStream(readClientSessionID(currentForm()));
 
-  const startQueuedTurn = () => {
+  const startQueuedTurnForSession = (sessionID) => {
     const form = currentForm();
-    if (!form || form.dataset.streaming === "true" || queuedTurns.length === 0) {
+    const normalizedSessionID = normalizeSessionStreamID(sessionID);
+    const streamState = getSessionStreamState(normalizedSessionID);
+    const queue = streamState?.queuedTurns;
+    if (!form || !isSessionVisible(normalizedSessionID) || isSessionStreamActive(normalizedSessionID) || !queue || queue.length === 0) {
       updateComposerControls(form);
       return false;
     }
-    const nextTurn = queuedTurns.shift();
+    const nextTurn = queue.shift();
     updateComposerControls(form);
     window.setTimeout(() => {
       const nextForm = currentForm();
-      if (!nextForm || nextForm.dataset.streaming === "true") {
-        queuedTurns.unshift(nextTurn);
+      if (!nextForm || !isSessionVisible(normalizedSessionID) || isSessionStreamActive(normalizedSessionID)) {
+        queue.unshift(nextTurn);
         updateComposerControls(currentForm());
         return;
       }
@@ -3531,6 +3782,8 @@
     }, 0);
     return true;
   };
+
+  const startQueuedTurn = () => startQueuedTurnForSession(readClientSessionID(currentForm()));
 
   const setInlineFlash = (root, message, isError = false) => {
     const stage = root?.querySelector(".chat-stage");
@@ -3590,19 +3843,7 @@
   );
 
   const enableForm = (form) => {
-    form.dataset.streaming = "false";
-    form.classList.remove("is-streaming");
-    form.querySelectorAll("button, input, textarea, select").forEach((element) => {
-      if (!(element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
-        return;
-      }
-      if (element.dataset.chatStreamDisabled !== "true") {
-        return;
-      }
-      element.disabled = false;
-      delete element.dataset.chatStreamDisabled;
-    });
-    updateComposerControls(form);
+    syncFormStreamingUI(form);
   };
 
   const replaceChatContent = (html) => {
@@ -3943,8 +4184,279 @@
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 
+  const runSessionStreamFetchLoop = async (state, form, options = {}) => {
+    const resumeOnly = Boolean(options.resumeOnly);
+    const streamURL = String(form.dataset.chatStreamUrl || "").trim();
+    const formData = options.formData || null;
+    const promptValue = state.promptValue;
+    const draftValue = state.draftValue;
+    const attachments = state.attachments;
+    const assistantHistoryMessage = state.assistantHistoryMessage;
+
+    const syncCurrentHistory = () => {
+      if (isSessionVisible(state.sessionID) && state.ui?.form) {
+        syncStreamHistory(state.ui.form, state.baseMessages, state.userHistoryMessage, assistantHistoryMessage);
+        queuePersist();
+        return;
+      }
+      persistSessionStreamProgress(state, { status: "streaming", lastError: "" });
+    };
+
+    const restartStream = (nextPrompt, nextVisibleText, nextAttachments = []) => {
+      if (!isSessionVisible(state.sessionID)) {
+        return;
+      }
+      const nextForm = currentForm();
+      const nextDraftField = nextForm?.querySelector("#chat-draft");
+      if (!(nextDraftField instanceof HTMLTextAreaElement)) {
+        return;
+      }
+      nextDraftField.value = nextVisibleText;
+      syncDraftFieldHeight(nextDraftField);
+      writeHiddenJSON(nextForm, "chat_draft_attachments_json", nextAttachments);
+      renderDraftAttachments(currentRoot(), nextAttachments);
+      setInlineFlash(currentRoot(), "", false);
+      void streamConsoleChat(nextForm, { prompt: nextPrompt, userVisibleText: nextVisibleText, attachments: nextAttachments });
+    };
+    const continueStream = () => restartStream(continuationPrompt(), t("继续生成", "Continue"));
+    const retryStream = () => restartStream(promptValue, draftValue || promptValue, attachments);
+
+    const finalizeInterruptedStream = (messageText, finalizeOptions = {}) => {
+      if (state.streamInterrupted) {
+        return;
+      }
+      state.streamInterrupted = true;
+      const hasPartial = Boolean(String(assistantHistoryMessage.content || "").trim() || String(assistantHistoryMessage.reasoning || "").trim());
+      syncCurrentHistory();
+      updateStreamSessionMetadata(state, {
+        status: hasPartial ? "interrupted" : "failed",
+        lastError: String(messageText || "").trim(),
+      });
+      updateStreamAssistantUI(state, (assistantMessage) => {
+        assistantMessage.setStreamingStatus(String(finalizeOptions.statusText || t("输出已中断", "Interrupted")), String(finalizeOptions.statusTone || "error"));
+        assistantMessage.setActions(Array.isArray(finalizeOptions.actions)
+          ? finalizeOptions.actions
+          : hasPartial
+            ? [{ label: t("继续生成", "Continue"), onClick: continueStream }]
+            : [{ label: t("重试", "Retry"), onClick: retryStream }]);
+      });
+      if (isSessionVisible(state.sessionID)) {
+        setInlineFlash(currentRoot(), messageText, finalizeOptions.isError !== false);
+      }
+    };
+
+    const applyStreamMessage = (message) => {
+      if (!message || typeof message !== "object") {
+        return;
+      }
+      if (typeof message.content === "string" && message.content.trim() !== "") {
+        assistantHistoryMessage.content = message.content;
+        updateStreamAssistantUI(state, (assistantMessage) => {
+          assistantMessage.setContent(assistantHistoryMessage.content);
+        });
+      }
+      if (typeof message.reasoning === "string" && message.reasoning.trim() !== "") {
+        assistantHistoryMessage.reasoning = message.reasoning;
+        updateStreamAssistantUI(state, (assistantMessage) => {
+          assistantMessage.setReasoning(assistantHistoryMessage.reasoning, true);
+        });
+      }
+    };
+
+    const hasStreamProgress = () => Boolean(
+      state.streamOpened
+      || state.sawStreamEvent
+      || String(assistantHistoryMessage.content || "").trim() !== ""
+      || String(assistantHistoryMessage.reasoning || "").trim() !== "",
+    );
+
+    const waitForReconnect = async () => {
+      state.reconnectAttempt += 1;
+      updateStreamAssistantUI(state, (assistantMessage) => {
+        assistantMessage.setStreamingStatus(t("连接已断开，正在重连…", "Connection lost, reconnecting..."), "heartbeat");
+        assistantMessage.setActions([]);
+      });
+      await delayWithAbort(state.controller?.signal, Math.min(4000, 400 * state.reconnectAttempt));
+    };
+
+    const handleStreamEvent = (event) => {
+      state.sawStreamEvent = true;
+      if (event.type === "sync") {
+        applyStreamMessage(event.message);
+        updateStreamSessionMetadata(state, { status: "streaming", lastError: "" });
+        updateStreamAssistantUI(state, (assistantMessage) => {
+          assistantMessage.setStreamingStatus(t("已重新连接，继续等待输出…", "Reconnected, waiting for more output..."), "heartbeat");
+          assistantMessage.setActions([]);
+        });
+        return;
+      }
+      if (event.type === "delta") {
+        assistantHistoryMessage.content += String(event.delta || "");
+        updateStreamAssistantUI(state, (assistantMessage) => {
+          assistantMessage.setContent(assistantHistoryMessage.content);
+          assistantMessage.setStreamingStatus(form.dataset.chatStreamingLabel || "Streaming", "streaming");
+          assistantMessage.setActions([]);
+        });
+        syncCurrentHistory();
+        return;
+      }
+      if (event.type === "reasoning") {
+        assistantHistoryMessage.reasoning += String(event.reasoning || "");
+        updateStreamAssistantUI(state, (assistantMessage) => {
+          assistantMessage.setReasoning(assistantHistoryMessage.reasoning, true);
+          assistantMessage.setStreamingStatus(t("正在思考", "Reasoning"), "reasoning");
+          assistantMessage.setActions([]);
+        });
+        syncCurrentHistory();
+        return;
+      }
+      if (event.type === "heartbeat") {
+        updateStreamAssistantUI(state, (assistantMessage) => {
+          assistantMessage.setStreamingStatus(t("连接保持中，等待更多输出…", "Connection alive, waiting for more output..."), "heartbeat");
+        });
+        return;
+      }
+      if (event.type === "done") {
+        state.streamCompleted = true;
+        applyStreamMessage(event.message);
+        syncCurrentHistory();
+        updateStreamSessionMetadata(state, { status: "completed", lastError: "" });
+        if (String(event?.result?.finishReason || "").trim().toLowerCase() === "length") {
+          state.preserveLocalTranscript = true;
+          updateStreamAssistantUI(state, (assistantMessage) => {
+            assistantMessage.setStreamingStatus(t("已达到输出上限", "Reached output limit"), "warning");
+            assistantMessage.setActions([{ label: t("继续生成", "Continue"), onClick: continueStream, kind: "primary" }]);
+          });
+        } else {
+          updateStreamAssistantUI(state, (assistantMessage) => {
+            assistantMessage.setStreamingStatus(t("已完成", "Completed"), "done");
+            assistantMessage.setActions([]);
+          });
+          if (isSessionVisible(state.sessionID)) {
+            setInlineFlash(currentRoot(), "", false);
+          }
+        }
+        return;
+      }
+      if (event.type === "error") {
+        state.streamErrored = true;
+        applyStreamMessage(event.message);
+        finalizeInterruptedStream(String(event.error || t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished.")).trim());
+        return;
+      }
+      if (event.type === "replace") {
+        if (state.streamErrored || state.preserveLocalTranscript) {
+          return;
+        }
+        state.replaced = true;
+        if (isSessionVisible(state.sessionID)) {
+          replaceChatContent(event.html || "");
+        }
+      }
+    };
+
+    const openNDJSONResponse = async (response) => {
+      if (response.redirected && response.url) {
+        if (isSessionVisible(state.sessionID)) {
+          window.location.href = response.url;
+        }
+        return false;
+      }
+      if (!response.ok || !response.body) {
+        throw new Error("stream_unavailable");
+      }
+      const contentType = response.headers.get("content-type") || "";
+      if (!contentType.includes("application/x-ndjson")) {
+        throw new Error("stream_unavailable");
+      }
+      state.streamOpened = true;
+      if (!resumeOnly) {
+        state.reconnectAttempt = 0;
+      }
+      await decodeStreamEvents(response, handleStreamEvent);
+      return true;
+    };
+
+    try {
+      while (true) {
+        try {
+          const useResume = state.allowReconnect && state.reconnectAttempt > 0;
+          const response = await fetch(useResume
+            ? `${state.resumeURL}?session=${encodeURIComponent(state.sessionID)}`
+            : streamURL, useResume
+            ? {
+              method: "GET",
+              signal: state.controller?.signal,
+              credentials: "same-origin",
+              headers: { Accept: "application/x-ndjson" },
+            }
+            : {
+              method: "POST",
+              body: formData,
+              signal: state.controller?.signal,
+              credentials: "same-origin",
+              headers: { Accept: "application/x-ndjson" },
+            });
+          const handled = await openNDJSONResponse(response);
+          if (handled === false || state.streamCompleted || state.streamErrored || state.replaced) {
+            break;
+          }
+          if (!state.allowReconnect) {
+            break;
+          }
+          await waitForReconnect();
+        } catch (error) {
+          if (state.stopRequested || error?.name === "AbortError") {
+            finalizeInterruptedStream(t("已终止当前回复。", "Stopped current reply."), {
+              statusText: t("已终止", "Stopped"),
+              statusTone: "warning",
+              actions: [],
+              isError: false,
+            });
+            return;
+          }
+          if (state.allowReconnect && !state.streamCompleted && !state.streamErrored && !state.replaced && hasStreamProgress()) {
+            await waitForReconnect();
+            continue;
+          }
+          if (!state.streamCompleted && !state.streamErrored && hasStreamProgress()) {
+            finalizeInterruptedStream(t("连接异常，回复在完成前中断了。", "The connection dropped before the answer finished."));
+            return;
+          }
+          if (isSessionVisible(state.sessionID)) {
+            restoreDraftAndSubmit(form, promptValue, attachments);
+          }
+          return;
+        }
+      }
+    } finally {
+      const stoppedByUser = state.stopRequested;
+      state.controller = null;
+      state.stopRequested = false;
+      state.active = false;
+      if (state.streamOpened && !state.replaced && !state.streamCompleted && !state.streamErrored && !stoppedByUser && !state.allowReconnect) {
+        finalizeInterruptedStream(t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished."));
+      }
+      if (!state.replaced) {
+        syncFormStreamingUI(isSessionVisible(state.sessionID) ? form : currentForm());
+      } else if (isSessionVisible(state.sessionID)) {
+        updateComposerControls(currentForm());
+      }
+      const root = currentRoot();
+      if (root) {
+        renderSessionList(root, normalizeStore(loadStore(), form, routeMap(form)));
+      }
+      startQueuedTurnForSession(state.sessionID);
+      if (state.streamCompleted || state.streamErrored || state.streamInterrupted) {
+        sessionStreamStates.delete(state.sessionID);
+      }
+    }
+  };
+
   const streamConsoleChat = async (form, options = {}) => {
-    if (form.dataset.streaming === "true") {
+    const sessionID = readClientSessionID(form);
+    if (isSessionStreamActive(sessionID)) {
+      queuePendingTurn(form, options);
       return;
     }
     const draftField = form.querySelector("#chat-draft");
@@ -3961,7 +4473,6 @@
 
     const baseMessages = readHiddenJSON(form, "chat_history_json", []).map(normalizeMessage).filter(Boolean);
     const userHistoryMessage = buildHistoryMessage("user", draftValue || promptValue, attachments);
-    let preserveLocalTranscript = promptValue !== draftValue;
     const assistantHistoryMessage = {
       id: makeID("msg"),
       role: "assistant",
@@ -3998,29 +4509,30 @@
     formData.set("chat_shell_active_terminal_id", shellContext.terminalID);
     formData.set("chat_shell_current_working_directory", shellContext.currentWorkingDirectory);
 
-    form.dataset.streaming = "true";
-    form.classList.add("is-streaming");
-    const abortController = new AbortController();
-    activeStreamController = abortController;
-    activeStreamStopRequested = false;
-    form.querySelectorAll("button, input, textarea, select").forEach((element) => {
-      if (!(element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
-        return;
-      }
-      if (element.name === "chat_message_role" || element.name === "chat_message_content") {
-        return;
-      }
-      if (canInteractWhileStreaming(element, draftField)) {
-        delete element.dataset.chatStreamDisabled;
-        return;
-      }
-      if (!element.disabled) {
-        element.dataset.chatStreamDisabled = "true";
-        element.disabled = true;
-      }
-    });
-    setInlineFlash(root, "", false);
+    const state = ensureSessionStreamState(sessionID);
+    state.active = true;
+    state.stopRequested = false;
+    state.streamCompleted = false;
+    state.streamErrored = false;
+    state.streamInterrupted = false;
+    state.streamOpened = false;
+    state.sawStreamEvent = false;
+    state.reconnectAttempt = 0;
+    state.replaced = false;
+    state.preserveLocalTranscript = promptValue !== draftValue;
+    state.baseMessages = baseMessages;
+    state.userHistoryMessage = userHistoryMessage;
+    state.assistantHistoryMessage = assistantHistoryMessage;
+    state.promptValue = promptValue;
+    state.draftValue = draftValue;
+    state.attachments = attachments;
+    state.allowReconnect = allowReconnect;
+    state.resumeURL = String(resumeURL || "").trim();
+    state.publicName = currentSelectedModel(form);
+    state.environment = currentSelectedEnvironment(form);
+    state.controller = new AbortController();
 
+    setInlineFlash(root, "", false);
     if (thread.querySelector(".chat-empty-state")) {
       thread.replaceChildren();
     }
@@ -4029,219 +4541,12 @@
     thread.appendChild(userMessage.article);
     thread.appendChild(assistantMessage.article);
     scrollThread(thread);
+    state.ui = { form, thread, assistantMessage };
     clearComposerDraft(form);
-    updateComposerControls(form);
-
-    const syncCurrentHistory = () => syncStreamHistory(form, baseMessages, userHistoryMessage, assistantHistoryMessage);
-    syncCurrentHistory();
+    syncFormStreamingUI(form);
+    syncStreamHistory(form, baseMessages, userHistoryMessage, assistantHistoryMessage);
     updateCurrentSessionMetadata({ status: "streaming", lastError: "" });
-    const restartStream = (nextPrompt, nextVisibleText, nextAttachments = []) => {
-      const nextDraftField = form.querySelector("#chat-draft");
-      if (!(nextDraftField instanceof HTMLTextAreaElement)) {
-        return;
-      }
-      nextDraftField.value = nextVisibleText;
-      syncDraftFieldHeight(nextDraftField);
-      writeHiddenJSON(form, "chat_draft_attachments_json", nextAttachments);
-      renderDraftAttachments(currentRoot(), nextAttachments);
-      setInlineFlash(currentRoot(), "", false);
-      void streamConsoleChat(form, { prompt: nextPrompt, userVisibleText: nextVisibleText });
-    };
-    const continueStream = () => restartStream(continuationPrompt(), t("继续生成", "Continue"));
-    const retryStream = () => restartStream(promptValue, draftValue || promptValue, attachments);
-    const finalizeInterruptedStream = (messageText, options = {}) => {
-      if (streamInterrupted) {
-        return;
-      }
-      streamInterrupted = true;
-      const hasPartial = Boolean(String(assistantHistoryMessage.content || "").trim() || String(assistantHistoryMessage.reasoning || "").trim());
-      syncCurrentHistory();
-      queuePersist();
-      updateCurrentSessionMetadata({
-        status: hasPartial ? "interrupted" : "failed",
-        lastError: String(messageText || "").trim(),
-      });
-      assistantMessage.setStreamingStatus(String(options.statusText || t("输出已中断", "Interrupted")), String(options.statusTone || "error"));
-      assistantMessage.setActions(Array.isArray(options.actions)
-        ? options.actions
-        : hasPartial
-          ? [{ label: t("继续生成", "Continue"), onClick: continueStream }]
-          : [{ label: t("重试", "Retry"), onClick: retryStream }]);
-      setInlineFlash(currentRoot(), messageText, options.isError !== false);
-      scrollThread(thread);
-    };
-    const applyStreamMessage = (message) => {
-      if (!message || typeof message !== "object") {
-        return;
-      }
-      if (typeof message.content === "string" && message.content.trim() !== "") {
-        assistantHistoryMessage.content = message.content;
-        assistantMessage.setContent(assistantHistoryMessage.content);
-      }
-      if (typeof message.reasoning === "string" && message.reasoning.trim() !== "") {
-        assistantHistoryMessage.reasoning = message.reasoning;
-        assistantMessage.setReasoning(assistantHistoryMessage.reasoning, true);
-      }
-    };
-
-    let replaced = false;
-    let sawStreamEvent = false;
-    let streamCompleted = false;
-    let streamErrored = false;
-    let streamInterrupted = false;
-    let streamOpened = false;
-    let reconnectAttempt = 0;
-    const hasStreamProgress = () => Boolean(streamOpened || sawStreamEvent || String(assistantHistoryMessage.content || "").trim() !== "" || String(assistantHistoryMessage.reasoning || "").trim() !== "");
-    const waitForReconnect = async () => {
-      reconnectAttempt += 1;
-      assistantMessage.setStreamingStatus(t("连接已断开，正在重连…", "Connection lost, reconnecting..."), "heartbeat");
-      assistantMessage.setActions([]);
-      scrollThread(thread);
-      await delayWithAbort(abortController.signal, Math.min(4000, 400 * reconnectAttempt));
-    };
-    const handleStreamEvent = (event) => {
-      sawStreamEvent = true;
-      if (event.type === "sync") {
-        applyStreamMessage(event.message);
-        updateCurrentSessionMetadata({ status: "streaming", lastError: "" });
-        assistantMessage.setStreamingStatus(t("已重新连接，继续等待输出…", "Reconnected, waiting for more output..."), "heartbeat");
-        assistantMessage.setActions([]);
-        scrollThread(thread);
-        return;
-      }
-      if (event.type === "delta") {
-        assistantHistoryMessage.content += String(event.delta || "");
-        assistantMessage.setContent(assistantHistoryMessage.content);
-        assistantMessage.setStreamingStatus(form.dataset.chatStreamingLabel || "Streaming", "streaming");
-        assistantMessage.setActions([]);
-        scrollThread(thread);
-        return;
-      }
-      if (event.type === "reasoning") {
-        assistantHistoryMessage.reasoning += String(event.reasoning || "");
-        assistantMessage.setReasoning(assistantHistoryMessage.reasoning, true);
-        assistantMessage.setStreamingStatus(t("正在思考", "Reasoning"), "reasoning");
-        assistantMessage.setActions([]);
-        scrollThread(thread);
-        return;
-      }
-      if (event.type === "heartbeat") {
-        assistantMessage.setStreamingStatus(t("连接保持中，等待更多输出…", "Connection alive, waiting for more output..."), "heartbeat");
-        scrollThread(thread);
-        return;
-      }
-      if (event.type === "done") {
-        streamCompleted = true;
-        applyStreamMessage(event.message);
-        syncCurrentHistory();
-        queuePersist();
-        updateCurrentSessionMetadata({ status: "completed", lastError: "" });
-        if (String(event?.result?.finishReason || "").trim().toLowerCase() === "length") {
-          preserveLocalTranscript = true;
-          assistantMessage.setStreamingStatus(t("已达到输出上限", "Reached output limit"), "warning");
-          assistantMessage.setActions([{ label: t("继续生成", "Continue"), onClick: continueStream, kind: "primary" }]);
-        } else {
-          assistantMessage.setStreamingStatus(t("已完成", "Completed"), "done");
-          assistantMessage.setActions([]);
-          setInlineFlash(currentRoot(), "", false);
-        }
-        scrollThread(thread);
-        return;
-      }
-      if (event.type === "error") {
-        streamErrored = true;
-        applyStreamMessage(event.message);
-        finalizeInterruptedStream(String(event.error || t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished.")).trim());
-        return;
-      }
-      if (event.type === "replace") {
-        if (streamErrored || preserveLocalTranscript) {
-          return;
-        }
-        replaced = true;
-        replaceChatContent(event.html || "");
-      }
-    };
-    const openNDJSONResponse = async (response) => {
-      if (response.redirected && response.url) {
-        window.location.href = response.url;
-        return false;
-      }
-      if (!response.ok || !response.body) {
-        throw new Error("stream_unavailable");
-      }
-      const contentType = response.headers.get("content-type") || "";
-      if (!contentType.includes("application/x-ndjson")) {
-        throw new Error("stream_unavailable");
-      }
-      streamOpened = true;
-      reconnectAttempt = 0;
-      await decodeStreamEvents(response, handleStreamEvent);
-      return true;
-    };
-    try {
-      while (true) {
-        try {
-          const response = await fetch(allowReconnect && reconnectAttempt > 0
-            ? `${resumeURL}?session=${encodeURIComponent(readClientSessionID(form))}`
-            : streamURL, allowReconnect && reconnectAttempt > 0
-            ? {
-              method: "GET",
-              signal: abortController.signal,
-              credentials: "same-origin",
-              headers: { Accept: "application/x-ndjson" },
-            }
-            : {
-              method: "POST",
-              body: formData,
-              signal: abortController.signal,
-              credentials: "same-origin",
-              headers: { Accept: "application/x-ndjson" },
-            });
-          const handled = await openNDJSONResponse(response);
-          if (handled === false || streamCompleted || streamErrored || replaced) {
-            break;
-          }
-          if (!allowReconnect) {
-            break;
-          }
-          await waitForReconnect();
-        } catch (error) {
-          if (activeStreamStopRequested || error?.name === "AbortError") {
-            finalizeInterruptedStream(t("已终止当前回复。", "Stopped current reply."), {
-              statusText: t("已终止", "Stopped"),
-              statusTone: "warning",
-              actions: [],
-              isError: false,
-            });
-            return;
-          }
-          if (allowReconnect && !streamCompleted && !streamErrored && !replaced && hasStreamProgress()) {
-            await waitForReconnect();
-            continue;
-          }
-          if (!streamCompleted && !streamErrored && hasStreamProgress()) {
-            finalizeInterruptedStream(t("连接异常，回复在完成前中断了。", "The connection dropped before the answer finished."));
-            return;
-          }
-          restoreDraftAndSubmit(form, promptValue, attachments);
-          return;
-        }
-      }
-    } finally {
-      const stoppedByUser = activeStreamStopRequested;
-      activeStreamController = null;
-      activeStreamStopRequested = false;
-      if (streamOpened && !replaced && !streamCompleted && !streamErrored && !stoppedByUser && !allowReconnect) {
-        finalizeInterruptedStream(t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished."));
-      }
-      if (!replaced) {
-        enableForm(form);
-      } else {
-        updateComposerControls(currentForm());
-      }
-      startQueuedTurn();
-    }
+    await runSessionStreamFetchLoop(state, form, { formData });
   };
 
   document.addEventListener("click", (event) => {
@@ -4331,7 +4636,7 @@
       }
       case "composer-primary": {
         event.preventDefault();
-        if (form.dataset.streaming === "true") {
+        if (isSessionStreamActive(readClientSessionID(form))) {
           stopActiveStream();
           return;
         }
@@ -4514,7 +4819,7 @@
       return;
     }
     event.preventDefault();
-    if (form.dataset.streaming === "true") {
+    if (isSessionStreamActive(readClientSessionID(form))) {
       queuePendingTurn(form);
       return;
     }
