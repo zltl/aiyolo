@@ -1,0 +1,1 @@
+-- No safe rollback for provider-specific pricing overrides.

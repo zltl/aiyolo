@@ -5,10 +5,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
-  <link rel="stylesheet" href="https://unpkg.com/file-icons-js@1.1.0/css/style.css">
-  <link rel="stylesheet" href="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css">
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260603a">
-  <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
+  <link rel="stylesheet" href="/console/static/vendor/file-icons-style.css?v=vendor-20260606a">
+  <link rel="stylesheet" href="/console/static/vendor/github-dark.min.css?v=vendor-20260606a">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260606b">
+  <link rel="stylesheet" href="/console/static/vendor/xterm.css?v=vendor-20260606a">
 </head>
 <body class="chat-workspace-body">
   {{template "chat-content" .}}
@@ -48,7 +48,7 @@
                     <span>{{msg .Locale "Chat 附件存储" "Chat attachment storage"}}</span>
                   </div>
                   <div class="chat-explorer-root" data-chat-attachment-root-copy>{{msg .Locale "等待加载附件目录" "Waiting for the attachment tree"}}</div>
-                  <p class="chat-workspace-status" data-chat-attachment-status>{{msg .Locale "当前没有配置可浏览的 chat 附件目录。" "Chat attachment browsing is not configured."}}</p>
+                  <p class="chat-workspace-status" data-chat-attachment-status hidden></p>
                   <div class="chat-workspace-tree" data-chat-attachment-tree></div>
                 </section>
                 <section class="chat-explorer-tree-section" data-chat-workspace-section hidden>
@@ -65,7 +65,7 @@
                     </div>
                   </div>
                   <div class="chat-explorer-root" data-chat-workspace-root-copy>{{msg .Locale "等待 Cloud Agent 工作区" "Waiting for the Cloud Agent workspace"}}</div>
-                  <p class="chat-workspace-status" data-chat-workspace-status>{{msg .Locale "切换到 Cloud Agent 环境后，可浏览容器里的目录与文件。" "Switch to a Cloud Agent environment to browse files inside the container."}}</p>
+                  <p class="chat-workspace-status" data-chat-workspace-status hidden></p>
                   <div class="chat-workspace-tree" data-chat-workspace-tree></div>
                 </section>
               </div>
@@ -74,8 +74,7 @@
             <section class="chat-sidebar-section chat-sidebar-panel" data-chat-sidebar-panel="sessions" hidden>
               <div class="chat-sidebar-head">
                 <div>
-                  <p class="chat-sidebar-label">{{msg .Locale "会话" "Sessions"}}</p>
-                  <strong>{{msg .Locale "当前对话列表" "Current chat sessions"}}</strong>
+                  <strong>{{msg .Locale "会话" "Sessions"}}</strong>
                 </div>
               </div>
               <div class="chat-session-store" data-chat-session-store></div>
@@ -103,7 +102,7 @@
           </div>
           <div class="chat-editor-toolbar">
             <div class="chat-editor-heading">
-              <p class="chat-editor-directory" data-chat-editor-directory>{{msg .Locale "从左侧目录树选择文件后，可在这里编辑文本或预览图片。" "Choose a file from the tree to edit text or preview images here."}}</p>
+              <p class="chat-editor-directory" data-chat-editor-directory hidden></p>
               <strong data-chat-editor-path>{{msg .Locale "尚未打开文件" "No file open"}}</strong>
             </div>
             <div class="chat-editor-actions" data-chat-editor-markdown-controls hidden role="toolbar" aria-label="{{msg .Locale "Markdown 显示模式" "Markdown display mode"}}">
@@ -113,7 +112,7 @@
               </div>
             </div>
           </div>
-          <div class="chat-editor-status" data-chat-editor-status>{{msg .Locale "从左侧目录树选择文件后，可在这里编辑文本或预览图片。" "Choose a file from the tree to edit text or preview images here."}}</div>
+          <div class="chat-editor-status" data-chat-editor-status hidden></div>
           <div class="chat-editor-surface">
             <div class="chat-editor-preview" data-chat-editor-preview hidden>
               <div class="chat-editor-preview-toolbar" role="toolbar" aria-label="{{msg .Locale "图片预览背景" "Image preview background"}}">
@@ -130,7 +129,7 @@
             <div class="chat-editor-code" data-chat-editor-code>
               <div class="chat-editor-line-numbers" data-chat-editor-line-numbers aria-hidden="true">1</div>
               <pre class="chat-editor-highlight" aria-hidden="true"><code data-chat-editor-highlight></code></pre>
-              <textarea class="chat-editor-input" data-chat-editor-input spellcheck="false" disabled placeholder="{{msg .Locale "从左侧目录树选择文件后，这里会加载 Cloud Agent 工作区里的文本内容或图片预览。" "Pick a file from the tree to load Cloud Agent workspace text or an image preview here."}}"></textarea>
+              <textarea class="chat-editor-input" data-chat-editor-input spellcheck="false" disabled placeholder="{{msg .Locale "选择文件以编辑" "Select a file to edit"}}"></textarea>
             </div>
           </div>
         </div>
@@ -180,8 +179,7 @@
           {{else}}
           <p class="chat-empty-route">{{msg .Locale "先从输入框右下选择一个模型" "Choose a model from the composer first"}}</p>
           {{end}}
-          <h2>{{msg .Locale "今天想聊点什么？" "Hello! How can I help you today?"}}</h2>
-          <p>{{msg .Locale "页面布局改成了更接近 Gemini 的对话视图，但仍然沿用 AIYolo 当前的路由、代理和计费链路。" "This page now follows a Gemini-like conversation layout while still using AIYolo's existing routing, proxy, and billing flow."}}</p>
+          <h2>{{msg .Locale "开始对话" "Start a conversation"}}</h2>
         </div>
         {{end}}
         </div>
@@ -202,7 +200,7 @@
           <input id="chat-attachment-input" class="chat-hidden-input" type="file" multiple {{if not .ChatAttachmentUploadEnabled}}disabled{{end}}>
           <label class="chat-draft-field" for="chat-draft">
             <span class="chat-visually-hidden">{{msg .Locale "消息" "Message"}}</span>
-            <textarea id="chat-draft" name="chat_draft" rows="1" placeholder="{{msg .Locale "问一个和路由、代理、成本或模型行为有关的问题" "Ask about routing, proxies, cost, or model behavior"}}" {{if not .ChatRoutes}}disabled{{end}}>{{.ChatForm.Draft}}</textarea>
+            <textarea id="chat-draft" name="chat_draft" rows="1" placeholder="{{msg .Locale "输入消息" "Type a message"}}" {{if not .ChatRoutes}}disabled{{end}}>{{.ChatForm.Draft}}</textarea>
           </label>
           <div class="chat-draft-attachments" data-chat-draft-attachments {{if not .ChatForm.Attachments}}hidden{{end}}>
             {{range .ChatForm.Attachments}}
@@ -349,13 +347,13 @@
       </section>
     </div>
   </form>
-      <script src="https://cdn.jsdmirror.com/npm/lucide@1.16.0/dist/umd/lucide.min.js"></script>
-  <script src="https://unpkg.com/file-icons-js@1.1.0/dist/file-icons.js"></script>
-  <script src="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
-  <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
-  <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
-  <script src="/console/static/chat-shell.js?v=chat-shell-20260601a"></script>
-  <script src="/console/static/chat.js?v=chat-gemini-20260604a"></script>
-  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260602a"></script>
+  <script src="/console/static/vendor/lucide.min.js?v=vendor-20260606a"></script>
+  <script src="/console/static/vendor/file-icons.js?v=vendor-20260606a"></script>
+  <script src="/console/static/vendor/highlight.min.js?v=vendor-20260606a"></script>
+  <script src="/console/static/vendor/xterm.js?v=vendor-20260606a"></script>
+  <script src="/console/static/vendor/addon-fit.js?v=vendor-20260606a"></script>
+  <script src="/console/static/chat-shell.js?v=chat-shell-20260604a"></script>
+  <script src="/console/static/chat.js?v=chat-codex-reconnect-20260605d"></script>
+  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260604a"></script>
 </div>
 {{end}}

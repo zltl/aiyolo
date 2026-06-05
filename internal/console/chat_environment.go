@@ -376,8 +376,36 @@ func consoleChatCloudAgentReusable(account domain.CloudAgentAccount, workerID st
 	return true
 }
 
-func (handler *Handler) reusableConsoleChatCloudAgentEnvironment(ctx context.Context, userID string, chatSessionID string, workerID string, publicName string, account domain.CloudAgentAccount, now time.Time) (domain.CloudAgentAccount, domain.CloudAgentSession, bool, error) {
+func (handler *Handler) consoleChatCloudAgentNeedsASSUpgrade(ctx context.Context, assSHA256URL string, account domain.CloudAgentAccount) (bool, error) {
+	assSHA256URL = strings.TrimSpace(assSHA256URL)
+	if assSHA256URL == "" {
+		return false, nil
+	}
+	current, err := workerops.ResolveCloudAgentASSSHA256(ctx, assSHA256URL)
+	if err != nil {
+		return true, nil
+	}
+	stored := strings.ToLower(strings.TrimSpace(account.LastASSSHA256))
+	if stored == "" {
+		return true, nil
+	}
+	return stored != current, nil
+}
+
+func (handler *Handler) applyConsoleChatCloudAgentASSRelease(ctx context.Context, account domain.CloudAgentAccount, assSHA256URL string) error {
+	if sha, err := workerops.ResolveCloudAgentASSSHA256(ctx, assSHA256URL); err == nil {
+		account.LastASSSHA256 = sha
+	}
+	return handler.store.UpsertCloudAgentAccount(ctx, account)
+}
+
+func (handler *Handler) reusableConsoleChatCloudAgentEnvironment(ctx context.Context, assSHA256URL string, userID string, chatSessionID string, workerID string, publicName string, account domain.CloudAgentAccount, now time.Time) (domain.CloudAgentAccount, domain.CloudAgentSession, bool, error) {
 	if !consoleChatCloudAgentReusable(account, workerID, publicName, now) {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, nil
+	}
+	if needsUpgrade, err := handler.consoleChatCloudAgentNeedsASSUpgrade(ctx, assSHA256URL, account); err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, err
+	} else if needsUpgrade {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, nil
 	}
 	cloudSession, err := handler.store.GetCloudAgentSession(ctx, strings.TrimSpace(userID), consoleChatCloudAgentSessionID(chatSessionID))
@@ -456,7 +484,8 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	if err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
-	if account, cloudSession, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, userID, state.Form.ClientSessionID, workerID, state.Form.PublicName, account, now); err != nil {
+	assUpgradeNeeded, _ := handler.consoleChatCloudAgentNeedsASSUpgrade(ctx, assSHA256URL, account)
+	if account, cloudSession, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, userID, state.Form.ClientSessionID, workerID, state.Form.PublicName, account, now); err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	} else if ok {
 		return consoleChatEnvironmentEnsureResponse{
@@ -515,7 +544,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	account.LastError = ""
 	account.LastStartedAt = &now
 	account.LastSeenAt = &now
-	if err := handler.store.UpsertCloudAgentAccount(ctx, account); err != nil {
+	if err := handler.applyConsoleChatCloudAgentASSRelease(ctx, account, assSHA256URL); err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
 	if err := handler.store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
@@ -531,6 +560,10 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	}); err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
+	notice := handler.requestText(r, "Cloud Agent 已在 "+workerID+" 就绪", "Cloud agent is ready on "+workerID)
+	if assUpgradeNeeded {
+		notice = handler.requestText(r, "Cloud Agent 已更新 aiyolo-ass 并在 "+workerID+" 就绪", "Cloud agent upgraded aiyolo-ass and is ready on "+workerID)
+	}
 	return consoleChatEnvironmentEnsureResponse{
 		Status:        "ready",
 		SessionID:     state.Form.ClientSessionID,
@@ -538,7 +571,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 		WorkerID:      workerID,
 		ContainerName: account.ContainerName,
 		WorkspacePath: account.WorkspacePath,
-		Notice:        handler.requestText(r, "Cloud Agent 已在 "+workerID+" 就绪", "Cloud agent is ready on "+workerID),
+		Notice:        notice,
 	}, nil
 }
 

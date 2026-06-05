@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -254,7 +255,7 @@ func TestResolveCloudAgentASSSHA256(t *testing.T) {
 	}))
 	defer server.Close()
 
-	checksum, err := resolveCloudAgentASSSHA256(context.Background(), server.URL+"/linux-amd64/aiyolo-ass.sha256")
+	checksum, err := ResolveCloudAgentASSSHA256(context.Background(), server.URL+"/linux-amd64/aiyolo-ass.sha256")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,6 +275,30 @@ func TestDecodeCloudAgentASSResponseReportsMissingEndpoint(t *testing.T) {
 	}
 	if strings.Contains(message, "parse aiyolo-ass response") {
 		t.Fatalf("missing endpoint should not be reported as a JSON parse failure: %v", err)
+	}
+}
+
+func TestCloudAgentASSJobNotFound(t *testing.T) {
+	if !CloudAgentASSJobNotFound(fmt.Errorf("aiyolo-ass job_not_found: job was not found")) {
+		t.Fatal("expected job_not_found error to be detected")
+	}
+	if CloudAgentASSJobNotFound(fmt.Errorf("connect aiyolo-ass: connection refused")) {
+		t.Fatal("connection errors should not be treated as job_not_found")
+	}
+}
+
+func TestCloudAgentASSJobResumable(t *testing.T) {
+	if !CloudAgentASSJobResumable(CloudAgentASSJobInfo{Active: true}, nil) {
+		t.Fatal("active job should be resumable")
+	}
+	if !CloudAgentASSJobResumable(CloudAgentASSJobInfo{Done: true}, nil) {
+		t.Fatal("finished job should be resumable")
+	}
+	if CloudAgentASSJobResumable(CloudAgentASSJobInfo{}, fmt.Errorf("aiyolo-ass job_not_found: job was not found")) {
+		t.Fatal("missing job should not be resumable")
+	}
+	if CloudAgentASSJobResumable(CloudAgentASSJobInfo{}, nil) {
+		t.Fatal("empty job info should not be resumable")
 	}
 }
 
@@ -426,8 +451,16 @@ func TestBuildCloudAgentCodexRemoteScriptIncludesResumeAndFlags(t *testing.T) {
 	if !strings.Contains(script, `cmd+=(-m "$model")`) {
 		t.Fatalf("script should forward the selected model: %s", script)
 	}
-	if !strings.Contains(script, `cmd+=(-c "openai_base_url=${OPENAI_BASE_URL}")`) {
-		t.Fatalf("script should configure the OpenAI-compatible gateway base URL: %s", script)
+	for _, expected := range []string{
+		`cmd+=(-c 'model_provider="aiyolo"')`,
+		`cmd+=(-c "model_providers.aiyolo.base_url=${OPENAI_BASE_URL}")`,
+		`cmd+=(-c 'model_providers.aiyolo.supports_websockets=false')`,
+		`cmd+=(-c 'hide_agent_reasoning=false')`,
+		`cmd+=(-c 'model_reasoning_summary="detailed"')`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("script should configure the AIYolo gateway for HTTP responses %s: %s", expected, script)
+		}
 	}
 	if strings.Contains(script, `--append-system-prompt`) || strings.Contains(script, `system_prompt=`) {
 		t.Fatalf("script should not inject a system prompt into codex: %s", script)
@@ -498,8 +531,11 @@ func TestBuildCloudAgentRemoteCommandSerializesContainerEnsure(t *testing.T) {
 	if !strings.Contains(script, `def acquire_container_lock():`) || !strings.Contains(script, `fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)`) {
 		t.Fatalf("remote script should serialize same-container ensure operations with an exclusive lock: %s", script)
 	}
-	if strings.Contains(script, `"rm", "-f"`) || strings.Contains(script, `remove_container()`) {
-		t.Fatalf("remote script should not automatically remove an existing cloud-agent container: %s", script)
+	if strings.Contains(script, `"rm", "-f"`) {
+		t.Fatalf("remote script should not force-remove an existing cloud-agent container: %s", script)
+	}
+	if strings.Contains(script, `remove_container()`) && !strings.Contains(script, `replace_container_for_ass_upgrade()`) {
+		t.Fatalf("remote script should only remove containers during an aiyolo-ass upgrade: %s", script)
 	}
 	if !strings.Contains(script, `stop and remove it manually before starting a replacement`) {
 		t.Fatalf("remote script should ask for manual stop/rm on container identity mismatch: %s", script)
@@ -518,7 +554,7 @@ func TestBuildCloudAgentRemoteCommandWaitsForReusedContainerRuntime(t *testing.T
 	if !strings.Contains(script, `if not container_matches(inspected):`) {
 		t.Fatalf("remote script should validate existing container identity before reuse: %s", script)
 	}
-	if !regexp.MustCompile(`if not inspected.get\("State", \{\}\).get\("Running"\):\n            run\(\["docker", "start", payload\["container_name"\]\]\)\n        wait_for_container_runtime\(\)\n        return container_summary\(inspect_container\(\)\)`).MatchString(script) {
+	if !regexp.MustCompile(`if not container_ass_sha256_matches\(inspected\):\n            replace_container_for_ass_upgrade\(\)\n            ensure_image\(\)\n        else:\n            if not inspected.get\("State", \{\}\).get\("Running"\):\n                run\(\["docker", "start", payload\["container_name"\]\]\)\n            wait_for_container_runtime\(\)\n            return container_summary\(inspect_container\(\)\)`).MatchString(script) {
 		t.Fatalf("reused containers should be started if stopped and wait for runtime readiness before returning: %s", script)
 	}
 	if !strings.Contains(script, `wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "test -S ${AIYOLO_ASS_SOCKET_PATH:-/run/aiyolo/ass.sock}"], 30)`) {
@@ -540,12 +576,14 @@ func TestBuildCloudAgentRemoteCommandIgnoresRuntimeEnvDrift(t *testing.T) {
 	}
 	for _, unexpected := range []string{
 		`labels.get("aiyolo.cloud_agent.build_revision") !=`,
-		`labels.get("aiyolo.ass.sha256") !=`,
 		`inspected.get("Config", {}).get("Image") != payload["image"]`,
 	} {
 		if strings.Contains(script, unexpected) {
 			t.Fatalf("remote script should not replace an existing container for runtime drift %s: %s", unexpected, script)
 		}
+	}
+	if !strings.Contains(script, `def container_ass_sha256_matches(inspected):`) || !strings.Contains(script, `replace_container_for_ass_upgrade()`) {
+		t.Fatalf("remote script should upgrade containers when aiyolo-ass checksum drifts: %s", script)
 	}
 }
 
@@ -569,9 +607,9 @@ func TestBuildCloudAgentRemoteCommandDownloadsPublishedASSBinary(t *testing.T) {
 func TestBuildCloudAgentRemoteCommandReusesExistingImage(t *testing.T) {
 	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user","image":"aiyolo/local-cloud-agent:ubuntu-26.04-v4"}`)
 
-	if !strings.Contains(script, `inspect_image()
+	if !strings.Contains(script, `def image_ass_sha256_matches():`) || !strings.Contains(script, `if image_ass_sha256_matches():
         return`) {
-		t.Fatalf("remote script should reuse an existing image without rebuilding on label drift: %s", script)
+		t.Fatalf("remote script should reuse an existing image when aiyolo-ass checksum matches: %s", script)
 	}
 	if strings.Contains(script, `image_matches(inspected)`) {
 		t.Fatalf("remote script should not rebuild an existing image only because labels differ: %s", script)

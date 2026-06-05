@@ -12,7 +12,6 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 18V9"></path><path d="M12 18V5"></path><path d="M19 18v-7"></path></svg>
         </span>
       </div>
-      <p class="stat-copy">{{msg .Locale "进入兼容 API 的总调用量。" "Total requests that reached the compatible APIs."}}</p>
       <div class="sparkline" aria-hidden="true">
         <svg viewBox="0 0 120 40" preserveAspectRatio="none">
           <path class="sparkline-area" d="{{usageArea .ChartUsage "requests" 12}}"></path>
@@ -34,7 +33,6 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5"></path><path d="M12 17h.01"></path><path d="M10.3 3.8 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0z"></path></svg>
         </span>
       </div>
-      <p class="stat-copy">{{msg .Locale "预算拦截、上游失败与非 2xx。" "Budget blocks, upstream failures, and non-2xx responses."}}</p>
       <div class="sparkline" aria-hidden="true">
         <svg viewBox="0 0 120 40" preserveAspectRatio="none">
           <path class="sparkline-area" d="{{usageArea .ChartUsage "errors" 12}}"></path>
@@ -56,7 +54,6 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16c2-2 4-4 7-4s4 4 7 4 4-3 6-6"></path><path d="M20 10h3v3"></path></svg>
         </span>
       </div>
-      <p class="stat-copy">{{msg .Locale "从用量账本聚合的近 24 小时费用。" "Spend aggregated from the usage ledger over the last 24 hours."}}</p>
       <div class="sparkline" aria-hidden="true">
         <svg viewBox="0 0 120 40" preserveAspectRatio="none">
           <path class="sparkline-area" d="{{usageArea .ChartUsage "spend" 12}}"></path>
@@ -105,10 +102,9 @@
   <section class="panel panel-wide">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "费用热点" "Cost hotspots"}}</p>
         <h2>{{msg .Locale "模型费用" "Model spend"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .Data.ModelCosts}} {{msg .Locale "个模型" "models"}}</span>
+      <span class="badge tone-neutral">{{len .Data.ModelCosts}}</span>
     </div>
     {{if .Data.ModelCosts}}
     <div class="table-shell">
@@ -136,20 +132,17 @@
       </table>
     </div>
     {{else}}
-    <div class="empty-state empty-state-rich">
-      <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
-      <h3>{{msg .Locale "未发现异常成本" "No unusual spend yet"}}</h3>
-      <p>{{msg .Locale "一旦兼容 API 开始流转，这里会显示各模型的请求量和成本热点。" "Once traffic starts flowing, each model's request volume and cost hotspot will appear here."}}</p>
+    <div class="empty-state">
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
-  </article>
+  </section>
   <section class="panel">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "最近流量" "Recent traffic"}}</p>
         <h2>{{msg .Locale "最近请求" "Recent requests"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .Data.RecentUsage}} {{msg .Locale "条请求" "requests"}}</span>
+      <span class="badge tone-neutral">{{len .Data.RecentUsage}}</span>
     </div>
     {{if .Data.RecentUsage}}
     <div class="activity-stack">
@@ -165,10 +158,8 @@
       {{end}}
     </div>
     {{else}}
-    <div class="empty-state empty-state-rich">
-      <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
-      <h3>{{msg .Locale "最近还没有请求" "No recent requests yet"}}</h3>
-      <p>{{msg .Locale "接入 OpenAI-compatible 或 Anthropic-compatible 调用后，这里会出现最近的流量轨迹。" "After routing OpenAI-compatible or Anthropic-compatible traffic, the latest request trace will appear here."}}</p>
+    <div class="empty-state">
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
   </section>

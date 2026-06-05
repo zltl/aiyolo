@@ -17,8 +17,7 @@
     <section class="panel">
       <div class="section-head">
         <div>
-          <p class="section-kicker">{{msg .Locale "SSH 引导材料" "SSH bootstrap material"}}</p>
-          <h2>{{msg .Locale "登记 Worker SSH 密钥" "Register worker SSH keys"}}</h2>
+          <h2>{{msg .Locale "SSH 密钥" "SSH keys"}}</h2>
         </div>
       </div>
       <form method="post" action="/console/workers/ssh-keys" class="form-grid" hx-post="/console/workers/ssh-keys" hx-target="#workers-content" hx-swap="outerHTML" hx-disabled-elt="find button">
@@ -37,7 +36,6 @@
         <label class="field span-2">
           <span class="field-label">{{msg .Locale "私钥" "Private key"}}</span>
           <textarea name="private_key" rows="6" placeholder="-----BEGIN PRIVATE KEY-----">{{.WorkerSSHKeyForm.PrivateKey}}</textarea>
-          <span class="field-help">{{msg .Locale "只需提供私钥；服务端会自动推导公钥与指纹。" "Provide only the private key; the server derives the public key and fingerprint automatically."}}</span>
         </label>
         <label class="field span-2">
           <span class="field-label">{{msg .Locale "私钥口令" "Private key passphrase"}}</span>
@@ -54,8 +52,7 @@
     <aside class="panel">
       <div class="section-head">
         <div>
-          <p class="section-kicker">{{msg .Locale "Worker 目录" "Worker catalog"}}</p>
-          <h2>{{if .WorkerServerForm.Editing}}{{msg .Locale "编辑 Worker 主机" "Edit worker host"}}{{else}}{{msg .Locale "登记 Worker 主机" "Register worker hosts"}}{{end}}</h2>
+          <h2>{{if .WorkerServerForm.Editing}}{{msg .Locale "编辑 Worker" "Edit worker"}}{{else}}{{msg .Locale "新建 Worker" "New worker"}}{{end}}</h2>
         </div>
       </div>
       <form method="post" action="/console/workers" class="form-grid" hx-post="/console/workers" hx-target="#workers-content" hx-swap="outerHTML" hx-disabled-elt="find button">
@@ -106,17 +103,14 @@
         <label class="field span-2">
           <span class="field-label">{{msg .Locale "标签" "Labels"}}</span>
           <input name="labels" value="{{.WorkerServerForm.LabelsText}}" placeholder="gpu,asia,tokyo">
-          <span class="field-help">{{msg .Locale "逗号分隔，用于后续筛选和调度。" "Comma-separated labels for future filtering and scheduling."}}</span>
         </label>
         <label class="field span-2">
           <span class="field-label">{{msg .Locale "数据根目录" "Data root"}}</span>
           <input name="data_root" value="{{.WorkerServerForm.DataRoot}}" placeholder="/var/lib/aiyolo-agent">
-          <span class="field-help">{{msg .Locale "如果不显式挂载数据盘，就使用系统盘上的这个目录。" "Use this system-disk path when no extra data disks are mounted."}}</span>
         </label>
         <label class="field span-2">
           <span class="field-label">{{msg .Locale "数据盘" "Data disks"}}</span>
           <textarea name="data_disks" rows="4" placeholder="/dev/vdb /srv/aiyolo&#10;/dev/vdc /mnt/build-cache">{{.WorkerServerForm.DataDisksText}}</textarea>
-          <span class="field-help">{{msg .Locale "每行一块盘：`设备 挂载点`。初始化时会为未格式化磁盘创建 ext4、写入持久挂载并完成挂载。" "One disk per line in the form `device mount-path`. Initialization formats blank disks as ext4, writes a persistent mount, and mounts them."}}</span>
         </label>
         <div class="field span-2">
           <div class="chip-row">
@@ -132,10 +126,9 @@
   <section class="panel">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "凭证库存" "Credential inventory"}}</p>
-        <h2>{{msg .Locale "已保存 SSH 密钥" "Saved SSH keys"}}</h2>
+        <h2>{{msg .Locale "SSH 密钥" "SSH keys"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .SSHKeys}} {{msg .Locale "把" "keys"}}</span>
+      <span class="badge tone-neutral">{{len .SSHKeys}}</span>
     </div>
     {{if .SSHKeys}}
     <div class="collection-grid">
@@ -155,8 +148,7 @@
     </div>
     {{else}}
     <div class="empty-state">
-      <h3>{{msg .Locale "还没有 SSH 密钥" "No SSH keys yet"}}</h3>
-      <p>{{msg .Locale "先把 Worker 登录用的 SSH 密钥登记进控制台，后续 probe 和初始化才能复用。" "Register the SSH key used for worker login first so later probe and bootstrap flows can reuse it."}}</p>
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
   </section>
@@ -164,10 +156,9 @@
   <section class="panel">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "Worker 机群" "Worker fleet"}}</p>
-        <h2>{{msg .Locale "已登记主机" "Registered workers"}}</h2>
+        <h2>{{msg .Locale "Worker" "Workers"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .Workers}} {{msg .Locale "台" "workers"}}</span>
+      <span class="badge tone-neutral">{{len .Workers}}</span>
     </div>
     {{if .Workers}}
     <div class="collection-grid">
@@ -205,8 +196,6 @@
           </article>
           {{end}}
         </div>
-        {{else}}
-        <p class="panel-copy">{{msg $.Locale "未登记额外数据盘，默认使用系统盘 data root。" "No extra data disks recorded; the system-disk data root will be used by default."}}</p>
         {{end}}
         {{if .LatestJob}}
         <details>
@@ -232,8 +221,7 @@
     </div>
     {{else}}
     <div class="empty-state">
-      <h3>{{msg .Locale "还没有 Worker 主机" "No workers yet"}}</h3>
-      <p>{{msg .Locale "先登记一台 Ubuntu Worker，然后用 Probe 验证 SSH、磁盘、Docker 与代理路径，再生成初始化作业。" "Register an Ubuntu worker first, then use Probe to validate SSH, disks, Docker, and the selected proxy before generating an initialization job."}}</p>
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
   </section>

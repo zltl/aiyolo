@@ -391,7 +391,7 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 	account.LastError = ""
 	account.LastStartedAt = &now
 	account.LastSeenAt = &now
-	if err := handler.store.UpsertCloudAgentAccount(ctx, account); err != nil {
+	if err := handler.applyConsoleChatCloudAgentASSRelease(ctx, account, assSHA256URL); err != nil {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
 	cloudSession.WorkerID = worker.ID

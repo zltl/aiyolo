@@ -40,7 +40,7 @@
       convertEol: true,
       cursorBlink: true,
       drawBoldTextInBrightColors: true,
-      fontFamily: '"IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace',
+      fontFamily: '"IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", "PingFang SC", "Microsoft YaHei", "Noto Sans Mono CJK SC", monospace',
       fontSize: 14,
       lineHeight: 1.35,
       minimumContrastRatio: 4.5,
@@ -88,18 +88,43 @@
     let resizeObserver = null;
     let windowResizeHandler = null;
     let pendingInputs = [];
+    let pendingLayoutFrame = 0;
+    let pendingLayoutTimeout = 0;
+
+    const cancelPendingLayout = () => {
+      if (pendingLayoutFrame) {
+        window.cancelAnimationFrame(pendingLayoutFrame);
+        pendingLayoutFrame = 0;
+      }
+      if (pendingLayoutTimeout) {
+        window.clearTimeout(pendingLayoutTimeout);
+        pendingLayoutTimeout = 0;
+      }
+    };
+
+    const terminalHostReady = () => terminalHost.clientWidth > 0 && terminalHost.clientHeight > 0;
 
     const fitTerminal = () => {
-      if (disposed) {
-        return;
+      if (disposed || !terminalHostReady()) {
+        return false;
       }
       if (fitAddon) {
-        fitAddon.fit();
-        return;
+        try {
+          fitAddon.fit();
+        } catch (_error) {
+          const cols = Math.max(80, Math.floor(terminalHost.clientWidth / 9));
+          const rows = Math.max(16, Math.floor(terminalHost.clientHeight / 21));
+          term.resize(cols, rows);
+        }
+      } else {
+        const cols = Math.max(80, Math.floor(terminalHost.clientWidth / 9));
+        const rows = Math.max(16, Math.floor(terminalHost.clientHeight / 21));
+        term.resize(cols, rows);
       }
-      const cols = Math.max(80, Math.floor(terminalHost.clientWidth / 9));
-      const rows = Math.max(16, Math.floor(terminalHost.clientHeight / 21));
-      term.resize(cols, rows);
+      if (typeof term.refresh === "function") {
+        term.refresh(0, Math.max(0, term.rows - 1));
+      }
+      return true;
     };
 
     const send = (payload) => {
@@ -111,6 +136,50 @@
 
     const sendResize = () => {
       send({ type: "resize", cols: term.cols || 120, rows: term.rows || 32 });
+    };
+
+    const applyTerminalLayout = () => {
+      if (disposed) {
+        return false;
+      }
+      if (!fitTerminal()) {
+        return false;
+      }
+      sendResize();
+      return true;
+    };
+
+    const scheduleTerminalLayout = (options = {}) => {
+      if (disposed) {
+        return;
+      }
+      cancelPendingLayout();
+      const maxAttempts = Number.isFinite(options.maxAttempts) ? Math.max(1, options.maxAttempts) : 6;
+      let attempts = 0;
+      const run = () => {
+        if (disposed) {
+          return;
+        }
+        attempts += 1;
+        if (applyTerminalLayout()) {
+          if (typeof options.onComplete === "function") {
+            options.onComplete();
+          }
+          if (options.focus !== false) {
+            term.focus();
+          }
+          cancelPendingLayout();
+          return;
+        }
+        if (attempts >= maxAttempts) {
+          return;
+        }
+        pendingLayoutFrame = window.requestAnimationFrame(run);
+      };
+      pendingLayoutFrame = window.requestAnimationFrame(() => {
+        pendingLayoutFrame = window.requestAnimationFrame(run);
+      });
+      pendingLayoutTimeout = window.setTimeout(run, 48);
     };
 
     const sendInput = (data) => {
@@ -168,7 +237,7 @@
       if (connectOptions.resetTerminal !== false) {
         term.reset();
       }
-      fitTerminal();
+      scheduleTerminalLayout({ focus: false });
       setStatus(
         connectOptions.retryCount > 0
           ? t("正在重新连接 shell…", "Reconnecting shell…")
@@ -180,9 +249,12 @@
         if (disposed || socket !== nextSocket) {
           return;
         }
-        sendResize();
-        pendingInputs.splice(0).forEach((data) => send({ type: "input", data }));
-        term.focus();
+        scheduleTerminalLayout({
+          focus: true,
+          onComplete: () => {
+            pendingInputs.splice(0).forEach((data) => send({ type: "input", data }));
+          },
+        });
       });
       nextSocket.addEventListener("message", (event) => {
         if (disposed || socket !== nextSocket) {
@@ -293,14 +365,14 @@
     };
 
     const refresh = () => {
-      fitTerminal();
-      sendResize();
+      scheduleTerminalLayout({ focus: true });
     };
 
     const dispose = (disposeOptions = {}) => {
       if (disposed) {
         return;
       }
+      cancelPendingLayout();
       disposed = true;
       manualClose = true;
       if (resizeObserver) {
@@ -331,12 +403,12 @@
 
     if (typeof ResizeObserver === "function") {
       resizeObserver = new ResizeObserver(() => {
-        refresh();
+        scheduleTerminalLayout({ focus: false });
       });
       resizeObserver.observe(terminalHost);
     }
     windowResizeHandler = () => {
-      refresh();
+      scheduleTerminalLayout({ focus: false });
     };
     window.addEventListener("resize", windowResizeHandler);
 
@@ -344,7 +416,7 @@
       send({ type: "input", data });
     });
 
-    fitTerminal();
+    scheduleTerminalLayout({ focus: false });
     if (options.autoConnect !== false) {
       connect({ resetTerminal: true });
     }

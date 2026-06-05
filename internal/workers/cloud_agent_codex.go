@@ -11,6 +11,7 @@ import (
 )
 
 type CloudAgentCodexOptions struct {
+	JobID            string
 	ThreadID         string
 	Prompt           string
 	InitialPrompt    string
@@ -81,6 +82,12 @@ func RunCloudAgentCodex(ctx context.Context, worker domain.WorkerServer, key dom
 	}
 	options.Model = strings.TrimSpace(options.Model)
 
+	if strings.TrimSpace(options.JobID) != "" {
+		if jobOutput, jobErr := runCloudAgentCodexASSJob(ctx, worker, key, account, cloudSession, workingDirectory, target.account.Credential, options, onOutput); jobErr == nil || !cloudAgentASSJobUnavailable(jobErr) {
+			return jobOutput, jobErr
+		}
+	}
+
 	client, err := dialSSH(target.worker, target.key)
 	if err != nil {
 		return "", err
@@ -124,6 +131,59 @@ func RunCloudAgentCodex(ctx context.Context, worker domain.WorkerServer, key dom
 	}
 	return stdoutWriter.String(), nil
 }
+
+func runCloudAgentCodexASSJob(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, workingDirectory, apiKey string, options CloudAgentCodexOptions, onOutput func([]byte) error) (string, error) {
+	jobID := normalizeJobID(options.JobID)
+	if jobID == "" {
+		return "", fmt.Errorf("aiyolo-ass endpoint not available: job id is required")
+	}
+	script := buildCloudAgentCodexASSScript(options)
+	argv := []string{"/bin/bash", "-lc", script}
+	env := buildCloudAgentCodexASSJobEnv(apiKey)
+	if _, err := StartCloudAgentASSJob(ctx, worker, key, account, cloudSession, jobID, "codex", workingDirectory, argv, env, ""); err != nil {
+		return "", err
+	}
+	output := strings.Builder{}
+	streamErr := StreamCloudAgentASSJobLive(ctx, worker, key, account, cloudSession, jobID, func(event CloudAgentASSJobStreamEvent) error {
+		switch event.Type {
+		case "sync", "delta":
+			delta := event.Delta
+			if delta == "" {
+				return nil
+			}
+			output.WriteString(delta)
+			if onOutput != nil {
+				return onOutput([]byte(delta))
+			}
+		case "error":
+			if detail := strings.TrimSpace(event.Error); detail != "" {
+				return fmt.Errorf("%s", detail)
+			}
+		}
+		return nil
+	})
+	if streamErr != nil {
+		if text := strings.TrimSpace(output.String()); text != "" {
+			return text, streamErr
+		}
+		return "", streamErr
+	}
+	return output.String(), nil
+}
+
+const cloudAgentCodexExecConfigScript = `
+if [[ -n "${OPENAI_BASE_URL:-}" ]]; then
+  cmd+=(-c 'model_provider="aiyolo"')
+  cmd+=(-c "model_providers.aiyolo.base_url=${OPENAI_BASE_URL}")
+  cmd+=(-c 'model_providers.aiyolo.name="AIYolo Gateway"')
+  cmd+=(-c 'model_providers.aiyolo.env_key="OPENAI_API_KEY"')
+  cmd+=(-c 'model_providers.aiyolo.wire_api="responses"')
+  cmd+=(-c 'model_providers.aiyolo.supports_websockets=false')
+fi
+cmd+=(-c 'hide_agent_reasoning=false')
+cmd+=(-c 'model_reasoning_summary="detailed"')
+cmd+=(-c 'show_raw_agent_reasoning=true')
+`
 
 func normalizeCloudAgentWorkingDirectory(value string) string {
 	trimmed := strings.TrimSpace(value)
@@ -181,9 +241,7 @@ model=%s
 mkdir -p "${CODEX_HOME:-$HOME/.codex}"
 prompt_to_send="$initial_prompt"
 cmd=(codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox)
-if [[ -n "${OPENAI_BASE_URL:-}" ]]; then
-  cmd+=(-c "openai_base_url=${OPENAI_BASE_URL}")
-fi
+%s
 if [[ -n "$model" ]]; then
   cmd+=(-m "$model")
 fi
@@ -195,5 +253,5 @@ else
 fi
 "${cmd[@]}"
 CONTAINER_CODEX
-`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(strings.TrimSpace(apiKey)), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentCodexHome), shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model))
+`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(strings.TrimSpace(apiKey)), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentCodexHome), shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model), cloudAgentCodexExecConfigScript)
 }

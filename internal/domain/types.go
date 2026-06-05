@@ -546,6 +546,7 @@ type CloudAgentAccount struct {
 	Credential      string
 	Status          string
 	LastError       string
+	LastASSSHA256   string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	LastStartedAt   *time.Time
@@ -771,6 +772,7 @@ func NormalizeCloudAgentAccount(account CloudAgentAccount) (CloudAgentAccount, e
 	account.Credential = strings.TrimSpace(account.Credential)
 	account.Status = strings.TrimSpace(account.Status)
 	account.LastError = strings.TrimSpace(account.LastError)
+	account.LastASSSHA256 = strings.ToLower(strings.TrimSpace(account.LastASSSHA256))
 	if account.ID == "" {
 		return CloudAgentAccount{}, fmt.Errorf("cloud agent account id is required")
 	}

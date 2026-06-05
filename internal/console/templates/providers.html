@@ -13,25 +13,21 @@
     <section class="panel">
       <div class="section-head">
         <div>
-          <p class="section-kicker">{{msg .Locale "渠道配置" "Channel config"}}</p>
-          <h2>{{if .ProviderForm.Editing}}{{msg .Locale "编辑上游提供方" "Edit upstream provider"}}{{else}}{{msg .Locale "接入新的上游提供方" "Connect a new upstream provider"}}{{end}}</h2>
+          <h2>{{if .ProviderForm.Editing}}{{msg .Locale "编辑提供方" "Edit provider"}}{{else}}{{msg .Locale "新建提供方" "New provider"}}{{end}}</h2>
         </div>
       </div>
       <form method="post" action="/console/providers" class="form-grid" hx-post="/console/providers" hx-target="#providers-content" hx-swap="outerHTML" hx-disabled-elt="find button">
         <label class="field">
           <span class="field-label">提供方编号</span>
           <input name="id" value="{{.ProviderForm.ID}}" {{if .ProviderForm.Editing}}readonly{{end}}>
-          <span class="field-help">{{msg .Locale "稳定编号，会被模型路由和用量记录直接引用。" "Stable identifier used directly by model routes and usage records."}}</span>
         </label>
         <label class="field">
           <span class="field-label">{{msg .Locale "显示名称" "Display name"}}</span>
           <input name="name" value="{{.ProviderForm.Name}}">
-          <span class="field-help">{{msg .Locale "后台中显示给管理员看的名称。" "Human-readable name shown to administrators in the console."}}</span>
         </label>
         <label class="field span-2">
           <span class="field-label">基础地址</span>
           <input name="base_url" type="url" value="{{.ProviderForm.BaseURL}}">
-          <span class="field-help">{{msg .Locale "填写上游兼容 API 的基础地址；需要 /v1 时请带上。" "Enter the upstream compatible API base URL, including /v1 when required."}}</span>
         </label>
         <label class="field">
           <span class="field-label">{{msg .Locale "协议" "Protocol"}}</span>
@@ -46,7 +42,6 @@
             <option value="" {{if eq .ProviderForm.DefaultProxyID ""}}selected{{end}}>{{msg .Locale "直连" "direct"}}</option>
             {{range .Proxies}}<option value="{{.ID}}" {{if eq $.ProviderForm.DefaultProxyID .ID}}selected{{end}}>{{.Name}} · {{.ID}}</option>{{end}}
           </select>
-          <span class="field-help">{{msg .Locale "不选时保持直连，选中后会作为该提供方的默认网络出口。" "Leave empty for direct traffic, or select a profile to make it the provider default egress."}}</span>
         </label>
         <div class="field span-2">
           <span class="field-label">{{msg .Locale "支持协议" "Supported protocols"}}</span>
@@ -55,23 +50,20 @@
               <input type="checkbox" name="supported_protocols" value="openai" {{if supportsProtocol .ProviderForm.SupportedProtocols "openai"}}checked{{end}}>
               <span>
                 <strong>OpenAI</strong>
-                <span class="field-help">{{msg .Locale "开放 /v1/chat/completions 等 OpenAI 兼容端点。" "Expose OpenAI-compatible endpoints such as /v1/chat/completions."}}</span>
               </span>
             </label>
             <label class="toggle-row">
               <input type="checkbox" name="supported_protocols" value="anthropic" {{if supportsProtocol .ProviderForm.SupportedProtocols "anthropic"}}checked{{end}}>
               <span>
                 <strong>Anthropic</strong>
-                <span class="field-help">{{msg .Locale "开放 /v1/messages 等 Anthropic 兼容端点。" "Expose Anthropic-compatible endpoints such as /v1/messages."}}</span>
               </span>
             </label>
           </div>
-          <span class="field-help">{{msg .Locale "主协议会自动加入支持列表；其余协议可以按上游兼容能力额外勾选。" "The primary protocol is always included automatically; enable extra protocols only when the upstream really supports them."}}</span>
         </div>
         <label class="field span-2">
           <span class="field-label">{{msg .Locale "上游主密钥" "Upstream master key"}}</span>
           <input name="master_key" type="password" autocomplete="new-password">
-          <span class="field-help">{{if and .ProviderForm.Editing .ProviderForm.HasSavedMasterKey}}{{msg .Locale "留空会保留已保存主密钥；填写新值会覆盖它。" "Leave blank to keep the saved master key, or enter a new value to replace it."}}{{else}}{{msg .Locale "系统级密钥只保存在服务端，不会暴露给终端用户。" "System-level credentials stay on the server and are never exposed to client users."}}{{end}}</span>
+          {{if and .ProviderForm.Editing .ProviderForm.HasSavedMasterKey}}<span class="field-help">{{msg .Locale "留空保留已保存密钥" "Leave blank to keep saved key"}}</span>{{end}}
         </label>
         <label class="field">
           <span class="field-label">{{msg .Locale "超时秒数" "Timeout seconds"}}</span>
@@ -80,7 +72,6 @@
         <label class="field">
           <span class="field-label">{{msg .Locale "流空闲超时秒数" "Stream idle timeout"}}</span>
           <input name="stream_idle_timeout_seconds" type="number" min="1" value="{{.ProviderForm.StreamIdleTimeoutSeconds}}">
-          <span class="field-help">{{msg .Locale "仅用于流式请求；只要持续有 token 或心跳写出，就不会因为总时长被截断。这个值只约束上游静默太久的连接。" "Used only for streaming requests. As long as tokens or heartbeats keep flowing, the stream stays open; this value only cuts off upstream connections that stay silent for too long."}}</span>
         </label>
         <label class="field">
           <span class="field-label">优先级</span>
@@ -110,16 +101,13 @@
       <section class="panel panel-highlight">
         <div class="section-head">
           <div>
-            <p class="section-kicker">快速接入</p>
-            <h2>{{msg .Locale "一键接入 OpenRouter" "One-click OpenRouter sync"}}</h2>
+            <h2>OpenRouter</h2>
           </div>
         </div>
         <form method="post" action="/console/providers/openrouter" class="form-grid" hx-post="/console/providers/openrouter" hx-target="#providers-content" hx-swap="outerHTML" hx-disabled-elt="find button">
-          <p class="panel-copy span-2">{{msg .Locale "填入" "Paste your"}} <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">OpenRouter</a> API 密钥，{{msg .Locale "自动为您导入所有可用模型。" "then import every available model automatically."}}</p>
           <label class="field span-2">
             <span class="field-label">API 密钥</span>
             <input type="password" name="master_key" autocomplete="new-password" required>
-            <span class="field-help">{{msg .Locale "保存后会创建 openrouter 提供方，并同步当前账号可见的模型列表。" "Saving will create the openrouter provider and sync the models visible to this account."}}</span>
           </label>
           <div class="field span-2">
             <button class="primary-button button-stretch" type="submit">{{msg .Locale "同步所有模型" "Sync all models"}}</button>
@@ -130,16 +118,13 @@
       <section class="panel panel-secondary">
         <div class="section-head">
           <div>
-            <p class="section-kicker">快速接入</p>
-            <h2>{{msg .Locale "一键接入 DeepSeek" "One-click DeepSeek sync"}}</h2>
+            <h2>DeepSeek</h2>
           </div>
         </div>
         <form method="post" action="/console/providers/deepseek" class="form-grid" hx-post="/console/providers/deepseek" hx-target="#providers-content" hx-swap="outerHTML" hx-disabled-elt="find button">
-          <p class="panel-copy span-2">{{msg .Locale "填入" "Paste your"}} <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener noreferrer">DeepSeek</a> API 密钥，{{msg .Locale "自动创建双协议提供方，并导入当前账号可见的全部模型。" "then create a dual-protocol provider and import every model visible to this account."}}</p>
           <label class="field span-2">
             <span class="field-label">API 密钥</span>
             <input type="password" name="master_key" autocomplete="new-password" required>
-            <span class="field-help">{{msg .Locale "该提供方会默认使用 OpenAI 基础地址，同时开放 OpenAI / Anthropic 两种兼容协议；Anthropic 请求会直连 DeepSeek 官方 /anthropic 入口。" "The provider uses the OpenAI base URL by default while enabling both OpenAI and Anthropic compatibility; Anthropic requests go straight to DeepSeek's official /anthropic endpoint."}}</span>
           </label>
           <div class="field span-2">
             <button class="primary-button button-stretch" type="submit">{{msg .Locale "同步所有模型" "Sync all models"}}</button>
@@ -147,28 +132,15 @@
         </form>
       </section>
 
-      <section class="panel">
-        <div class="section-head">
-          <div>
-            <p class="section-kicker">{{msg .Locale "架构说明" "Design note"}}</p>
-            <h2>{{msg .Locale "架构提示" "Architecture notes"}}</h2>
-          </div>
-        </div>
-        <ul class="note-list">
-          <li>{{msg .Locale "一个提供方可以挂多条渠道，用优先级与权重承载灰度和容灾。" "One provider can expose multiple channels, using priority and weight for gradual rollout and failover."}}</li>
-          <li>{{msg .Locale "终端用户发出的请求通过 API 密钥映射内部身份，真正的上游系统令牌留在网关端。" "Client requests map to internal identities via API keys while real upstream tokens stay on the gateway."}}</li>
-        </ul>
-      </section>
     </aside>
   </section>
 
   <section class="panel">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "已配置渠道" "Configured channels"}}</p>
-        <h2>{{msg .Locale "已配置提供方" "Configured providers"}}</h2>
+        <h2>{{msg .Locale "已配置" "Configured"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .Providers}} {{msg .Locale "条" "channels"}}</span>
+      <span class="badge tone-neutral">{{len .Providers}}</span>
     </div>
     {{if .Providers}}
     <div class="collection-grid">
@@ -214,8 +186,7 @@
     </div>
     {{else}}
     <div class="empty-state">
-      <h3>{{msg .Locale "还没有提供方" "No providers yet"}}</h3>
-      <p>{{msg .Locale "先接入一个 OpenAI 或 Anthropic 兼容上游，模型路由和计费页面才会真正运转起来。" "Connect an OpenAI- or Anthropic-compatible upstream first so model routing and spend views can start working."}}</p>
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
   </section>

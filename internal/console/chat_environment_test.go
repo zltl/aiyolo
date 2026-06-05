@@ -1,6 +1,7 @@
 package console
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -342,6 +343,106 @@ func TestChatEnvironmentEnsureReusesActiveCloudAgentSessionAfterOldLastSeen(t *t
 	}
 	if _, err := store.FindAPIKeyByHash(ctx, auth.HashAPIKey(account.Credential)); err != nil {
 		t.Fatalf("expected reconciled credential to reference an active API key: %v", err)
+	}
+}
+
+func TestConsoleChatCloudAgentNeedsASSUpgrade(t *testing.T) {
+	const oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const newSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	checksumServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(newSHA + "  aiyolo-ass\n"))
+	}))
+	defer checksumServer.Close()
+
+	handler := NewHandler(Config{SecretKey: "test-secret"}, storage.NewMemoryStore())
+	assSHA256URL := checksumServer.URL + "/artifacts/linux-amd64/aiyolo-ass.sha256"
+
+	needs, err := handler.consoleChatCloudAgentNeedsASSUpgrade(context.Background(), assSHA256URL, domain.CloudAgentAccount{LastASSSHA256: oldSHA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !needs {
+		t.Fatal("expected upgrade when published ass checksum changed")
+	}
+
+	needs, err = handler.consoleChatCloudAgentNeedsASSUpgrade(context.Background(), assSHA256URL, domain.CloudAgentAccount{LastASSSHA256: newSHA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needs {
+		t.Fatal("expected no upgrade when published ass checksum matches")
+	}
+
+	needs, err = handler.consoleChatCloudAgentNeedsASSUpgrade(context.Background(), "", domain.CloudAgentAccount{LastASSSHA256: oldSHA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needs {
+		t.Fatal("expected no upgrade when ass artifact url is unavailable")
+	}
+}
+
+func TestReusableConsoleChatCloudAgentEnvironmentHonorsASSRelease(t *testing.T) {
+	const currentSHA = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	checksumServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(currentSHA + "  aiyolo-ass\n"))
+	}))
+	defer checksumServer.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+	now := time.Now().UTC()
+	accountID := consoleChatCloudAgentAccountID("worker-0")
+	if err := store.UpsertWorkerServer(ctx, domain.WorkerServer{ID: "worker-0", Name: "worker-0", SSHHost: "10.0.0.9", SSHPort: 22, SSHUsername: "ubuntu", SSHKeyID: "ssh-key-1", InstallProxyID: domain.ProxyTypeDirect, DataRoot: "/srv/aiyolo"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{
+		ID:              accountID,
+		UserID:          "admin@example.com",
+		WorkerID:        "worker-0",
+		AgentType:       domain.CloudAgentTypeCodex,
+		ModelPublicName: "gpt-5.4",
+		ContainerID:     "container-123",
+		ContainerName:   "aiyolo-cloud-agent-worker-0",
+		WorkspacePath:   "/srv/aiyolo/workspace/chat-session",
+		Status:          domain.CloudAgentStatusRunning,
+		LastASSSHA256:   currentSHA,
+		CreatedAt:       now,
+		LastStartedAt:   &now,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
+		ID:            consoleChatCloudAgentSessionID("session-ass-current"),
+		UserID:        "admin@example.com",
+		WorkerID:      "worker-0",
+		AccountID:     accountID,
+		AgentType:     domain.CloudAgentTypeCodex,
+		ChatSessionID: "session-ass-current",
+		WorkspacePath: "/srv/aiyolo/workspace/chat-session",
+		Status:        domain.CloudAgentSessionStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(Config{SecretKey: "test-secret"}, store)
+	assSHA256URL := checksumServer.URL + "/artifacts/linux-amd64/aiyolo-ass.sha256"
+	account, err := store.GetCloudAgentAccount(ctx, "admin@example.com", accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, "admin@example.com", "session-ass-current", "worker-0", "gpt-5.4", account, now); err != nil || !ok {
+		t.Fatalf("expected reusable cloud agent session when ass checksum matches: ok=%v err=%v", ok, err)
+	}
+
+	account.LastASSSHA256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	if _, _, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, "admin@example.com", "session-ass-current", "worker-0", "gpt-5.4", account, now); err != nil || ok {
+		t.Fatalf("expected non-reusable cloud agent session when ass checksum changed: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -1111,6 +1212,307 @@ func TestStreamChatRoutesThroughCloudAgentCodex(t *testing.T) {
 	}
 }
 
+func TestCloudAgentStreamResumeAfterClientDisconnect(t *testing.T) {
+	allowFinish := make(chan struct{})
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+
+	handler := NewHandler(Config{
+		SecretKey:          "test-secret",
+		AdminEmail:         "admin@example.com",
+		AdminPassword:      "password",
+		CodexPublicBaseURL: "https://aiyolo.quant67.com",
+	}, store)
+	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, _ domain.WorkerSSHKey, _ domain.ProxyProfile, _ workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
+		return workerops.CloudAgentInstance{
+			Status:        domain.CloudAgentStatusRunning,
+			WorkerID:      worker.ID,
+			ContainerID:   "container-stream-resume",
+			ContainerName: "aiyolo-cloud-agent-worker-0",
+			WorkspacePath: "/srv/aiyolo/workspace/session-codex-resume",
+		}, nil
+	}
+	var cloudChatCalls atomic.Int32
+	handler.runCloudAgentChat = func(_ context.Context, _ domain.WorkerServer, _ domain.WorkerSSHKey, _ domain.CloudAgentAccount, _ domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error) {
+		cloudChatCalls.Add(1)
+		if err := request.OnDelta("Codex "); err != nil {
+			return consoleChatExecution{}, err
+		}
+		<-allowFinish
+		if err := request.OnDelta("continues after refresh."); err != nil {
+			return consoleChatExecution{}, err
+		}
+		return consoleChatExecution{
+			Result: consoleChatResultView{
+				PublicName:    "gpt-5.4",
+				ProviderID:    "cloud-agent:worker-0",
+				ProviderName:  "Codex · worker-0",
+				UpstreamModel: "gpt-5.4",
+				Output:        "Codex continues after refresh.",
+				ResponseID:    "codex-thread-resume",
+			},
+			StatusCode: http.StatusOK,
+			Usage:      domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK, Stream: true},
+		}, nil
+	}
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	streamRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(url.Values{
+		"chat_client_session_id": {"session-codex-resume"},
+		"chat_public_name":       {"gpt-5.4"},
+		"chat_environment":       {consoleChatEnvironmentValue("worker-0")},
+		"chat_draft":             {"Keep running after refresh"},
+	}.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	streamRequest.Header.Set("Accept", "application/x-ndjson")
+	streamResponse, err := client.Do(streamRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(streamResponse.Body)
+	firstLine, err := reader.ReadString('\n')
+	if err != nil {
+		streamResponse.Body.Close()
+		t.Fatal(err)
+	}
+	if !strings.Contains(firstLine, `"type":"delta"`) || !strings.Contains(firstLine, "Codex ") {
+		streamResponse.Body.Close()
+		t.Fatalf("unexpected first stream line: %s", firstLine)
+	}
+	if err := streamResponse.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumeRequest, err := http.NewRequest(http.MethodGet, server.URL+consoleChatStreamResumePath+"?session=session-codex-resume", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeRequest.Header.Set("Accept", "application/x-ndjson")
+	resumeResponse, err := client.Do(resumeRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeReader := bufio.NewReader(resumeResponse.Body)
+	syncLine, err := resumeReader.ReadString('\n')
+	if err != nil {
+		resumeResponse.Body.Close()
+		t.Fatal(err)
+	}
+	if !strings.Contains(syncLine, `"type":"sync"`) || !strings.Contains(syncLine, "Codex ") {
+		resumeResponse.Body.Close()
+		t.Fatalf("unexpected resume sync line: %s", syncLine)
+	}
+
+	close(allowFinish)
+
+	var resumeBody strings.Builder
+	for {
+		line, readErr := resumeReader.ReadString('\n')
+		if line != "" {
+			resumeBody.WriteString(line)
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	if err := resumeResponse.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resumeText := resumeBody.String()
+	if !strings.Contains(resumeText, `"type":"delta"`) || !strings.Contains(resumeText, "continues after refresh.") || !strings.Contains(resumeText, `"type":"done"`) {
+		t.Fatalf("unexpected resume stream body: %s", resumeText)
+	}
+	if cloudChatCalls.Load() != 1 {
+		t.Fatalf("cloud_chat_calls=%d, want background run to continue without restart", cloudChatCalls.Load())
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		record, err := store.GetConsoleChatSession(ctx, "admin@example.com", "session-codex-resume")
+		if err == nil && record.Status == consoleChatSessionStatusCompleted && strings.Contains(record.MessagesJSON, "Codex continues after refresh.") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session did not persist completed output after resume: err=%v record=%+v", err, record)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestSaveChatSessionKeepsStreamingWhileCloudAgentRunActive(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := store.UpsertConsoleChatSession(ctx, domain.ConsoleChatSession{
+		ID:           "session-active-run",
+		UserID:       "admin@example.com",
+		Title:        "Active run",
+		PublicName:   "gpt-5.4",
+		MessagesJSON: `[{"id":"u1","role":"user","content":"hello"}]`,
+		MessageCount: 1,
+		Status:       consoleChatSessionStatusStreaming,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(Config{
+		SecretKey:     "test-secret",
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "password",
+	}, store)
+	handler.cloudAgentRuns.startOrGet(consoleCloudAgentRunKey("admin@example.com", "session-active-run"), func() *consoleCloudAgentRun {
+		return &consoleCloudAgentRun{
+			handler:   handler,
+			registry:  handler.cloudAgentRuns,
+			key:       consoleCloudAgentRunKey("admin@example.com", "session-active-run"),
+			sessionID: "session-active-run",
+			userID:    "admin@example.com",
+		}
+	})
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(consoleChatSessionView{
+		ID:         "session-active-run",
+		PublicName: "gpt-5.4",
+		Status:     consoleChatSessionStatusInterrupted,
+		LastError:  "Stopped current reply.",
+		Messages: []consoleChatMessageView{
+			{ID: "u1", Role: "user", Content: "hello"},
+			{ID: "a1", Role: "assistant", Content: "partial"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Post(server.URL+"/console/chat/session", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("save session status=%d body=%s", response.StatusCode, body)
+	}
+
+	record, err := store.GetConsoleChatSession(ctx, "admin@example.com", "session-active-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != consoleChatSessionStatusStreaming {
+		t.Fatalf("status=%q, want streaming while cloud agent run is active", record.Status)
+	}
+	if strings.TrimSpace(record.LastError) != "" {
+		t.Fatalf("last_error=%q, want cleared while run is active", record.LastError)
+	}
+}
+
+func TestCloudAgentStreamResumeAfterServerRestart(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := store.UpsertConsoleChatSession(ctx, domain.ConsoleChatSession{
+		ID:             "session-codex-restart",
+		UserID:         "admin@example.com",
+		Title:          "Restart recovery",
+		PublicName:     "gpt-5.4",
+		MessagesJSON:   `[{"id":"u1","role":"user","content":"Keep going"},{"id":"a1","role":"assistant","content":"Codex partial output"}]`,
+		MessageCount:   2,
+		Status:         consoleChatSessionStatusStreaming,
+		LastResponseID: "codex-thread-restart",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(Config{
+		SecretKey:     "test-secret",
+		AdminEmail:    "admin@example.com",
+		AdminPassword: "password",
+	}, store)
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodGet, server.URL+consoleChatStreamResumePath+"?session=session-codex-restart", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Accept", "application/x-ndjson")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("resume status=%d body=%s", response.StatusCode, body)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, `"type":"sync"`) || !strings.Contains(text, "Codex partial output") {
+		t.Fatalf("resume did not restore saved output: %s", text)
+	}
+	if !strings.Contains(text, `"type":"reconnect"`) {
+		t.Fatalf("resume did not report reconnect stream after restart: %s", text)
+	}
+	if !strings.Contains(text, "Server restarted") && !strings.Contains(text, "服务已重启") {
+		t.Fatalf("resume reconnect message missing restart hint: %s", text)
+	}
+	if !strings.Contains(text, "continue running") && !strings.Contains(text, "继续运行") {
+		t.Fatalf("resume reconnect message missing continue-running hint: %s", text)
+	}
+	if !strings.Contains(text, `"type":"error"`) {
+		t.Fatalf("resume did not report lost stream when cloud agent target is missing: %s", text)
+	}
+
+	record, err := store.GetConsoleChatSession(ctx, "admin@example.com", "session-codex-restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != consoleChatSessionStatusInterrupted {
+		t.Fatalf("status=%q, want interrupted when resume cannot reach cloud agent", record.Status)
+	}
+	if !strings.Contains(record.MessagesJSON, "Codex partial output") {
+		t.Fatalf("messages lost after stale resume: %s", record.MessagesJSON)
+	}
+}
+
 func TestChatPageRestoresCloudAgentEnvironment(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
@@ -1456,8 +1858,8 @@ func TestChatShellPageLoadsCloudAgentSession(t *testing.T) {
 	if !strings.Contains(html, "data-chat-shell-socket-url=\"/console/chat/shell/ws?session=session-shell&amp;terminal=default\"") {
 		t.Fatalf("chat shell page is missing socket wiring: %s", html)
 	}
-	if !strings.Contains(html, `https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css`) || !strings.Contains(html, `https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js`) {
-		t.Fatalf("chat shell page should load the working xterm CDN assets: %s", html)
+	if !strings.Contains(html, `/console/static/vendor/xterm.css`) || !strings.Contains(html, `/console/static/vendor/xterm.js`) {
+		t.Fatalf("chat shell page should load bundled xterm assets: %s", html)
 	}
 	if !strings.Contains(html, "aiyolo-cloud-agent-worker-0") || !strings.Contains(html, "/srv/aiyolo/workspace/session-shell") {
 		t.Fatalf("chat shell page did not render cloud agent metadata: %s", html)

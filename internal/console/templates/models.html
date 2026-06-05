@@ -16,10 +16,8 @@
     <section class="panel">
       <div class="section-head">
         <div>
-          <p class="section-kicker">{{msg .Locale "路由映射" "Route mapping"}}</p>
-          <h2>{{msg .Locale "配置模型别名与真实路由" "Configure aliases and real model routes"}}</h2>
+          <h2>{{msg .Locale "模型路由" "Model routes"}}</h2>
         </div>
-        <span class="badge tone-neutral">{{msg .Locale "按提供方联动" "Provider-aware form"}}</span>
       </div>
       {{template "model-route-form" .}}
     </section>
@@ -28,8 +26,7 @@
       <section class="panel">
         <div class="section-head">
           <div>
-            <p class="section-kicker">{{msg .Locale "可用 ID" "Available IDs"}}</p>
-            <h2>{{msg .Locale "当前可选提供方与代理" "Available providers and proxies"}}</h2>
+            <h2>{{msg .Locale "可用资源" "Available resources"}}</h2>
           </div>
         </div>
         <div>
@@ -47,7 +44,6 @@
         {{if .SelectedProvider.ID}}
         <div class="callout muted">
           <strong>{{.SelectedProvider.Name}}</strong>
-          <p class="panel-copy">{{if .ProviderUpstreamModels}}{{msg .Locale "当前已加载该提供方的真实模型列表，可直接下拉或输入搜索。" "The synced model catalog for this provider is loaded. Use the dropdown or type to search."}}{{else}}{{msg .Locale "这个提供方目前还没有可供搜索的模型；如果是 OpenRouter，请先执行同步。" "This provider does not have a searchable model catalog yet. If it is OpenRouter, sync models first."}}{{end}}</p>
           <span class="badge tone-neutral">{{len .ProviderUpstreamModels}} {{msg .Locale "个模型" "models"}}</span>
         </div>
         {{end}}
@@ -56,21 +52,17 @@
       <section class="panel">
         <div class="section-head">
           <div>
-            <p class="section-kicker">{{msg .Locale "连通性测试" "Connectivity test"}}</p>
-            <h2>{{msg .Locale "保存后立即验证模型" "Verify a saved route immediately"}}</h2>
+            <h2>{{msg .Locale "连通性测试" "Connectivity test"}}</h2>
           </div>
-          <span class="badge tone-neutral">{{msg .Locale "测试框" "Test box"}}</span>
         </div>
         <form method="post" action="/console/models/test" class="form-grid" hx-post="/console/models/test" hx-target="#model-test-result" hx-swap="outerHTML" hx-disabled-elt="find button">
           <label class="field span-2">
-            <span class="field-label">{{msg .Locale "要测试的公共模型" "Public model to test"}}</span>
+            <span class="field-label">{{msg .Locale "模型" "Model"}}</span>
             <input name="test_public_name" list="model-test-route-options" value="{{.TestForm.PublicName}}">
-            <span class="field-help">{{msg .Locale "选择已经保存的公共模型，测试会沿着这条真实路由访问上游。" "Select a saved public model. The test follows that real route to the upstream provider."}}</span>
           </label>
           <label class="field span-2">
-            <span class="field-label">{{msg .Locale "测试提示词" "Test prompt"}}</span>
+            <span class="field-label">{{msg .Locale "提示词" "Prompt"}}</span>
             <textarea name="test_prompt">{{.TestForm.Prompt}}</textarea>
-            <span class="field-help">{{msg .Locale "当前测试优先覆盖 OpenAI / OpenRouter 兼容提供方，用最小对话请求验证是否能通。" "The current test box covers OpenAI/OpenRouter-compatible providers first and verifies reachability with a minimal chat request."}}</span>
           </label>
           <div class="field span-2">
             <button class="primary-button" type="submit" {{if not .Routes}}disabled{{end}}>{{msg .Locale "运行测试" "Run test"}}</button>
@@ -87,14 +79,9 @@
   <section class="panel">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "已解析路由" "Resolved routes"}}</p>
-        <h2>{{msg .Locale "已配置模型别名" "Configured model aliases"}}</h2>
+        <h2>{{msg .Locale "已配置" "Configured"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .Routes}} {{msg .Locale "条" "routes"}}</span>
-    </div>
-    <div class="callout muted">
-      <strong>{{msg .Locale "这里展示的是控制台已保存的值" "These are the values currently saved in the console"}}</strong>
-      <p class="panel-copy">{{msg .Locale "当前显示的是已保存的上下文值，不保证已经核验。历史 OpenRouter 导入可能写入默认值；重新同步后会刷新为上游元数据。" "Context currently shows the saved value and may not be verified. Older OpenRouter imports may still reflect a default value until you sync again from upstream metadata."}}</p>
+      <span class="badge tone-neutral">{{len .Routes}}</span>
     </div>
     {{if .Routes}}
     <div class="collection-grid">
@@ -136,8 +123,7 @@
     </div>
     {{else}}
     <div class="empty-state">
-      <h3>{{msg .Locale "还没有模型路由" "No model routes yet"}}</h3>
-      <p>{{msg .Locale "定义一个公共模型后，客户端只需要记住稳定别名，后端可以继续自由切换真实上游。" "Once a public model is defined, clients only need a stable alias while the backend stays free to swap real upstream models."}}</p>
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
   </section>
@@ -149,7 +135,6 @@
   <label class="field">
     <span class="field-label">{{msg .Locale "公开模型名" "Public model"}}</span>
     <input name="public_name" list="public-model-options" value="{{.ModelForm.PublicName}}">
-    <span class="field-help">{{msg .Locale "客户端看到并调用的是这个稳定别名；如果想直接暴露 OpenRouter 原始模型名，也可以保持一致。" "Clients call this stable alias. If you want to expose the original OpenRouter model name directly, you can keep them the same."}}</span>
   </label>
   <label class="field">
     <span class="field-label">提供方编号</span>
@@ -157,12 +142,10 @@
       <option value="">{{msg .Locale "选择已配置提供方" "Select a configured provider"}}</option>
       {{range .Providers}}<option value="{{.ID}}" {{if eq .ID $.ModelForm.ProviderID}}selected{{end}}>{{.Name}} · {{.ID}}</option>{{end}}
     </select>
-    <span class="field-help">{{msg .Locale "选中提供方后，下面会切换成这个提供方的真实模型列表。" "After you choose a provider, the model picker below switches to that provider's real model catalog."}}</span>
   </label>
   <label class="field span-2">
     <span class="field-label">{{msg .Locale "上游模型名" "Upstream model"}}</span>
     <input name="upstream_model" list="provider-upstream-model-options" value="{{.ModelForm.UpstreamModel}}" {{if not .ModelForm.ProviderID}}disabled{{end}}>
-    <span class="field-help">{{if .ModelForm.ProviderID}}{{if .ProviderUpstreamModels}}{{msg .Locale "已加载该提供方的模型列表，可直接下拉或输入搜索。" "The provider model list is loaded. Use the dropdown or type to search."}}{{else}}{{msg .Locale "该提供方还没有已同步的模型列表。" "This provider does not have a synced model list yet."}}{{end}}{{else}}{{msg .Locale "先选择提供方，再加载可搜索的模型列表。" "Choose a provider first to load a searchable model list."}}{{end}}</span>
   </label>
   <label class="field">
     <span class="field-label">{{msg .Locale "协议" "Protocol"}}</span>
@@ -177,12 +160,10 @@
       <option value="" {{if eq .ModelForm.ProxyProfileID ""}}selected{{end}}>{{modelProxySelectLabel .Locale .SelectedProvider}}</option>
       {{range .Proxies}}<option value="{{.ID}}" {{if eq .ID $.ModelForm.ProxyProfileID}}selected{{end}}>{{.Name}} · {{.ID}}</option>{{end}}
     </select>
-    <span class="field-help">{{msg .Locale "留空时继承提供方默认代理；如果提供方也未设置，则回退为直连。" "Leave empty to use the provider default proxy; if the provider also has none, traffic falls back to direct."}}</span>
   </label>
   <label class="field">
     <span class="field-label">{{msg .Locale "上下文令牌" "Context tokens"}}</span>
     <input name="context_tokens" type="number" min="0" value="{{.ModelForm.ContextTokens}}">
-    <span class="field-help">{{msg .Locale "0 表示暂不在控制台覆盖该模型的上下文上限。OpenRouter 重新同步时会用上游元数据刷新这个值。" "0 means the console will not override the model context limit yet. Re-syncing OpenRouter refreshes this value from upstream metadata."}}</span>
   </label>
   <label class="field">
     <span class="field-label">优先级</span>
@@ -193,7 +174,7 @@
     <input name="weight" type="number" value="{{.ModelForm.Weight}}">
   </label>
   <div class="field span-2">
-    <button class="primary-button" type="submit" {{if not .Providers}}disabled{{end}}>{{msg .Locale "保存模型路由" "Save model route"}}</button>
+    <button class="primary-button" type="submit" {{if not .Providers}}disabled{{end}}>{{msg .Locale "保存" "Save"}}</button>
   </div>
 </form>
 <datalist id="public-model-options">
@@ -207,19 +188,14 @@
 {{define "model-test-result"}}
 <div id="model-test-result">
   {{if .TestResult}}
-  <div class="flash flash-success" role="status">{{msg .Locale "测试成功，已从上游拿到响应。" "Test succeeded and the upstream returned a response."}}</div>
+  <div class="flash flash-success" role="status">{{msg .Locale "测试成功" "Test succeeded"}}</div>
   <div class="callout">
-    <p class="section-kicker">{{msg .Locale "返回摘要" "Response summary"}}</p>
     <strong>{{.TestResult.ProviderName}} · {{.TestResult.UpstreamModel}}</strong>
     <p class="panel-copy">{{.TestResult.Output}}</p>
-    <span class="meta">{{msg .Locale "公共模型" "public model"}} {{.TestResult.PublicName}} · {{msg .Locale "响应标识" "ID"}} {{orDash .TestResult.ResponseID}} · {{msg .Locale "共" "total"}} {{.TestResult.TotalTokens}} {{msg .Locale "个令牌" "tokens"}} · {{.TestResult.DurationMS}}ms{{if .TestResult.FinishReason}} · {{.TestResult.FinishReason}}{{end}}</span>
+    <span class="meta">{{.TestResult.PublicName}} · {{orDash .TestResult.ResponseID}} · {{.TestResult.TotalTokens}} tokens · {{.TestResult.DurationMS}}ms{{if .TestResult.FinishReason}} · {{.TestResult.FinishReason}}{{end}}</span>
   </div>
   {{else if .TestError}}
   <div class="flash flash-error" role="alert">{{.TestError}}</div>
-  {{else}}
-  <div class="callout muted">
-    <p class="panel-copy">{{msg .Locale "保存一条模型路由后，在这里选择公共模型并发起一条最小测试请求，确认提供方、模型名和主密钥是否都能通。" "After saving a model route, pick its public model here and run a minimal test request to confirm the provider, model name, and master key all work together."}}</p>
-  </div>
   {{end}}
 </div>
 {{end}}

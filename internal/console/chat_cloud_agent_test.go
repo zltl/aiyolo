@@ -65,15 +65,37 @@ func TestConsoleCloudAgentCodexParserConsumesJSONLines(t *testing.T) {
 func TestConsoleCloudAgentCodexParserStreamsCompletedMessageWhenNoDelta(t *testing.T) {
 	parser := &consoleCloudAgentStreamParser{}
 	var deltas []string
-	err := parser.consumeLine(`{"type":"item.completed","item":{"type":"agent_message","content":[{"type":"output_text","text":"final text"}]}}`, func(delta string) error {
-		deltas = append(deltas, delta)
-		return nil
+	err := parser.consumeLine(`{"type":"item.completed","item":{"type":"agent_message","content":[{"type":"output_text","text":"final text"}]}}`, consoleCloudAgentStreamHandlers{
+		OnDelta: func(delta string) error {
+			deltas = append(deltas, delta)
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(deltas, "") != "final text" {
 		t.Fatalf("deltas=%q", deltas)
+	}
+}
+
+func TestConsoleCloudAgentCodexParserStreamsReasoning(t *testing.T) {
+	parser := &consoleCloudAgentStreamParser{}
+	var reasoningChunks []string
+	err := parser.consumeLine(`{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Checking repo layout"}}`, consoleCloudAgentStreamHandlers{
+		OnReasoning: func(reasoning string) error {
+			reasoningChunks = append(reasoningChunks, reasoning)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(reasoningChunks, "") != "Checking repo layout" {
+		t.Fatalf("reasoning chunks=%q", reasoningChunks)
+	}
+	if got := parser.reasoningText(); got != "Checking repo layout" {
+		t.Fatalf("reasoningText=%q", got)
 	}
 }
 

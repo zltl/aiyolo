@@ -12,104 +12,79 @@
   {{if .Error}}
   <div class="flash flash-error" role="alert">{{.Error}}</div>
   {{end}}
-  <section class="split-panel">
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <p class="section-kicker">{{msg .Locale "网络路径" "Network path"}}</p>
-          <h2>{{if .ProxyForm.Editing}}{{msg .Locale "编辑代理配置" "Edit proxy profile"}}{{else}}{{msg .Locale "配置代理" "Configure proxy profiles"}}{{end}}</h2>
+  <section class="panel">
+    <div class="section-head">
+      <div>
+        <h2>{{if .ProxyForm.Editing}}{{msg .Locale "编辑代理" "Edit proxy"}}{{else}}{{msg .Locale "新建代理" "New proxy"}}{{end}}</h2>
+      </div>
+    </div>
+    <form method="post" action="/console/proxies" class="form-grid" hx-post="/console/proxies" hx-target="#proxies-content" hx-swap="outerHTML" hx-disabled-elt="find button">
+      <label class="field">
+        <span class="field-label">ID</span>
+        <input name="id" value="{{.ProxyForm.ID}}" {{if .ProxyForm.Editing}}readonly{{end}}>
+      </label>
+      <label class="field">
+        <span class="field-label">{{msg .Locale "名称" "Name"}}</span>
+        <input name="name" value="{{.ProxyForm.Name}}">
+      </label>
+      <label class="field">
+        <span class="field-label">{{msg .Locale "类型" "Type"}}</span>
+        <select name="type">
+          <option value="direct" {{if eq .ProxyForm.Type "direct"}}selected{{end}}>direct</option>
+          <option value="http" {{if eq .ProxyForm.Type "http"}}selected{{end}}>http</option>
+          <option value="socks5" {{if eq .ProxyForm.Type "socks5"}}selected{{end}}>socks5</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">{{msg .Locale "区域" "Region"}}</span>
+        <input name="region" list="proxy-region-options" value="{{.ProxyForm.Region}}">
+      </label>
+      <label class="field span-2">
+        <span class="field-label">{{msg .Locale "地址" "Endpoint"}}</span>
+        <input name="endpoint" value="{{.ProxyForm.Endpoint}}" placeholder="http://host:port">
+      </label>
+      <label class="field span-2">
+        <span class="field-label">{{msg .Locale "认证" "Auth"}}</span>
+        <input name="auth" type="password" autocomplete="new-password">
+        {{if and .ProxyForm.Editing .ProxyForm.HasSavedAuth}}<span class="field-help">{{msg .Locale "留空保留已保存" "Leave blank to keep saved"}}</span>{{end}}
+      </label>
+      <label class="field span-2">
+        <span class="field-label">{{msg .Locale "健康检查" "Health check"}}</span>
+        <input name="health_check_url" type="url" value="{{.ProxyForm.HealthCheckURL}}">
+      </label>
+      <label class="field">
+        <span class="field-label">{{msg .Locale "超时（秒）" "Timeout (s)"}}</span>
+        <input name="timeout_seconds" type="number" min="0" value="{{.ProxyForm.TimeoutSeconds}}">
+      </label>
+      <label class="field">
+        <span class="field-label">{{msg .Locale "流空闲（秒）" "Stream idle (s)"}}</span>
+        <input name="stream_idle_timeout_seconds" type="number" min="1" value="{{.ProxyForm.StreamIdleTimeoutSeconds}}">
+      </label>
+      <label class="field">
+        <span class="field-label">{{msg .Locale "状态" "Status"}}</span>
+        <select name="status">
+          <option value="enabled" {{if eq .ProxyForm.Status "enabled"}}selected{{end}}>{{msg .Locale "启用" "Enabled"}}</option>
+          <option value="disabled" {{if eq .ProxyForm.Status "disabled"}}selected{{end}}>{{msg .Locale "停用" "Disabled"}}</option>
+        </select>
+      </label>
+      <div class="field span-2">
+        <div class="chip-row">
+          <button class="primary-button" type="submit">{{if .ProxyForm.Editing}}{{msg .Locale "更新" "Update"}}{{else}}{{msg .Locale "保存" "Save"}}{{end}}</button>
+          {{if .ProxyForm.Editing}}<a class="ghost-button" style="width: auto;" href="/console/proxies" hx-get="/console/proxies" hx-target="#proxies-content" hx-swap="outerHTML">{{msg .Locale "取消" "Cancel"}}</a>{{end}}
         </div>
       </div>
-      <form method="post" action="/console/proxies" class="form-grid" hx-post="/console/proxies" hx-target="#proxies-content" hx-swap="outerHTML" hx-disabled-elt="find button">
-        <label class="field">
-          <span class="field-label">代理编号</span>
-          <input name="id" value="{{.ProxyForm.ID}}" {{if .ProxyForm.Editing}}readonly{{end}}>
-          <span class="field-help">{{msg .Locale "稳定编号，会被提供方默认代理和模型路由直接引用。" "Stable identifier referenced directly by provider defaults and model routes."}}</span>
-        </label>
-        <label class="field">
-          <span class="field-label">{{msg .Locale "名称" "Name"}}</span>
-          <input name="name" value="{{.ProxyForm.Name}}">
-          <span class="field-help">{{msg .Locale "显示给管理员看的名称。" "Human-readable name shown to administrators."}}</span>
-        </label>
-        <label class="field">
-          <span class="field-label">{{msg .Locale "类型" "Type"}}</span>
-          <select name="type">
-            <option value="direct" {{if eq .ProxyForm.Type "direct"}}selected{{end}}>直连</option>
-            <option value="http" {{if eq .ProxyForm.Type "http"}}selected{{end}}>HTTP</option>
-            <option value="socks5" {{if eq .ProxyForm.Type "socks5"}}selected{{end}}>SOCKS5</option>
-          </select>
-          <span class="field-help">{{msg .Locale "只支持直连、HTTP、SOCKS5 三种类型。" "Only direct, http, and socks5 are supported."}}</span>
-        </label>
-        <label class="field">
-          <span class="field-label">区域</span>
-          <input name="region" list="proxy-region-options" value="{{.ProxyForm.Region}}">
-          <span class="field-help">{{msg .Locale "可选区域标签，便于在路由和排障时区分网络出口。" "Optional region tag for distinguishing egress paths during routing and troubleshooting."}}</span>
-        </label>
-        <label class="field span-2">
-          <span class="field-label">出口地址</span>
-          <input name="endpoint" value="{{.ProxyForm.Endpoint}}">
-          <span class="field-help">{{msg .Locale "direct 类型可留空；http 使用 http://host:port，socks5 使用 socks5://host:port。" "Leave empty for direct profiles. Use http://host:port for http and socks5://host:port for socks5."}}</span>
-        </label>
-        <label class="field span-2">
-          <span class="field-label">{{msg .Locale "认证信息" "Auth material"}}</span>
-          <input name="auth" type="password" autocomplete="new-password">
-          <span class="field-help">{{if and .ProxyForm.Editing .ProxyForm.HasSavedAuth}}{{msg .Locale "留空会保留已保存认证；填写新值会覆盖它。" "Leave blank to keep the saved auth material, or enter a new value to replace it."}}{{else}}{{msg .Locale "可选用户名密码或令牌，只保存在服务端。" "Optional username/password or token material stored only on the server."}}{{end}}</span>
-        </label>
-        <label class="field span-2">
-          <span class="field-label">健康检查地址</span>
-          <input name="health_check_url" type="url" value="{{.ProxyForm.HealthCheckURL}}">
-          <span class="field-help">{{msg .Locale "可选连通性检查地址；编辑现有 Profile 时会一并保留和更新。" "Optional connectivity probe target. Existing profiles keep and update this field during edits."}}</span>
-        </label>
-        <label class="field">
-          <span class="field-label">{{msg .Locale "超时秒数" "Timeout seconds"}}</span>
-          <input name="timeout_seconds" type="number" min="0" value="{{.ProxyForm.TimeoutSeconds}}">
-        </label>
-        <label class="field">
-          <span class="field-label">{{msg .Locale "流空闲超时秒数" "Stream idle timeout"}}</span>
-          <input name="stream_idle_timeout_seconds" type="number" min="1" value="{{.ProxyForm.StreamIdleTimeoutSeconds}}">
-          <span class="field-help">{{msg .Locale "只影响流式请求的空闲等待；代理路径可以比普通请求超时更宽松，避免长思考流被网络出口提前切断。" "Only affects idle waits for streaming requests. This lets proxy egress tolerate longer reasoning gaps than ordinary requests."}}</span>
-        </label>
-        <label class="field">
-          <span class="field-label">{{msg .Locale "状态" "Status"}}</span>
-          <select name="status">
-            <option value="enabled" {{if eq .ProxyForm.Status "enabled"}}selected{{end}}>{{msg .Locale "启用" "Enabled"}}</option>
-            <option value="disabled" {{if eq .ProxyForm.Status "disabled"}}selected{{end}}>{{msg .Locale "停用" "Disabled"}}</option>
-          </select>
-        </label>
-        <div class="field span-2">
-          <div class="chip-row">
-            <button class="primary-button" type="submit">{{if .ProxyForm.Editing}}{{msg .Locale "更新代理" "Update proxy"}}{{else}}{{msg .Locale "保存代理" "Save proxy"}}{{end}}</button>
-            {{if .ProxyForm.Editing}}<a class="ghost-button" style="width: auto;" href="/console/proxies" hx-get="/console/proxies" hx-target="#proxies-content" hx-swap="outerHTML">{{msg .Locale "取消编辑" "Cancel"}}</a>{{end}}
-          </div>
-        </div>
-      </form>
-      <datalist id="proxy-region-options">
-        {{range .Regions}}<option value="{{.}}"></option>{{end}}
-      </datalist>
-    </section>
-
-    <aside class="panel">
-      <div class="section-head">
-        <div>
-          <p class="section-kicker">{{msg .Locale "选择顺序" "Selection order"}}</p>
-          <h2>{{msg .Locale "代理决策顺序" "Proxy decision order"}}</h2>
-        </div>
-      </div>
-      <ul class="note-list">
-        <li>{{msg .Locale "代理配置只在控制台维护，服务配置不会再写入这些网络出口。" "Proxy profiles are managed only in the console and are no longer seeded from service config."}}</li>
-        <li>{{msg .Locale "模型路由指定的代理配置优先级最高。" "The proxy profile pinned on a model route has the highest priority."}}</li>
-        <li>{{msg .Locale "其次是提供方默认代理、项目或 API 密钥默认代理，再回落到系统默认。" "Next come provider defaults, project or API key defaults, and finally the system default."}}</li>
-      </ul>
-    </aside>
+    </form>
+    <datalist id="proxy-region-options">
+      {{range .Regions}}<option value="{{.}}"></option>{{end}}
+    </datalist>
   </section>
 
   <section class="panel">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "已注册代理配置" "Registered profiles"}}</p>
-        <h2>{{msg .Locale "可用代理资源" "Available proxy resources"}}</h2>
+        <h2>{{msg .Locale "已配置" "Configured"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .Profiles}} {{msg .Locale "个" "profiles"}}</span>
+      <span class="badge tone-neutral">{{len .Profiles}}</span>
     </div>
     {{if .Profiles}}
     <div class="collection-grid">
@@ -119,7 +94,7 @@
           <strong>{{.Name}}</strong>
           <span class="{{statusClass .Status}}">{{statusText $.Locale .Status}}</span>
         </div>
-        <p class="panel-copy">{{if .Endpoint}}{{.Endpoint}}{{else}}{{msg $.Locale "直连" "Direct connection"}}{{end}}</p>
+        <p class="panel-copy">{{if .Endpoint}}{{.Endpoint}}{{else}}{{msg $.Locale "直连" "direct"}}{{end}}</p>
         <dl class="kv-grid">
           <div>
             <dt>ID</dt>
@@ -130,11 +105,11 @@
             <dd>{{.Type}}</dd>
           </div>
           <div>
-            <dt>区域</dt>
+            <dt>{{msg $.Locale "区域" "Region"}}</dt>
             <dd>{{orDash .Region}}</dd>
           </div>
           <div>
-            <dt>超时</dt>
+            <dt>{{msg $.Locale "超时" "Timeout"}}</dt>
             <dd>{{.TimeoutSeconds}}s</dd>
           </div>
           <div>
@@ -144,7 +119,7 @@
         </dl>
         <div class="chip-row card-actions">
           {{if eq .ID "direct"}}
-          <span class="badge tone-neutral">{{msg $.Locale "内置直连，不可编辑" "Built-in direct, not editable"}}</span>
+          <span class="badge tone-neutral">{{msg $.Locale "内置" "built-in"}}</span>
           {{else}}
           <a class="ghost-button" style="width: auto;" href="/console/proxies?edit_proxy_id={{.ID}}" hx-get="/console/proxies?edit_proxy_id={{.ID}}" hx-target="#proxies-content" hx-swap="outerHTML">{{msg $.Locale "编辑" "Edit"}}</a>
           {{end}}
@@ -154,8 +129,7 @@
     </div>
     {{else}}
     <div class="empty-state">
-      <h3>{{msg .Locale "还没有代理配置" "No proxy profiles yet"}}</h3>
-      <p>{{msg .Locale "即使暂时全部直连，也建议先把 direct、区域 SOCKS5 或 HTTP 入口显式建模出来。" "Even if everything is direct for now, it is still worth modeling direct, regional SOCKS5, or HTTP entries explicitly."}}</p>
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
   </section>

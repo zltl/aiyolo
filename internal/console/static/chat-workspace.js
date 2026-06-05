@@ -1001,6 +1001,14 @@
     return highlighter.getLanguage(candidate) ? candidate : "";
   }
 
+  function workspaceEditorHighlightUsesPlainText(language) {
+    const normalized = String(language || "").trim().toLowerCase();
+    return normalized === "markdown"
+      || normalized === "plaintext"
+      || normalized === "text"
+      || normalized === "txt";
+  }
+
   function workspaceHighlightClass(language) {
     const normalized = String(language || "").trim().replace(/[^a-z0-9_-]/gi, "");
     return normalized === "" ? "" : `language-${normalized}`;
@@ -1128,8 +1136,6 @@
       return;
     }
     const lineCount = workspaceEditorLineCount(content);
-    const digits = String(lineCount).length;
-    host.style.setProperty("--chat-editor-gutter-width", `${Math.max(4, digits + 2)}ch`);
     if (lineNumbers.dataset.chatEditorLineCount === String(lineCount)) {
       return;
     }
@@ -1139,6 +1145,26 @@
     }
     lineNumbers.textContent = nextContent;
     lineNumbers.dataset.chatEditorLineCount = String(lineCount);
+    const digits = Math.max(1, String(lineCount).length);
+    let probe = host.querySelector("[data-chat-editor-gutter-probe]");
+    if (!(probe instanceof HTMLSpanElement)) {
+      probe = document.createElement("span");
+      probe.dataset.chatEditorGutterProbe = "true";
+      probe.setAttribute("aria-hidden", "true");
+      probe.style.position = "absolute";
+      probe.style.visibility = "hidden";
+      probe.style.pointerEvents = "none";
+      probe.style.whiteSpace = "pre";
+      host.appendChild(probe);
+    }
+    probe.style.font = getComputedStyle(lineNumbers).font;
+    probe.textContent = "9".repeat(digits);
+    const numberStyles = getComputedStyle(lineNumbers);
+    const paddingLeft = Number.parseFloat(numberStyles.paddingLeft) || 0;
+    const paddingRight = Number.parseFloat(numberStyles.paddingRight) || 0;
+    const borderRight = Number.parseFloat(numberStyles.borderRightWidth) || 0;
+    const measuredWidth = Math.ceil(probe.offsetWidth + paddingLeft + paddingRight + borderRight);
+    host.style.setProperty("--chat-editor-gutter-width", `${Math.max(measuredWidth, 32)}px`);
   }
 
   function syncWorkspaceEditorLineNumberScroll(input) {
@@ -1192,7 +1218,11 @@
     workspaceEditorHighlightedPath = workspaceActiveFilePath;
     setWorkspaceEditorHighlightReady(host, false);
     const highlighter = window.hljs;
-    if (language !== "" && highlighter && typeof highlighter.highlight === "function" && value.length <= workspaceHighlightMaxChars) {
+    if (language !== ""
+      && !workspaceEditorHighlightUsesPlainText(language)
+      && highlighter
+      && typeof highlighter.highlight === "function"
+      && value.length <= workspaceHighlightMaxChars) {
       try {
         code.innerHTML = highlighter.highlight(value, { language, ignoreIllegals: true }).value;
         setWorkspaceEditorHighlightReady(host, true);

@@ -81,6 +81,7 @@ COPY aiyolo-cloud-agent-start-display /usr/local/bin/aiyolo-cloud-agent-start-di
 COPY aiyolo-cloud-agent-open-chrome /usr/local/bin/aiyolo-cloud-agent-open-chrome
 COPY aiyolo-cloud-agent-start-docker /usr/local/bin/aiyolo-cloud-agent-start-docker
 COPY aiyolo-cloud-agent-start-services /usr/local/bin/aiyolo-cloud-agent-start-services
+COPY aiyolo-cloud-agent-write-codex-config /usr/local/bin/aiyolo-cloud-agent-write-codex-config
 
 RUN chmod 0755 \
   /usr/local/bin/aiyolo-ass \
@@ -89,7 +90,8 @@ RUN chmod 0755 \
     /usr/local/bin/aiyolo-cloud-agent-start-display \
     /usr/local/bin/aiyolo-cloud-agent-open-chrome \
     /usr/local/bin/aiyolo-cloud-agent-start-docker \
-    /usr/local/bin/aiyolo-cloud-agent-start-services
+    /usr/local/bin/aiyolo-cloud-agent-start-services \
+    /usr/local/bin/aiyolo-cloud-agent-write-codex-config
 
 WORKDIR /workspace
 

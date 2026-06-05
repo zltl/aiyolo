@@ -672,7 +672,7 @@ func TestConsoleUpdateAPIKey(t *testing.T) {
 	if !strings.Contains(string(body), "API 密钥已更新") {
 		t.Fatalf("update notice missing: %s", body)
 	}
-	if !strings.Contains(string(body), "编辑 API 密钥") {
+	if !strings.Contains(string(body), "编辑密钥") {
 		t.Fatalf("update should render api key edit page: %s", body)
 	}
 
@@ -776,7 +776,7 @@ func TestConsoleAPIKeyEditPageShowsModelHints(t *testing.T) {
 	}
 	body, _ := io.ReadAll(editResponse.Body)
 	html := string(body)
-	if !strings.Contains(html, "编辑 API 密钥") {
+	if !strings.Contains(html, "编辑密钥") {
 		t.Fatalf("edit page heading missing: %s", html)
 	}
 	if !strings.Contains(html, `datalist id="api-key-edit-model-options"`) {
@@ -1008,9 +1008,6 @@ func TestConsoleModelsProviderSelectionFiltersUpstreamOptions(t *testing.T) {
 	html := string(body)
 	if !strings.Contains(html, `<option value="openai/gpt-4.1-mini"></option>`) || !strings.Contains(html, `<option value="google/gemini-2.5-flash"></option>`) {
 		t.Fatalf("openrouter upstream options missing: %s", html)
-	}
-	if !strings.Contains(html, "当前显示的是已保存的上下文值，不保证已经核验。") {
-		t.Fatalf("saved context note missing: %s", html)
 	}
 	if !strings.Contains(html, "已存上下文") {
 		t.Fatalf("saved context label missing: %s", html)
@@ -1310,7 +1307,7 @@ func TestConsoleModelRouteTestBox(t *testing.T) {
 	if !strings.Contains(html, "ok from openrouter test") {
 		t.Fatalf("test response missing assistant output: %s", html)
 	}
-	if !strings.Contains(html, "测试成功，已从上游拿到响应。") {
+	if !strings.Contains(html, "测试成功") {
 		t.Fatalf("success message missing: %s", html)
 	}
 	usage, err := store.ListUsage(ctx, 5)
@@ -1881,7 +1878,7 @@ func TestConsoleChatPageOmitsAdvancedSettings(t *testing.T) {
 	if !strings.Contains(html, `data-chat-primary-start`) || !strings.Contains(html, `data-chat-primary-stop`) {
 		t.Fatalf("chat page should render start and stop icons for the primary composer action: %s", html)
 	}
-	if !strings.Contains(html, `https://cdn.jsdmirror.com/npm/lucide@1.16.0/dist/umd/lucide.min.js`) {
+	if !strings.Contains(html, `/console/static/vendor/lucide.min.js`) {
 		t.Fatalf("chat page should load lucide for chat control icons: %s", html)
 	}
 	if !strings.Contains(html, `data-lucide="send-horizontal"`) || !strings.Contains(html, `data-lucide="square"`) {
@@ -3098,7 +3095,7 @@ func TestConsoleDirectProxyResourceCannotBeEdited(t *testing.T) {
 	if strings.Contains(pageHTML, `href="/console/proxies?edit_proxy_id=direct"`) {
 		t.Fatalf("direct proxy should not expose an edit link: %s", pageHTML)
 	}
-	if !strings.Contains(pageHTML, "内置直连，不可编辑") {
+	if !strings.Contains(pageHTML, "内置") {
 		t.Fatalf("direct proxy should be marked as locked: %s", pageHTML)
 	}
 

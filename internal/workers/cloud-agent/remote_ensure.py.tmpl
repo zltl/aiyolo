@@ -89,12 +89,50 @@ def inspect_image():
     return json.loads(result.stdout)[0]
 
 
-def ensure_image():
+def expected_ass_sha256():
+    return str(payload.get("ass_sha256", "")).strip()
+
+
+def image_label(inspected, key):
+    labels = inspected.get("Config", {}).get("Labels") or {}
+    value = labels.get(key)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def image_ass_sha256_matches():
+    expected = expected_ass_sha256()
+    if not expected:
+        return True
     try:
-        inspect_image()
-        return
+        inspected = inspect_image()
     except subprocess.CalledProcessError:
-        pass
+        return False
+    return image_label(inspected, "aiyolo.ass.sha256") == expected
+
+
+def container_ass_sha256_matches(inspected):
+    expected = expected_ass_sha256()
+    if not expected:
+        return True
+    labels = inspected.get("Config", {}).get("Labels") or {}
+    value = labels.get("aiyolo.ass.sha256")
+    if value is None:
+        return False
+    return str(value) == expected
+
+
+def replace_container_for_ass_upgrade():
+    if not exact_container_id():
+        return
+    run(["docker", "stop", "-t", "10", payload["container_name"]])
+    run(["docker", "rm", payload["container_name"]])
+
+
+def ensure_image():
+    if image_ass_sha256_matches():
+        return
     build_env = os.environ.copy()
     for key, value in (payload.get("proxy_env") or {}).items():
         build_env[key] = value
@@ -260,10 +298,14 @@ def ensure_container():
             raise SystemExit(f"failed to inspect existing cloud agent container {payload['container_name']}; stop and remove it manually before retrying{suffix}")
         if not container_matches(inspected):
             raise SystemExit(f"cloud agent container {payload['container_name']} already exists but does not match the expected user, workspace, or ASS port; stop and remove it manually before starting a replacement")
-        if not inspected.get("State", {}).get("Running"):
-            run(["docker", "start", payload["container_name"]])
-        wait_for_container_runtime()
-        return container_summary(inspect_container())
+        if not container_ass_sha256_matches(inspected):
+            replace_container_for_ass_upgrade()
+            ensure_image()
+        else:
+            if not inspected.get("State", {}).get("Running"):
+                run(["docker", "start", payload["container_name"]])
+            wait_for_container_runtime()
+            return container_summary(inspect_container())
     ensure_image()
     args = [
         "docker", "run", "-d",

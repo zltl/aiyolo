@@ -1,28 +1,15 @@
 {{define "usage"}}
 {{template "layout-start" .}}
 <section id="spend-overview" class="metric-stage usage-observability">
-  <div class="usage-observability-head">
-    <div>
-      <p class="section-kicker">{{msg .Locale "趋势面板" "Trend panels"}}</p>
-      <h2>{{msg .Locale "近 30 天费用与请求走势" "30-day spend and request trends"}}</h2>
-      <p class="panel-copy">{{msg .Locale "把用量账本压缩成 24 个时间桶，让总览更接近 Grafana 的监测面板：重点数值在上，走势和噪声在下。" "Compressed into 24 time buckets so the overview reads more like a Grafana monitoring panel: the headline value stays on top while the shape and noise sit underneath."}}</p>
-    </div>
-    <div class="usage-observability-meta">
-      <span class="badge tone-neutral">{{msg .Locale "窗口 30 天" "30d window"}}</span>
-      <span class="badge tone-neutral">24 {{msg .Locale "桶" "buckets"}}</span>
-      <span class="badge tone-neutral">{{len .Usage}} {{msg .Locale "行账本" "ledger rows"}}</span>
-    </div>
-  </div>
   <div class="primary-metric-grid usage-primary-metric-grid">
     <article class="stat-card usage-grafana-card usage-grafana-spend">
       <div class="stat-card-head">
         <div>
-          <p>{{msg .Locale "30d 费用" "30d spend"}}</p>
+          <p>{{msg .Locale "30 天费用" "30d spend"}}</p>
           <strong>{{money .Billing.CostMicroCents}}</strong>
         </div>
         <span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16c2-2 4-4 7-4s4 4 7 4 4-3 6-6"></path><path d="M20 10h3v3"></path></svg></span>
       </div>
-      <p class="stat-copy">{{msg .Locale "最近 30 天累计成本。" "Total cost over the last 30 days."}}</p>
       <div class="usage-grafana-shell" aria-hidden="true">
         <svg viewBox="0 0 120 40" preserveAspectRatio="none">
           <path class="usage-grafana-area" d="{{usageArea .ChartUsage "spend" 24}}"></path>
@@ -33,20 +20,15 @@
           <span>{{msg .Locale "现在" "Now"}}</span>
         </div>
       </div>
-      <div class="usage-grafana-foot">
-        <span>{{msg .Locale "累计成本" "Total spend"}}</span>
-        <span>{{msg .Locale "账本聚合" "Ledger aggregate"}}</span>
-      </div>
     </article>
     <article class="stat-card usage-grafana-card usage-grafana-request">
       <div class="stat-card-head">
         <div>
-          <p>{{msg .Locale "30d 请求" "30d requests"}}</p>
+          <p>{{msg .Locale "30 天请求" "30d requests"}}</p>
           <strong>{{.Billing.RequestCount}}</strong>
         </div>
         <span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 18V9"></path><path d="M12 18V5"></path><path d="M19 18v-7"></path></svg></span>
       </div>
-      <p class="stat-copy">{{msg .Locale "参与结算窗口的 ledger 数量。" "Ledger rows participating in the settlement window."}}</p>
       <div class="usage-grafana-shell" aria-hidden="true">
         <svg viewBox="0 0 120 40" preserveAspectRatio="none">
           <path class="usage-grafana-area" d="{{usageArea .ChartUsage "requests" 24}}"></path>
@@ -57,20 +39,15 @@
           <span>{{msg .Locale "现在" "Now"}}</span>
         </div>
       </div>
-      <div class="usage-grafana-foot">
-        <span>{{msg .Locale "总请求数" "Total requests"}}</span>
-        <span>{{msg .Locale "按桶累计" "Bucket accumulation"}}</span>
-      </div>
     </article>
     <article class="stat-card usage-grafana-card usage-grafana-identities">
       <div class="stat-card-head">
         <div>
-          <p>{{msg .Locale "活跃身份" "Active identities"}}</p>
+          <p>{{msg .Locale "活跃用户" "Active users"}}</p>
           <strong>{{len .Billing.UserCosts}}</strong>
         </div>
         <span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 20a5 5 0 0 1 10 0"></path><circle cx="12" cy="9" r="4"></circle></svg></span>
       </div>
-      <p class="stat-copy">{{msg .Locale "近 30 天产生费用的 user_id 数量。" "Number of user identities generating spend in the last 30 days."}}</p>
       <div class="usage-grafana-shell" aria-hidden="true">
         <svg viewBox="0 0 120 40" preserveAspectRatio="none">
           <path class="usage-grafana-area" d="{{usageArea .ChartUsage "users" 24}}"></path>
@@ -81,10 +58,6 @@
           <span>{{msg .Locale "现在" "Now"}}</span>
         </div>
       </div>
-      <div class="usage-grafana-foot">
-        <span>{{msg .Locale "活跃 user_id" "Active user_ids"}}</span>
-        <span>{{msg .Locale "按桶去重" "Bucket dedupe"}}</span>
-      </div>
     </article>
   </div>
   <div class="secondary-metric-grid usage-secondary-metric-grid">
@@ -93,7 +66,7 @@
       <div class="meter-track compact"><span class="meter-fill forest-fill" style="width: {{ratio .Billing.EstimatedCount .Billing.RequestCount}}"></span></div>
     </article>
     <article class="micro-card usage-micro-card">
-      <div class="micro-head"><span>{{msg .Locale "热点模型" "Hot models"}}</span><strong>{{len .Billing.ModelCosts}}</strong></div>
+      <div class="micro-head"><span>{{msg .Locale "模型数" "Models"}}</span><strong>{{len .Billing.ModelCosts}}</strong></div>
       <div class="meter-track compact"><span class="meter-fill accent-fill" style="width: {{countShare (len .Billing.ModelCosts) .Billing.RequestCount}}"></span></div>
     </article>
     <article class="micro-card usage-micro-card">
@@ -111,10 +84,9 @@
   <section class="panel panel-wide">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "模型费用" "Model spend"}}</p>
-        <h2>{{msg .Locale "按模型聚合费用" "Spend by model"}}</h2>
+        <h2>{{msg .Locale "按模型" "By model"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .Billing.ModelCosts}} {{msg .Locale "个模型" "models"}}</span>
+      <span class="badge tone-neutral">{{len .Billing.ModelCosts}}</span>
     </div>
     {{if .Billing.ModelCosts}}
     <div class="table-shell">
@@ -142,10 +114,8 @@
       </table>
     </div>
     {{else}}
-    <div class="empty-state empty-state-rich">
-      <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
-      <h3>{{msg .Locale "还没有可结算数据" "No billable data yet"}}</h3>
-      <p>{{msg .Locale "一旦流量进来，这里会自动形成按模型聚合的成本排名。" "As soon as traffic arrives, ranked model spend will appear here automatically."}}</p>
+    <div class="empty-state">
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
   </section>
@@ -153,10 +123,9 @@
   <section class="panel">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "最近费用" "Recent spend"}}</p>
-        <h2>{{msg .Locale "最近请求账单" "Latest billed requests"}}</h2>
+        <h2>{{msg .Locale "最近请求" "Recent requests"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .Billing.RecentUsage}} {{msg .Locale "条请求" "requests"}}</span>
+      <span class="badge tone-neutral">{{len .Billing.RecentUsage}}</span>
     </div>
     {{if .Billing.RecentUsage}}
     <div class="activity-stack">
@@ -167,15 +136,13 @@
           <span class="badge tone-neutral">{{money .CostMicroCents .Currency}}</span>
         </div>
         <p class="panel-copy"><span class="mono">{{.RequestID}}</span></p>
-        <span class="meta">{{.ProviderID}} · {{orDash .APIKeyID}} · {{.InputTokens}} / {{.OutputTokens}} 令牌 · {{timefmt .CreatedAt}}</span>
+        <span class="meta">{{.ProviderID}} · {{orDash .APIKeyID}} · {{.InputTokens}} / {{.OutputTokens}} · {{timefmt .CreatedAt}}</span>
       </article>
       {{end}}
     </div>
     {{else}}
-    <div class="empty-state empty-state-rich">
-      <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
-      <h3>{{msg .Locale "还没有费用轨迹" "No spend trace yet"}}</h3>
-      <p>{{msg .Locale "发起一次请求后，这里会显示最近调用的成本和 token 构成。" "After the first request, the latest billed calls and token composition will show up here."}}</p>
+    <div class="empty-state">
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
   </section>
@@ -183,8 +150,7 @@
   <section class="panel">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "成本中心" "Cost centers"}}</p>
-        <h2>{{msg .Locale "提供方 / API 密钥 / 用户" "Providers / API keys / users"}}</h2>
+        <h2>{{msg .Locale "成本分布" "Cost breakdown"}}</h2>
       </div>
     </div>
     <div class="summary-columns">
@@ -200,7 +166,7 @@
           {{end}}
         </div>
         {{else}}
-        <p class="panel-copy">{{msg .Locale "还没有提供方成本。" "No provider cost yet."}}</p>
+        <p class="panel-copy muted">{{msg .Locale "暂无" "None"}}</p>
         {{end}}
       </section>
       <section class="summary-card">
@@ -215,7 +181,7 @@
           {{end}}
         </div>
         {{else}}
-        <p class="panel-copy">{{msg .Locale "还没有 API 密钥成本。" "No API key cost yet."}}</p>
+        <p class="panel-copy muted">{{msg .Locale "暂无" "None"}}</p>
         {{end}}
       </section>
       <section class="summary-card">
@@ -230,7 +196,7 @@
           {{end}}
         </div>
         {{else}}
-        <p class="panel-copy">{{msg .Locale "还没有身份消费轨迹。" "No user spend yet."}}</p>
+        <p class="panel-copy muted">{{msg .Locale "暂无" "None"}}</p>
         {{end}}
       </section>
     </div>
@@ -239,10 +205,9 @@
   <section class="panel panel-wide">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "账本表" "Ledger table"}}</p>
-        <h2>{{msg .Locale "请求与成本" "Requests and cost"}}</h2>
+        <h2>{{msg .Locale "用量账本" "Usage ledger"}}</h2>
       </div>
-      <span class="badge tone-neutral">{{len .Usage}} {{msg .Locale "行" "rows"}}</span>
+      <span class="badge tone-neutral">{{len .Usage}}</span>
     </div>
     {{if .Usage}}
     <div class="table-shell">
@@ -268,7 +233,7 @@
             <td>{{.ModelAlias}}<span class="meta">{{.ProviderID}}</span></td>
             <td>{{protocolLabel .Protocol}}</td>
             <td><span class="badge tone-neutral">{{.StatusCode}}</span></td>
-            <td>{{.InputTokens}} / {{.OutputTokens}}<span class="meta">总计 {{.TotalTokens}}</span></td>
+            <td>{{.InputTokens}} / {{.OutputTokens}}<span class="meta">{{.TotalTokens}}</span></td>
             <td>{{money .CostMicroCents .Currency}}</td>
             <td>{{.LatencyMS}}ms</td>
             <td>
@@ -281,10 +246,8 @@
       </table>
     </div>
     {{else}}
-    <div class="empty-state empty-state-rich">
-      <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
-      <h3>{{msg .Locale "还没有用量账本" "No usage ledger yet"}}</h3>
-      <p>{{msg .Locale "先通过网关发起一次模型调用，这里就会开始展示用量和成本记录。" "Send a model request through the gateway and this table will begin to fill with usage and cost data."}}</p>
+    <div class="empty-state">
+      <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
     </div>
     {{end}}
   </section>

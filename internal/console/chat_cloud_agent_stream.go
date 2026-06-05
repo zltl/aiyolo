@@ -10,6 +10,7 @@ import (
 
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
+	workerops "github.com/zltl/aiyolo/internal/workers"
 )
 
 const consoleChatStreamResumePath = "/console/chat/stream/resume"
@@ -77,6 +78,20 @@ func (registry *consoleCloudAgentRunRegistry) get(key string) *consoleCloudAgent
 	return registry.runs[key]
 }
 
+func (registry *consoleCloudAgentRunRegistry) active(userID string, sessionID string) *consoleCloudAgentRun {
+	run := registry.get(consoleCloudAgentRunKey(userID, sessionID))
+	if run == nil {
+		return nil
+	}
+	run.mu.Lock()
+	done := run.done
+	run.mu.Unlock()
+	if done {
+		return nil
+	}
+	return run
+}
+
 func (registry *consoleCloudAgentRunRegistry) delete(key string, run *consoleCloudAgentRun) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
@@ -92,6 +107,7 @@ func (run *consoleCloudAgentRun) start() {
 func (run *consoleCloudAgentRun) execute() {
 	defer run.registry.delete(run.key, run)
 	execution, executionErr := run.handler.runCloudAgentChat(context.Background(), run.worker, run.sshKey, run.account, run.cloudSession, consoleCloudAgentChatRequest{
+		SessionID:                    run.sessionID,
 		PublicName:                   run.request.PublicName,
 		History:                      cloneConsoleChatMessages(run.request.History),
 		UserInput:                    run.request.UserInput,
@@ -101,6 +117,10 @@ func (run *consoleCloudAgentRun) execute() {
 		Stream:                       true,
 		OnDelta: func(delta string) error {
 			run.appendDelta(delta)
+			return nil
+		},
+		OnReasoning: func(reasoning string) error {
+			run.appendReasoning(reasoning)
 			return nil
 		},
 	})
@@ -117,6 +137,17 @@ func (run *consoleCloudAgentRun) appendDelta(delta string) {
 	run.mu.Unlock()
 	run.persistStreamingProgress()
 	run.broadcast(consoleChatStreamEvent{Type: "delta", Delta: delta})
+}
+
+func (run *consoleCloudAgentRun) appendReasoning(reasoning string) {
+	if reasoning == "" {
+		return
+	}
+	run.mu.Lock()
+	run.reasoning += reasoning
+	run.mu.Unlock()
+	run.persistStreamingProgress()
+	run.broadcast(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning})
 }
 
 func (run *consoleCloudAgentRun) persistStreamingStart() error {
@@ -312,11 +343,22 @@ func (handler *Handler) streamConsoleCloudAgentRun(w http.ResponseWriter, r *htt
 		run = handler.cloudAgentRuns.get(consoleCloudAgentRunKey(userID, sessionID))
 	}
 	if run == nil {
-		if event, ok, err := handler.consoleCloudAgentStoredResumeEvent(r.Context(), locale, userID, sessionID); err != nil {
+		events, err := handler.consoleCloudAgentStoredResumeEvents(r.Context(), locale, userID, sessionID)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
-		} else if ok {
-			_ = streamWriter.Write(event)
+		}
+		pendingReconnect := false
+		for _, event := range events {
+			if event.Type == "reconnect" {
+				pendingReconnect = true
+			}
+			if writeErr := streamWriter.Write(event); writeErr != nil {
+				return
+			}
+		}
+		if pendingReconnect {
+			handler.streamConsoleCloudAgentASSJobResume(r, streamWriter, sessionID, locale, userID)
 		}
 		return
 	}
@@ -354,31 +396,46 @@ func (handler *Handler) streamConsoleCloudAgentRun(w http.ResponseWriter, r *htt
 	}
 }
 
-func (handler *Handler) consoleCloudAgentStoredResumeEvent(ctx context.Context, locale string, userID string, sessionID string) (consoleChatStreamEvent, bool, error) {
+func (handler *Handler) consoleCloudAgentStoredResumeEvents(ctx context.Context, locale string, userID string, sessionID string) ([]consoleChatStreamEvent, error) {
 	record, err := handler.store.GetConsoleChatSession(ctx, userID, sessionID)
 	if err != nil {
 		if err == storage.ErrNotFound {
-			return consoleChatStreamEvent{}, false, nil
+			return nil, nil
 		}
-		return consoleChatStreamEvent{}, false, err
+		return nil, err
 	}
 	messages := decodeConsoleChatSessionMessages(locale, record.MessagesJSON, handler.cfg.ChatAttachments)
 	message := consoleChatLastAssistantStreamMessage(messages)
 	switch strings.TrimSpace(record.Status) {
 	case consoleChatSessionStatusCompleted:
-		return consoleChatStreamEvent{Type: "done", Message: message}, true, nil
+		return []consoleChatStreamEvent{{Type: "done", Message: message}}, nil
 	case consoleChatSessionStatusInterrupted, consoleChatSessionStatusFailed:
 		errorText := strings.TrimSpace(record.LastError)
 		if errorText != "" {
 			errorText = fmt.Sprintf(consoleText(locale, "对话失败：%s", "Chat failed: %s"), errorText)
 		}
-		return consoleChatStreamEvent{Type: "error", Error: errorText, Message: message}, true, nil
+		return []consoleChatStreamEvent{{Type: "error", Error: errorText, Message: message}}, nil
 	case consoleChatSessionStatusStreaming:
+		reconnectMessage := consoleText(locale,
+			"服务已重启，后台任务继续运行，正在重连…",
+			"Server restarted; background task still running, reconnecting...",
+		)
+		events := make([]consoleChatStreamEvent, 0, 2)
 		if message != nil {
-			return consoleChatStreamEvent{Type: "sync", Message: message}, true, nil
+			events = append(events, consoleChatStreamEvent{
+				Type:    "sync",
+				Message: message,
+			})
 		}
+		events = append(events, consoleChatStreamEvent{
+			Type:    "reconnect",
+			Error:   reconnectMessage,
+			Message: message,
+		})
+		return events, nil
+	default:
+		return nil, nil
 	}
-	return consoleChatStreamEvent{}, false, nil
 }
 
 func consoleChatLastAssistantStreamMessage(messages []consoleChatMessageView) *consoleChatAPIMessage {
@@ -401,4 +458,142 @@ func consoleChatLastAssistantStreamMessage(messages []consoleChatMessageView) *c
 
 func (handler *Handler) resumeCloudAgentChatStream(w http.ResponseWriter, r *http.Request) {
 	handler.streamConsoleCloudAgentRun(w, r, r.URL.Query().Get("session"), nil, nil)
+}
+
+func (handler *Handler) hasActiveConsoleCloudAgentRun(userID string, sessionID string) bool {
+	if handler == nil || handler.cloudAgentRuns == nil {
+		return false
+	}
+	return handler.cloudAgentRuns.active(userID, sessionID) != nil
+}
+
+func (handler *Handler) streamConsoleCloudAgentASSJobResume(r *http.Request, streamWriter *consoleChatEventStreamWriter, sessionID, locale, userID string) {
+	worker, key, account, cloudSession, err := handler.resolveConsoleChatCloudAgentTarget(r.Context(), r, sessionID)
+	if err != nil {
+		handler.finishConsoleCloudAgentLostResume(r, streamWriter, sessionID, locale, userID, err.Error())
+		return
+	}
+	jobInfo, err := workerops.GetCloudAgentASSJob(r.Context(), worker, key, account, cloudSession, sessionID)
+	if !workerops.CloudAgentASSJobResumable(jobInfo, err) {
+		detail := consoleText(locale,
+			"Cloud Agent 后台任务已结束或丢失，无法继续重连。",
+			"The cloud agent background task ended or was lost; unable to reconnect.",
+		)
+		if err != nil && !workerops.CloudAgentASSJobNotFound(err) {
+			detail = strings.TrimSpace(err.Error())
+		}
+		handler.finishConsoleCloudAgentLostResume(r, streamWriter, sessionID, locale, userID, detail)
+		return
+	}
+	record, err := handler.store.GetConsoleChatSession(r.Context(), userID, sessionID)
+	if err != nil {
+		handler.finishConsoleCloudAgentLostResume(r, streamWriter, sessionID, locale, userID, err.Error())
+		return
+	}
+	parser := &consoleCloudAgentStreamParser{}
+	content := strings.Builder{}
+	onDelta := func(delta string) error {
+		content.WriteString(delta)
+		return streamWriter.Write(consoleChatStreamEvent{Type: "delta", Delta: delta})
+	}
+	handlers := consoleCloudAgentStreamHandlers{
+		OnDelta: onDelta,
+		OnReasoning: func(reasoning string) error {
+			return streamWriter.Write(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning})
+		},
+	}
+	streamErr := workerops.StreamCloudAgentASSJobLive(r.Context(), worker, key, account, cloudSession, sessionID, func(event workerops.CloudAgentASSJobStreamEvent) error {
+		switch event.Type {
+		case "sync", "delta":
+			if event.Delta == "" {
+				return nil
+			}
+			return parser.consumeChunk([]byte(event.Delta), handlers)
+		case "error":
+			if detail := strings.TrimSpace(event.Error); detail != "" {
+				return fmt.Errorf("%s", detail)
+			}
+		}
+		return nil
+	})
+	_ = parser.finish(handlers)
+	result := consoleChatResultView{
+		PublicName: firstNonEmpty(strings.TrimSpace(record.PublicName), strings.TrimSpace(account.ModelPublicName)),
+		ProviderID: "cloud-agent:" + strings.TrimSpace(worker.ID),
+		ProviderName: "Codex · " + strings.TrimSpace(worker.ID),
+		UpstreamModel: firstNonEmpty(strings.TrimSpace(record.PublicName), strings.TrimSpace(account.ModelPublicName)),
+		Output: parser.resultText(),
+		Reasoning: parser.reasoningText(),
+		ResponseID: firstNonEmpty(parser.sessionID, strings.TrimSpace(record.LastResponseID)),
+		FinishReason: parser.finishReason,
+		DurationMS: parser.durationMS,
+		TotalTokens: parser.totalTokens,
+	}
+	if result.Output == "" {
+		result.Output = strings.TrimSpace(content.String())
+	}
+	messages := decodeConsoleChatSessionMessages(locale, record.MessagesJSON, handler.cfg.ChatAttachments)
+	if streamErr != nil {
+		failureDetail := strings.TrimSpace(streamErr.Error())
+		if failureDetail == "" {
+			failureDetail = consoleText(locale, "Cloud Agent 执行失败。", "Cloud agent execution failed.")
+		}
+		messages = consoleChatAppendResultMessage(locale, messages, result)
+		if _, persistErr := handler.persistConsoleChatSessionForUser(r.Context(), locale, userID, sessionID, record.PublicName, record.SystemPrompt, record.Draft, decodeConsoleChatSessionAttachments(record.DraftAttachmentsJSON, handler.cfg.ChatAttachments), messages, consoleChatSessionStatusForError(result), record.LastRequestID, result.ResponseID, failureDetail); persistErr != nil {
+			log.Printf("console cloud agent ass job resume failure persist failed session_id=%s err=%v", sessionID, persistErr)
+		}
+		_ = streamWriter.Write(consoleChatStreamEvent{
+			Type:    "error",
+			Error:   fmt.Sprintf(consoleText(locale, "对话失败：%s", "Chat failed: %s"), failureDetail),
+			Message: consoleChatStreamMessage(locale, result),
+			Result:  consoleChatStreamResult(locale, result),
+		})
+		return
+	}
+	messages = append(cloneConsoleChatMessages(messages), buildConsoleChatMessageWithReasoning(locale, "assistant", result.Output, result.Reasoning))
+	if _, persistErr := handler.persistConsoleChatSessionForUser(r.Context(), locale, userID, sessionID, record.PublicName, record.SystemPrompt, record.Draft, decodeConsoleChatSessionAttachments(record.DraftAttachmentsJSON, handler.cfg.ChatAttachments), messages, consoleChatSessionStatusCompleted, record.LastRequestID, result.ResponseID, ""); persistErr != nil {
+		log.Printf("console cloud agent ass job resume completion persist failed session_id=%s err=%v", sessionID, persistErr)
+	}
+	_ = streamWriter.Write(consoleChatStreamEvent{
+		Type:    "done",
+		Message: consoleChatStreamMessage(locale, result),
+		Result:  consoleChatStreamResult(locale, result),
+	})
+}
+
+func (handler *Handler) finishConsoleCloudAgentLostResume(r *http.Request, streamWriter *consoleChatEventStreamWriter, sessionID, locale, userID, detail string) {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		detail = consoleText(locale, "Cloud Agent 后台任务已结束或丢失，无法继续重连。", "The cloud agent background task ended or was lost; unable to reconnect.")
+	}
+	record, err := handler.store.GetConsoleChatSession(r.Context(), userID, sessionID)
+	var message *consoleChatAPIMessage
+	if err == nil {
+		messages := decodeConsoleChatSessionMessages(locale, record.MessagesJSON, handler.cfg.ChatAttachments)
+		message = consoleChatLastAssistantStreamMessage(messages)
+		if _, persistErr := handler.persistConsoleChatSessionForUser(
+			r.Context(),
+			locale,
+			userID,
+			sessionID,
+			record.PublicName,
+			record.SystemPrompt,
+			record.Draft,
+			decodeConsoleChatSessionAttachments(record.DraftAttachmentsJSON, handler.cfg.ChatAttachments),
+			messages,
+			consoleChatSessionStatusInterrupted,
+			record.LastRequestID,
+			record.LastResponseID,
+			detail,
+		); persistErr != nil {
+			log.Printf("console cloud agent lost resume persist failed session_id=%s err=%v", sessionID, persistErr)
+		}
+	} else if err != storage.ErrNotFound {
+		log.Printf("console cloud agent lost resume session lookup failed session_id=%s err=%v", sessionID, err)
+	}
+	_ = streamWriter.Write(consoleChatStreamEvent{
+		Type:    "error",
+		Error:   fmt.Sprintf(consoleText(locale, "对话失败：%s", "Chat failed: %s"), detail),
+		Message: message,
+	})
 }

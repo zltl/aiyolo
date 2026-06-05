@@ -761,6 +761,7 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		execution, executionErr = handler.runCloudAgentChat(r.Context(), worker, key, account, cloudSession, consoleCloudAgentChatRequest{
+			SessionID:                    state.Form.ClientSessionID,
 			PublicName:                   state.Form.PublicName,
 			PreviousResponseID:           state.LastResponseID,
 			History:                      history,

@@ -63,6 +63,8 @@ type Server struct {
 	maxUploadBytes    int64
 	maxTreeEntries    int
 	maxExecOutputByte int64
+	shellSessions     *shellSessionRegistry
+	jobs              *jobRegistry
 }
 
 type envelope struct {
@@ -148,6 +150,8 @@ func NewServer(cfg Config) (*Server, error) {
 		maxUploadBytes:    maxUploadBytes,
 		maxTreeEntries:    maxTreeEntries,
 		maxExecOutputByte: maxExecOutputBytes,
+		shellSessions:     newShellSessionRegistry(),
+		jobs:              newJobRegistry(),
 	}, nil
 }
 
@@ -164,6 +168,10 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/fs/rename", server.handleRenamePath)
 	mux.HandleFunc("DELETE /v1/fs/path", server.handleDeletePath)
 	mux.HandleFunc("POST /v1/shell/exec", server.handleShellExec)
+	mux.HandleFunc("/v1/shell/sessions", server.handleShellSessionsCollection)
+	mux.HandleFunc("/v1/shell/sessions/", server.handleShellSessionItem)
+	mux.HandleFunc("/v1/jobs", server.handleJobsCollection)
+	mux.HandleFunc("/v1/jobs/", server.handleJobItem)
 	return mux
 }
 

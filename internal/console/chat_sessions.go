@@ -562,6 +562,12 @@ func (handler *Handler) saveChatSession(w http.ResponseWriter, r *http.Request) 
 	generatedTitle := handler.generateConsoleChatSessionTitle(r.Context(), r, currentTitle, payload.CustomTitle, session.PublicName, payload.Draft, payload.DraftAttachments, messages)
 	session.Title = consoleChatResolvedSessionTitle(locale, currentTitle, payload.CustomTitle, session.PublicName, messages, payload.Draft, payload.DraftAttachments, generatedTitle)
 	session.Status = firstNonEmpty(strings.TrimSpace(payload.Status), session.Status, consoleChatSessionStatusReady)
+	if handler.hasActiveConsoleCloudAgentRun(userID, payload.ID) {
+		switch strings.TrimSpace(session.Status) {
+		case consoleChatSessionStatusInterrupted, consoleChatSessionStatusFailed, consoleChatSessionStatusReady, "":
+			session.Status = consoleChatSessionStatusStreaming
+		}
+	}
 	if session.CreatedAt.IsZero() {
 		session.CreatedAt = now
 	}
@@ -572,6 +578,9 @@ func (handler *Handler) saveChatSession(w http.ResponseWriter, r *http.Request) 
 		session.UpdatedAt = now
 	}
 	session.LastError = firstNonEmpty(payload.LastError, session.LastError)
+	if session.Status == consoleChatSessionStatusStreaming && handler.hasActiveConsoleCloudAgentRun(userID, payload.ID) {
+		session.LastError = ""
+	}
 	session.MessageCount = len(messages)
 	if messageActivity && session.MessageCount > 0 {
 		lastMessageAt := now

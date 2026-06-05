@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.DisplayTitle}} - AIYolo Shell</title>
   <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260527h">
-  <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
+  <link rel="stylesheet" href="/console/static/vendor/xterm.css?v=vendor-20260606a">
 </head>
 <body class="chat-terminal-body">
   <div class="chat-terminal-page" data-chat-shell-page {{if .ChatShell.SocketURL}}data-chat-shell-socket-url="{{.ChatShell.SocketURL}}"{{end}}>
@@ -55,8 +55,8 @@
     {{end}}
   </div>
 
-  <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
-  <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+  <script src="/console/static/vendor/xterm.js?v=vendor-20260606a"></script>
+  <script src="/console/static/vendor/addon-fit.js?v=vendor-20260606a"></script>
   <script src="/console/static/chat-shell.js?v=chat-shell-20260531b"></script>
 </body>
 </html>

@@ -17,8 +17,7 @@
     <section id="identity-center" class="panel panel-wide">
       <div class="section-head">
         <div>
-          <p class="section-kicker">{{msg .Locale "身份中心" "Identity center"}}</p>
-          <h2>{{msg .Locale "后台边界与已观察到的使用者" "Admin boundaries and observed users"}}</h2>
+          <h2>{{msg .Locale "身份" "Identity"}}</h2>
         </div>
         {{if .LocalPasswordEnabled}}<span class="badge tone-good">{{msg .Locale "本地密码开启" "Local password on"}}</span>{{else}}<span class="badge tone-warn">{{msg .Locale "本地密码关闭" "Local password off"}}</span>{{end}}
       </div>
@@ -26,14 +25,13 @@
         <article class="summary-card">
           <p class="section-kicker">{{msg .Locale "管理员邮箱" "Admin email"}}</p>
           <strong class="summary-value mono">{{.AdminEmail}}</strong>
-          <p class="panel-copy">{{msg .Locale "本地密码入口的保底管理员身份。" "Fallback administrator identity for local password sign-in."}}</p>
         </article>
         <article class="summary-card">
           <p class="section-kicker">{{msg .Locale "允许邮箱" "Allowed emails"}}</p>
           {{if .UserDirectory.Settings.AllowedEmails}}
           <div class="chip-row">{{range .UserDirectory.Settings.AllowedEmails}}<span class="badge tone-neutral">{{.}}</span>{{end}}</div>
           {{else}}
-          <p class="panel-copy">{{msg .Locale "当前没有显式邮箱 allowlist。" "No explicit email allowlist is configured."}}</p>
+          <p class="panel-copy muted">{{msg .Locale "未配置" "Not configured"}}</p>
           {{end}}
         </article>
         <article class="summary-card">
@@ -41,16 +39,14 @@
           {{if .UserDirectory.Settings.AllowedDomains}}
           <div class="chip-row">{{range .UserDirectory.Settings.AllowedDomains}}<span class="badge tone-neutral">{{.}}</span>{{end}}</div>
           {{else}}
-          <p class="panel-copy">{{msg .Locale "当前没有域名 allowlist。" "No domain allowlist is configured."}}</p>
+          <p class="panel-copy muted">{{msg .Locale "未配置" "Not configured"}}</p>
           {{end}}
         </article>
       </div>
       <div class="section-head sub-section-head">
         <div>
-          <p class="section-kicker">{{msg .Locale "已观察到身份" "Observed identities"}}</p>
-          <h2>{{msg .Locale "从仓储中看到的用户标识" "User IDs observed in storage"}}</h2>
+          <h2>{{msg .Locale "用户" "Users"}}</h2>
         </div>
-        <span class="badge tone-neutral">{{msg .Locale "用量与密钥" "Usage + Keys"}}</span>
       </div>
       {{if .UserDirectory.Summaries}}
       <div class="table-shell">
@@ -80,10 +76,8 @@
         </table>
       </div>
       {{else}}
-      <div class="empty-state empty-state-rich">
-        <div class="empty-visual" aria-hidden="true"><span></span><span></span><span></span></div>
-        <h3>{{msg .Locale "还没有观察到身份" "No observed identities yet"}}</h3>
-        <p>{{msg .Locale "创建 API 密钥或开始产生用量之后，这里会展示按用户标识聚合的目录视图。" "Once API keys are created or usage starts flowing, a directory view of user identities will appear here."}}</p>
+      <div class="empty-state">
+        <p>{{msg .Locale "暂无数据" "No data yet"}}</p>
       </div>
       {{end}}
     </section>
@@ -94,28 +88,25 @@
       <section class="panel">
         <div class="section-head">
           <div>
-            <p class="section-kicker">{{msg .Locale "访问策略" "Access policy"}}</p>
-            <h2>{{msg .Locale "允许谁进入后台" "Who can enter the console"}}</h2>
+            <h2>{{msg .Locale "访问策略" "Access policy"}}</h2>
           </div>
-          <span class="badge tone-neutral">{{msg .Locale "白名单优先" "Allowlist first"}}</span>
         </div>
         <label class="toggle-row">
           <input type="checkbox" name="local_password_enabled" {{if .LocalPasswordEnabled}}checked{{end}}>
           <span>
             <strong>{{msg .Locale "保留本地管理员邮箱密码登录" "Keep local admin email/password sign-in"}}</strong>
-            <span class="field-help">{{msg .Locale "建议至少保留一个不依赖第三方平台的保底入口。" "Keep at least one fallback entry that does not depend on a third-party platform."}}</span>
           </span>
         </label>
         <div class="form-grid">
           <label class="field span-2">
             <span class="field-label">{{msg .Locale "允许登录邮箱" "Allowed emails"}}</span>
             <textarea name="allowed_emails">{{.AllowedEmailsText}}</textarea>
-            <span class="field-help">{{msg .Locale "一行一个邮箱；OAuth 登录成功后只有命中白名单的账号能进入后台。" "One email per line. After OAuth sign-in, only accounts in this list can access the console."}}</span>
+            <span class="field-help">{{msg .Locale "一行一个" "One per line"}}</span>
           </label>
           <label class="field span-2">
             <span class="field-label">{{msg .Locale "允许登录域名" "Allowed domains"}}</span>
             <textarea name="allowed_domains">{{.AllowedDomainsText}}</textarea>
-            <span class="field-help">{{msg .Locale "一行一个域名，匹配用户邮箱后缀。" "One domain per line, matched against the email suffix."}}</span>
+            <span class="field-help">{{msg .Locale "一行一个" "One per line"}}</span>
           </label>
         </div>
       </section>
@@ -123,44 +114,25 @@
       <section class="panel">
         <div class="section-head">
           <div>
-            <p class="section-kicker">{{msg .Locale "计费换算" "Billing conversion"}}</p>
-            <h2>{{msg .Locale "美元转人民币汇率" "USD to CNY exchange rate"}}</h2>
+            <h2>{{msg .Locale "汇率" "Exchange rate"}}</h2>
           </div>
-          <span class="badge tone-neutral">{{msg .Locale "兼容模型导入" "Compatible imports"}}</span>
         </div>
         <div class="form-grid">
           <label class="field span-2">
             <span class="field-label">{{msg .Locale "1 美元 = ? 人民币" "1 USD = ? CNY"}}</span>
             <input name="usd_to_cny_exchange_rate" type="number" min="0.0001" step="0.0001" value="{{.USDCNYExchangeRate}}">
-            <span class="field-help">{{msg .Locale "DeepSeek 官方人民币费率不走这里；这个值只用于把 OpenRouter 等兼容接口返回的美元价格换算成人民币。改完后重新同步模型，新的价格规则才会按新汇率写入。" "DeepSeek official RMB pricing does not use this field. It is only used to convert USD pricing returned by compatible APIs such as OpenRouter into CNY. Re-sync models after changing it so new pricing rules are written with the new rate."}}</span>
+            <span class="field-help">{{msg .Locale "用于美元定价换算" "For USD pricing conversion"}}</span>
           </label>
         </div>
       </section>
 
-      <section class="panel">
-        <div class="section-head">
-          <div>
-            <p class="section-kicker">{{msg .Locale "保存前检查" "Guardrails"}}</p>
-            <h2>{{msg .Locale "保存前要满足的约束" "Checks before saving"}}</h2>
-          </div>
-        </div>
-        <ul class="note-list">
-          <li>{{msg .Locale "至少保留一种可用登录方式：本地密码登录，或一个已经填好客户端 ID / 客户端密钥的第三方入口。" "Keep at least one working sign-in method: local password or a configured third-party provider."}}</li>
-          <li>{{msg .Locale "至少配置一个允许登录邮箱或允许登录域名，避免第三方账号无约束进入后台。" "Configure at least one allowed email or domain before opening the console."}}</li>
-          <li>{{msg .Locale "回调地址要与第三方平台登记的 redirect URI 完全一致，避免授权成功后回不来。" "Ensure the callback URL matches the registered redirect URI exactly."}}</li>
-        </ul>
-        <div class="callout muted">{{msg .Locale "控制台当前统一使用中文界面，不再提供语言切换。" "Console language follows the browser by default, and can also be switched manually from the sidebar."}}</div>
-        <button class="primary-button" type="submit">{{msg .Locale "保存认证设置" "Save authentication settings"}}</button>
-      </section>
     </div>
 
     <section class="panel">
       <div class="section-head">
         <div>
-          <p class="section-kicker">{{msg .Locale "第三方登录入口" "OAuth providers"}}</p>
-          <h2>{{msg .Locale "第三方登录配置" "Third-party sign-in providers"}}</h2>
+          <h2>{{msg .Locale "OAuth" "OAuth"}}</h2>
         </div>
-        <span class="badge tone-neutral">{{msg .Locale "内置模板" "Built-in templates"}}</span>
       </div>
       <div class="provider-grid collection-grid">
         {{range .AuthProviders}}
@@ -169,7 +141,6 @@
             <strong>{{.Name}}</strong>
             {{if .Ready}}<span class="badge tone-good">{{msg $.Locale "就绪" "Ready"}}</span>{{else}}<span class="badge tone-warn">{{msg $.Locale "待配置" "Needs setup"}}</span>{{end}}
           </div>
-          <p class="panel-copy">{{if .Ready}}{{msg $.Locale "已具备授权所需字段。" "All required fields for authorization are present."}}{{else}}{{msg $.Locale "还缺客户端 ID、客户端密钥或授权端点。" "Client id, client secret, or auth endpoints are still missing."}}{{end}}</p>
           <div class="callout">
             <p class="section-kicker">回调地址</p>
             <div class="mono">{{.CallbackURL}}</div>
@@ -179,7 +150,6 @@
             <input type="checkbox" name="{{.FormPrefix}}enabled" {{if .Enabled}}checked{{end}}>
             <span>
               <strong>{{msg $.Locale "启用" "Enable"}} {{.Name}}</strong>
-              <span class="field-help">{{if .Ready}}{{msg $.Locale "当前字段已足够完成授权流。" "Current fields are enough to complete the authorization flow."}}{{else}}{{msg $.Locale "先补齐关键字段再启用。" "Finish the critical fields before enabling this provider."}}{{end}}</span>
             </span>
           </label>
           <div class="form-grid">
@@ -246,7 +216,6 @@
             <label class="field span-2">
               <span class="field-label">{{msg $.Locale "用户信息令牌传递" "UserInfo token style"}}</span>
               <input name="{{.FormPrefix}}userinfo_token_style" value="{{.UserInfoTokenStyle}}" list="userinfo-token-style-options">
-              <span class="field-help">{{msg $.Locale "支持 bearer、query 或 header:Header-Name 形式。" "Supports bearer, query, or header:Header-Name formats."}}</span>
             </label>
             <label class="field">
               <span class="field-label">{{msg $.Locale "用户唯一标识路径" "User subject path"}}</span>
@@ -271,23 +240,23 @@
             <label class="field span-2">
               <span class="field-label">{{msg $.Locale "授权附加参数" "Extra authorization params"}}</span>
               <textarea name="{{.FormPrefix}}auth_params">{{.AuthParamsText}}</textarea>
-              <span class="field-help">{{msg $.Locale "一行一个 key=value，会原样附加到授权请求。" "Use one key=value per line; entries are appended to the authorization request as-is."}}</span>
+              <span class="field-help">{{msg $.Locale "一行一个 key=value" "One key=value per line"}}</span>
             </label>
             <label class="field span-2">
               <span class="field-label">{{msg $.Locale "令牌附加参数" "Extra token params"}}</span>
               <textarea name="{{.FormPrefix}}token_params">{{.TokenParamsText}}</textarea>
-              <span class="field-help">{{msg $.Locale "一行一个 key=value，会原样附加到令牌请求。" "Use one key=value per line; entries are appended to the token request as-is."}}</span>
+              <span class="field-help">{{msg $.Locale "一行一个 key=value" "One key=value per line"}}</span>
             </label>
             <label class="field span-2">
               <span class="field-label">{{msg $.Locale "用户信息附加参数" "Extra UserInfo params"}}</span>
               <textarea name="{{.FormPrefix}}userinfo_params">{{.UserInfoParamsText}}</textarea>
-              <span class="field-help">{{msg $.Locale "一行一个 key=value，会附加到用户信息请求。" "Use one key=value per line; entries are appended to the UserInfo request."}}</span>
+              <span class="field-help">{{msg $.Locale "一行一个 key=value" "One key=value per line"}}</span>
             </label>
           </div>
         </section>
         {{end}}
       </div>
-      <button class="primary-button" type="submit">{{msg .Locale "保存认证设置" "Save authentication settings"}}</button>
+      <button class="primary-button" type="submit">{{msg .Locale "保存" "Save"}}</button>
     </section>
   </form>
   <datalist id="userinfo-token-style-options">

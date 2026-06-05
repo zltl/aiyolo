@@ -25,7 +25,6 @@
               </svg>
             </span>
             <div>
-              <p class="section-kicker">{{msg .Locale "AI API 网关控制台" "AI API Gateway Console"}}</p>
               <p class="brand-mark">AIYolo</p>
             </div>
           </div>
@@ -60,11 +59,6 @@
           {{end}}
         </nav>
         <div class="rail-card rail-exit">
-          <div>
-            <p class="section-kicker">{{msg .Locale "会话" "Session"}}</p>
-            <h2>{{msg .Locale "退出控制台" "Leave Console"}}</h2>
-            <p class="panel-copy">{{msg .Locale "结束当前后台会话，返回登录页。" "End the current console session and return to the sign-in page."}}</p>
-          </div>
           <form class="logout-form" method="post" action="/console/logout">
             <button class="ghost-button logout-button" type="submit">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h4v16h-4"></path><path d="M10 12h9"></path><path d="m13 9 3 3-3 3"></path><path d="M5 4h5"></path><path d="M5 20h5"></path></svg>
@@ -76,7 +70,6 @@
       <main class="main">
         <header class="page-hero">
           <div class="hero-copy">
-            <p class="section-kicker">{{.PageEyebrow}}</p>
             <h1>{{.DisplayTitle}}</h1>
           </div>
         </header>

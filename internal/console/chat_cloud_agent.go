@@ -14,6 +14,7 @@ import (
 )
 
 type consoleCloudAgentChatRequest struct {
+	SessionID                    string
 	PublicName                   string
 	PreviousResponseID           string
 	History                      []consoleChatMessageView
@@ -23,12 +24,20 @@ type consoleCloudAgentChatRequest struct {
 	ShellCurrentWorkingDirectory string
 	Stream                       bool
 	OnDelta                      func(string) error
+	OnReasoning                  func(string) error
+}
+
+type consoleCloudAgentStreamHandlers struct {
+	OnDelta     func(string) error
+	OnReasoning func(string) error
 }
 
 type consoleCloudAgentStreamParser struct {
-	pending      strings.Builder
-	output       strings.Builder
-	finalOutput  string
+	pending        strings.Builder
+	output         strings.Builder
+	reasoning      strings.Builder
+	finalOutput    string
+	finalReasoning string
 	sessionID    string
 	finishReason string
 	durationMS   int64
@@ -42,7 +51,12 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 	publicName := firstNonEmpty(strings.TrimSpace(request.PublicName), strings.TrimSpace(account.ModelPublicName))
 	threadID := consoleCloudAgentCodexThreadID(request.PreviousResponseID)
 	parser := &consoleCloudAgentStreamParser{}
+	handlers := consoleCloudAgentStreamHandlers{
+		OnDelta:     request.OnDelta,
+		OnReasoning: request.OnReasoning,
+	}
 	output, err := workerops.RunCloudAgentCodex(ctx, worker, key, account, cloudSession, workerops.CloudAgentCodexOptions{
+		JobID:            strings.TrimSpace(request.SessionID),
 		ThreadID:         threadID,
 		Prompt:           consoleCloudAgentCurrentPrompt(request.UserInput, request.Attachments),
 		InitialPrompt:    consoleCloudAgentInitialPrompt(request.History, request.UserInput, request.Attachments),
@@ -53,10 +67,10 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 		if !request.Stream {
 			return nil
 		}
-		return parser.consumeChunk(chunk, request.OnDelta)
+		return parser.consumeChunk(chunk, handlers)
 	})
 	if request.Stream {
-		if consumeErr := parser.finish(request.OnDelta); consumeErr != nil && err == nil {
+		if consumeErr := parser.finish(handlers); consumeErr != nil && err == nil {
 			err = consumeErr
 		}
 	} else {
@@ -71,6 +85,7 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 			ProviderName:  "Codex · " + strings.TrimSpace(worker.ID),
 			UpstreamModel: firstNonEmpty(publicName, strings.TrimSpace(account.ModelPublicName)),
 			Output:        parser.resultText(),
+			Reasoning:     parser.reasoningText(),
 			ResponseID:    firstNonEmpty(parser.sessionID, threadID),
 			FinishReason:  parser.finishReason,
 			DurationMS:    parser.durationMS,
@@ -223,7 +238,7 @@ func consoleCloudAgentMessageBody(content string, attachments []consoleChatAttac
 	}
 }
 
-func (parser *consoleCloudAgentStreamParser) consumeChunk(chunk []byte, onDelta func(string) error) error {
+func (parser *consoleCloudAgentStreamParser) consumeChunk(chunk []byte, handlers consoleCloudAgentStreamHandlers) error {
 	if parser == nil || len(chunk) == 0 {
 		return nil
 	}
@@ -235,7 +250,7 @@ func (parser *consoleCloudAgentStreamParser) consumeChunk(chunk []byte, onDelta 
 		return nil
 	}
 	for _, line := range lines[:len(lines)-1] {
-		if err := parser.consumeLine(line, onDelta); err != nil {
+		if err := parser.consumeLine(line, handlers); err != nil {
 			return err
 		}
 	}
@@ -243,7 +258,7 @@ func (parser *consoleCloudAgentStreamParser) consumeChunk(chunk []byte, onDelta 
 	return nil
 }
 
-func (parser *consoleCloudAgentStreamParser) finish(onDelta func(string) error) error {
+func (parser *consoleCloudAgentStreamParser) finish(handlers consoleCloudAgentStreamHandlers) error {
 	if parser == nil {
 		return nil
 	}
@@ -252,7 +267,7 @@ func (parser *consoleCloudAgentStreamParser) finish(onDelta func(string) error) 
 	}
 	line := parser.pending.String()
 	parser.pending.Reset()
-	return parser.consumeLine(line, onDelta)
+	return parser.consumeLine(line, handlers)
 }
 
 func (parser *consoleCloudAgentStreamParser) consumeJSONResult(raw string) error {
@@ -264,14 +279,14 @@ func (parser *consoleCloudAgentStreamParser) consumeJSONResult(raw string) error
 		return nil
 	}
 	for _, line := range strings.Split(raw, "\n") {
-		if err := parser.consumeLine(line, nil); err != nil {
+		if err := parser.consumeLine(line, consoleCloudAgentStreamHandlers{}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, onDelta func(string) error) error {
+func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, handlers consoleCloudAgentStreamHandlers) error {
 	if parser == nil {
 		return nil
 	}
@@ -288,19 +303,31 @@ func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, onDelta fun
 	case "thread.started":
 		parser.captureSessionID(payload)
 	case "item.delta", "item.updated", "message.delta", "agent_message.delta", "agent_message_delta":
-		if text := codexDeltaText(payload); text != "" {
+		if text := codexReasoningDeltaText(payload); text != "" {
+			return parser.appendReasoning(text, handlers)
+		}
+		if text := codexAssistantDeltaText(payload); text != "" {
 			parser.output.WriteString(text)
-			if onDelta != nil {
-				return onDelta(text)
+			if handlers.OnDelta != nil {
+				return handlers.OnDelta(text)
 			}
 		}
-	case "item.completed":
+	case "item.completed", "item.started":
 		item, _ := payload["item"].(map[string]any)
+		if isCodexReasoningItem(item) {
+			text := codexReasoningItemText(item)
+			if strings.TrimSpace(stringValue(payload["type"])) == "item.completed" && text != "" {
+				parser.finalReasoning = text
+			}
+			return parser.appendReasoning(text, handlers)
+		}
 		if text := codexAssistantItemText(item); text != "" {
-			parser.finalOutput = text
-			if onDelta != nil && parser.output.Len() == 0 {
-				parser.output.WriteString(text)
-				return onDelta(text)
+			if strings.TrimSpace(stringValue(payload["type"])) == "item.completed" {
+				parser.finalOutput = text
+				if handlers.OnDelta != nil && parser.output.Len() == 0 {
+					parser.output.WriteString(text)
+					return handlers.OnDelta(text)
+				}
 			}
 		}
 	case "turn.completed":
@@ -314,12 +341,19 @@ func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, onDelta fun
 		event, _ := payload["event"].(map[string]any)
 		if strings.TrimSpace(stringValue(event["type"])) == "content_block_delta" {
 			delta, _ := event["delta"].(map[string]any)
-			if strings.TrimSpace(stringValue(delta["type"])) == "text_delta" {
+			deltaType := strings.TrimSpace(stringValue(delta["type"]))
+			if deltaType == "thinking_delta" || deltaType == "reasoning_delta" {
+				text := firstNonEmpty(stringValue(delta["thinking"]), stringValue(delta["reasoning"]), stringValue(delta["text"]))
+				if text != "" {
+					return parser.appendReasoning(text, handlers)
+				}
+			}
+			if deltaType == "text_delta" {
 				text := stringValue(delta["text"])
 				if text != "" {
 					parser.output.WriteString(text)
-					if onDelta != nil {
-						return onDelta(text)
+					if handlers.OnDelta != nil {
+						return handlers.OnDelta(text)
 					}
 				}
 			}
@@ -446,6 +480,50 @@ func codexTextFromValue(value any) string {
 	return ""
 }
 
+func isCodexReasoningItem(item map[string]any) bool {
+	if len(item) == 0 {
+		return false
+	}
+	itemType := strings.ToLower(strings.TrimSpace(stringValue(item["type"])))
+	return itemType == "reasoning" || itemType == "reasoning_item"
+}
+
+func codexReasoningItemText(item map[string]any) string {
+	if len(item) == 0 {
+		return ""
+	}
+	for _, key := range []string{"text", "summary", "content", "reasoning"} {
+		if text := codexTextFromValue(item[key]); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func codexReasoningDeltaText(payload map[string]any) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	if item, ok := payload["item"].(map[string]any); ok && isCodexReasoningItem(item) {
+		if text := codexReasoningItemText(item); text != "" {
+			return text
+		}
+	}
+	itemType := strings.ToLower(strings.TrimSpace(stringValue(payload["item_type"])))
+	if itemType == "reasoning" || itemType == "reasoning_item" {
+		for _, key := range []string{"delta", "text", "reasoning", "thinking"} {
+			if text := codexTextFromValue(payload[key]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func codexAssistantDeltaText(payload map[string]any) string {
+	return codexDeltaText(payload)
+}
+
 func codexErrorMessage(value any) string {
 	switch typed := value.(type) {
 	case string:
@@ -466,6 +544,17 @@ func firstNonNil(values ...any) any {
 	return nil
 }
 
+func (parser *consoleCloudAgentStreamParser) appendReasoning(text string, handlers consoleCloudAgentStreamHandlers) error {
+	if parser == nil || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	parser.reasoning.WriteString(text)
+	if handlers.OnReasoning != nil {
+		return handlers.OnReasoning(text)
+	}
+	return nil
+}
+
 func (parser *consoleCloudAgentStreamParser) resultText() string {
 	if parser == nil {
 		return ""
@@ -474,6 +563,16 @@ func (parser *consoleCloudAgentStreamParser) resultText() string {
 		return text
 	}
 	return strings.TrimSpace(parser.output.String())
+}
+
+func (parser *consoleCloudAgentStreamParser) reasoningText() string {
+	if parser == nil {
+		return ""
+	}
+	if text := strings.TrimSpace(parser.finalReasoning); text != "" {
+		return text
+	}
+	return strings.TrimSpace(parser.reasoning.String())
 }
 
 func stringValue(value any) string {

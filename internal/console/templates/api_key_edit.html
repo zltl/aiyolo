@@ -8,8 +8,7 @@
   <section class="panel">
     <div class="section-head">
       <div>
-        <p class="section-kicker">{{msg .Locale "编辑密钥" "Edit key"}}</p>
-        <h2>{{msg .Locale "编辑 API 密钥" "Edit API key"}}</h2>
+        <h2>{{msg .Locale "编辑密钥" "Edit key"}}</h2>
       </div>
       <a class="ghost-button" href="/console/api-keys">{{msg .Locale "返回列表" "Back to list"}}</a>
     </div>
@@ -33,13 +32,11 @@
       <label class="field span-2">
         <span class="field-label">{{msg .Locale "允许协议" "Allowed protocols"}}</span>
         <input name="allowed_protocols" list="api-key-edit-protocol-options" value="{{join .APIKey.AllowedProtocols ","}}">
-        <span class="field-help">{{msg .Locale "可输入逗号分隔的协议，例如 openai,anthropic。" "Enter comma-separated protocols, for example openai,anthropic."}}</span>
       </label>
 
       <label class="field span-2">
         <span class="field-label">{{msg .Locale "允许模型" "Allowed models"}}</span>
         <input name="allowed_models" list="api-key-edit-model-options" value="{{join .APIKey.AllowedModels ","}}">
-        <span class="field-help">{{msg .Locale "会基于已保存模型与当前路由做补全提示。" "Autocomplete hints are based on saved models and current route aliases."}}</span>
       </label>
 
       <label class="field">

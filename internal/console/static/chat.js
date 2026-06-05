@@ -2098,12 +2098,19 @@
     panelsHost.replaceChildren(...panels);
 
     tabsHost.replaceChildren(tabs);
+    scheduleActiveShellLayout();
   };
 
   const refreshActiveShellController = () => {
     const instance = activeShellInstance();
     instance?.controller?.refresh?.();
-    instance?.controller?.focus?.();
+  };
+
+  const scheduleActiveShellLayout = () => {
+    refreshActiveShellController();
+    window.setTimeout(() => {
+      refreshActiveShellController();
+    }, 64);
   };
 
   const setShellDockVisible = (form, visible) => {
@@ -2118,9 +2125,7 @@
       return;
     }
     applyShellHeight(form, preferredShellOpenHeight());
-    window.requestAnimationFrame(() => {
-      refreshActiveShellController();
-    });
+    scheduleActiveShellLayout();
   };
 
   const hideShellDock = (form) => {
@@ -2630,6 +2635,22 @@
   const isCloudAgentEnvironment = (value) => String(value || "").trim().startsWith("cloud-agent:");
 
   const sessionIsStreaming = (session) => String(session?.status || "").trim() === "streaming";
+
+  const sessionIsRecoverableCloudAgentStream = (session) => {
+    if (!session || !isCloudAgentEnvironment(session.environment)) {
+      return false;
+    }
+    const status = String(session?.status || "").trim();
+    if (status === "completed" || status === "failed") {
+      return false;
+    }
+    if (status === "streaming" || status === "interrupted") {
+      return true;
+    }
+    const messages = Array.isArray(session.messages) ? session.messages : [];
+    const lastMessage = messages[messages.length - 1];
+    return lastMessage?.role === "user";
+  };
 
   const sessionSortTime = (value) => {
     const timestamp = Date.parse(String(value || "").trim());
@@ -3281,9 +3302,9 @@
     }
     syncSessionURL(session);
     scrollThread(root.querySelector("[data-chat-scroll]"));
-    syncChatShellSession(form);
     emitChatState({ source: "apply-session", session });
     syncFormStreamingUI(form);
+    void bootstrapActiveSessionConnections(form, session);
   };
 
   const renderSessionList = (root, store) => {
@@ -3393,7 +3414,7 @@
       mountStreamUI(state, form);
       return;
     }
-    if (!sessionIsStreaming(session) || !isCloudAgentEnvironment(session.environment)) {
+    if (!sessionIsRecoverableCloudAgentStream(session)) {
       startQueuedTurnForSession(sessionID);
       return;
     }
@@ -3462,6 +3483,21 @@
     await runSessionStreamFetchLoop(state, form, { resumeOnly: true });
   };
 
+  const bootstrapActiveSessionConnections = async (form, session) => {
+    if (!(form instanceof HTMLFormElement) || !session) {
+      return;
+    }
+    if (isCloudAgentEnvironment(session.environment)) {
+      try {
+        await ensureChatEnvironment(form, { suppressSuccessNotice: true });
+      } catch (_error) {
+        // Keep trying shell/stream restore in case the runtime is still active.
+      }
+    }
+    syncChatShellSession(form);
+    await attachSessionStream(form, session);
+  };
+
   const activateSession = (sessionID, broadcast = true) => {
     const root = currentRoot();
     const form = currentForm();
@@ -3480,7 +3516,6 @@
     saveStore(store, broadcast);
     renderSessionList(root, store);
     applySession(root, session, routes);
-    void attachSessionStream(form, session);
   };
 
   const renameSession = (sessionID) => {
@@ -4344,6 +4379,19 @@
         finalizeInterruptedStream(String(event.error || t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished.")).trim());
         return;
       }
+      if (event.type === "reconnect") {
+        applyStreamMessage(event.message);
+        syncCurrentHistory();
+        updateStreamSessionMetadata(state, { status: "streaming", lastError: "" });
+        updateStreamAssistantUI(state, (assistantMessage) => {
+          assistantMessage.setStreamingStatus(
+            String(event.error || t("服务已重启，后台任务继续运行，正在重连…", "Server restarted; background task still running, reconnecting...")).trim(),
+            "heartbeat",
+          );
+          assistantMessage.setActions([]);
+        });
+        return;
+      }
       if (event.type === "replace") {
         if (state.streamErrored || state.preserveLocalTranscript) {
           return;
@@ -4398,7 +4446,7 @@
               headers: { Accept: "application/x-ndjson" },
             });
           const handled = await openNDJSONResponse(response);
-          if (handled === false || state.streamCompleted || state.streamErrored || state.replaced) {
+          if (handled === false || state.streamCompleted || state.streamErrored || state.streamInterrupted || state.replaced) {
             break;
           }
           if (!state.allowReconnect) {
@@ -4406,7 +4454,7 @@
           }
           await waitForReconnect();
         } catch (error) {
-          if (state.stopRequested || error?.name === "AbortError") {
+          if (state.stopRequested && error?.name === "AbortError") {
             finalizeInterruptedStream(t("已终止当前回复。", "Stopped current reply."), {
               statusText: t("已终止", "Stopped"),
               statusTone: "warning",
@@ -4414,6 +4462,15 @@
               isError: false,
             });
             return;
+          }
+          if (error?.name === "AbortError") {
+            if (state.allowReconnect) {
+              detachSessionStreamUI(state.sessionID);
+              if (hasStreamProgress()) {
+                updateStreamSessionMetadata(state, { status: "streaming", lastError: "" });
+              }
+              return;
+            }
           }
           if (state.allowReconnect && !state.streamCompleted && !state.streamErrored && !state.replaced && hasStreamProgress()) {
             await waitForReconnect();

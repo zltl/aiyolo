@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"net"
 	"net/http"
 	"strconv"
@@ -98,6 +99,7 @@ func (handler *Handler) Routes() http.Handler {
 	router.Get("/static/chat.js", handler.chatScript)
 	router.Get("/static/chat-shell.js", handler.chatShellScript)
 	router.Get("/static/chat-workspace.js", handler.chatWorkspaceScript)
+	router.Handle("/static/vendor/*", handler.vendorAssets())
 	router.Get("/locale", handler.setLocale)
 	router.Get("/login", handler.loginPage)
 	router.Post("/login", handler.login)
@@ -794,6 +796,24 @@ func (handler *Handler) chatWorkspaceScript(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = w.Write(script)
+}
+
+func (handler *Handler) vendorAssets() http.Handler {
+	vendorFS, err := fs.Sub(consoleAssets, "static/vendor")
+	if err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		})
+	}
+	return http.StripPrefix("/static/vendor/", cacheControlFileServer(vendorFS, "public, max-age=86400"))
+}
+
+func cacheControlFileServer(content fs.FS, cacheControl string) http.Handler {
+	fileServer := http.FileServer(http.FS(content))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", cacheControl)
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 func (handler *Handler) apiKeysPageData(ctx context.Context, createdKey string, notice string) (map[string]any, error) {

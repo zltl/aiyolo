@@ -169,7 +169,7 @@ func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	}
 	resolveCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	assSHA256, err := resolveCloudAgentASSSHA256(resolveCtx, options.ASSSHA256URL)
+	assSHA256, err := ResolveCloudAgentASSSHA256(resolveCtx, options.ASSSHA256URL)
 	if err != nil {
 		return CloudAgentInstance{}, err
 	}
@@ -350,7 +350,7 @@ func normalizeCloudAgentStartOptions(worker domain.WorkerServer, options CloudAg
 	return options, nil
 }
 
-func resolveCloudAgentASSSHA256(ctx context.Context, checksumURL string) (string, error) {
+func ResolveCloudAgentASSSHA256(ctx context.Context, checksumURL string) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSpace(checksumURL), nil)
 	if err != nil {
 		return "", fmt.Errorf("build cloud agent aiyolo-ass checksum request: %w", err)
@@ -555,7 +555,8 @@ var cloudAgentBuildContextFiles = map[string]string{
 	"aiyolo-cloud-agent-start-display":  cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-display"),
 	"aiyolo-cloud-agent-open-chrome":    cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-open-chrome"),
 	"aiyolo-cloud-agent-start-docker":   cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-docker"),
-	"aiyolo-cloud-agent-start-services": cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-services"),
+	"aiyolo-cloud-agent-start-services":     cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-services"),
+	"aiyolo-cloud-agent-write-codex-config": cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-write-codex-config"),
 }
 
 func cloudAgentBuildRevision(options CloudAgentStartOptions, files map[string]string, assSHA256 string) string {
