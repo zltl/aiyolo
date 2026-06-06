@@ -19,6 +19,7 @@ import (
 	"github.com/zltl/aiyolo/internal/auth"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
+	workerops "github.com/zltl/aiyolo/internal/workers"
 )
 
 const (
@@ -28,6 +29,53 @@ const (
 	consoleChatReasoningCompletionTokens = 4096
 	consoleChatEmptyOutput               = "No text returned."
 )
+
+func stripConsoleChatFailurePrefix(locale string, detail string) string {
+	detail = strings.TrimSpace(detail)
+	prefixes := []string{
+		consoleText(locale, "对话失败：", "Chat failed: "),
+		"对话失败：",
+		"Chat failed: ",
+	}
+	for {
+		changed := false
+		for _, prefix := range prefixes {
+			if prefix == "" || !strings.HasPrefix(detail, prefix) {
+				continue
+			}
+			detail = strings.TrimSpace(strings.TrimPrefix(detail, prefix))
+			changed = true
+		}
+		if !changed {
+			return detail
+		}
+	}
+}
+
+func consoleChatFormatFailure(locale string, detail string) string {
+	detail = stripConsoleChatFailurePrefix(locale, detail)
+	if detail == "" {
+		return consoleText(locale, "对话失败。", "Chat failed.")
+	}
+	return fmt.Sprintf(consoleText(locale, "对话失败：%s", "Chat failed: %s"), detail)
+}
+
+func consoleCloudAgentASSJobResumeDetail(locale string, err error) string {
+	switch {
+	case workerops.CloudAgentASSJobsEndpointUnavailable(err):
+		return consoleText(locale,
+			"Claude Code 的 aiyolo-ass 版本过旧，缺少后台任务接口。请刷新页面等待自动升级后重试，或新建对话。",
+			"The Claude Code aiyolo-ass is outdated and missing background job APIs. Refresh to auto-upgrade and retry, or start a new conversation.",
+		)
+	case workerops.CloudAgentASSJobNotFound(err):
+		return consoleText(locale,
+			"Claude Code 后台任务已结束或丢失，无法继续重连。",
+			"The Claude Code background task ended or was lost; unable to reconnect.",
+		)
+	default:
+		return stripConsoleChatFailurePrefix(locale, err.Error())
+	}
+}
 
 type consoleChatRouteView struct {
 	PublicName       string
@@ -760,7 +808,7 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 			handler.renderChat(w, r, state)
 			return
 		}
-		execution, executionErr = handler.runCloudAgentChat(r.Context(), worker, key, account, cloudSession, consoleCloudAgentChatRequest{
+		execution, executionErr = handler.runCloudAgentChat(context.WithoutCancel(r.Context()), worker, key, account, cloudSession, consoleCloudAgentChatRequest{
 			SessionID:                    state.Form.ClientSessionID,
 			PublicName:                   state.Form.PublicName,
 			PreviousResponseID:           state.LastResponseID,

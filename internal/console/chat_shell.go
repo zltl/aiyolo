@@ -118,7 +118,7 @@ type consoleChatShellSnapshotMeta struct {
 
 func (state consoleChatShellPageState) data() map[string]any {
 	return map[string]any{
-		"Title":          "Cloud Agent Terminal",
+		"Title":          "Claude Code Terminal",
 		"ChatShell":      state,
 		"ChatShellError": state.Error,
 	}
@@ -285,26 +285,26 @@ func (handler *Handler) resolveConsoleChatCloudAgentTargetWithRuntime(ctx contex
 	userID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
 	cloudSession, err := handler.store.GetCloudAgentSession(ctx, userID, consoleChatCloudAgentSessionID(chatSessionID))
 	if errors.Is(err, storage.ErrNotFound) {
-		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, fmt.Errorf("%w: %s", storage.ErrNotFound, handler.requestText(r, "当前会话没有可用的 Cloud Agent。", "The current chat session does not have an active cloud agent."))
+		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, fmt.Errorf("%w: %s", storage.ErrNotFound, handler.requestText(r, "当前会话没有可用的 Claude Code。", "The current chat session does not have an active Claude Code environment."))
 	}
 	if err != nil {
 		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
 	if strings.TrimSpace(cloudSession.Status) != domain.CloudAgentSessionStatusActive {
-		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "当前 Cloud Agent 会话未激活，请先在 chat 页面重新启动环境。", "The cloud agent session is not active. Restart the environment from the chat page first."))
+		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "当前 Claude Code 会话未激活，请先在 chat 页面重新启动环境。", "The Claude Code session is not active. Restart the environment from the chat page first."))
 	}
 	account, err := handler.store.GetCloudAgentAccount(ctx, userID, cloudSession.AccountID)
 	if errors.Is(err, storage.ErrNotFound) {
-		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, fmt.Errorf("%w: %s", storage.ErrNotFound, handler.requestText(r, "找不到当前 Cloud Agent 容器记录。", "The cloud agent container record could not be found."))
+		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, fmt.Errorf("%w: %s", storage.ErrNotFound, handler.requestText(r, "找不到当前 Claude Code 容器记录。", "The Claude Code container record could not be found."))
 	}
 	if err != nil {
 		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
 	if account.WorkerID != cloudSession.WorkerID {
-		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "Cloud Agent 记录与 Worker 不匹配。", "The cloud agent record does not match the worker."))
+		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "Claude Code 记录与 Worker 不匹配。", "The Claude Code record does not match the worker."))
 	}
 	if strings.TrimSpace(account.ContainerName) == "" {
-		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "Cloud Agent 容器尚未就绪，请先在 chat 页面重试环境启动。", "The cloud agent container is not ready yet. Retry environment startup from the chat page first."))
+		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "Claude Code 容器尚未就绪，请先在 chat 页面重试环境启动。", "The Claude Code container is not ready yet. Retry environment startup from the chat page first."))
 	}
 	worker, proxy, key, err := handler.workerExecutionInputs(ctx, cloudSession.WorkerID)
 	if errors.Is(err, storage.ErrNotFound) {
@@ -352,7 +352,7 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
 	account.WorkerID = worker.ID
-	account.AgentType = domain.CloudAgentTypeCodex
+	account.AgentType = domain.CloudAgentTypeClaudeCode
 	account.WorkspacePath = firstNonEmpty(strings.TrimSpace(account.WorkspacePath), strings.TrimSpace(cloudSession.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
 	account.Status = domain.CloudAgentStatusStarting
 	account.LastError = ""
@@ -361,7 +361,7 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 	}
 
 	chatSessionID := firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(strings.TrimPrefix(cloudSession.ID, "chat-env-")))
-	instance, err := handler.ensureCloudAgent(ctx, worker, key, proxy, workerops.CloudAgentStartOptions{
+	startOptions := workerops.CloudAgentStartOptions{
 		UserID:         userID,
 		AgentType:      account.AgentType,
 		ContainerName:  strings.TrimSpace(account.ContainerName),
@@ -374,7 +374,12 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 		OpenURL:        strings.TrimRight(baseURL, "/") + "/console/chat?session=" + url.QueryEscape(chatSessionID),
 		ASSDownloadURL: assDownloadURL,
 		ASSSHA256URL:   assSHA256URL,
-	})
+	}
+	expectedBuildRevision, err := handler.consoleChatCloudAgentExpectedBuildRevision(ctx, assSHA256URL, worker, startOptions)
+	if err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
+	}
+	instance, err := handler.ensureCloudAgent(ctx, worker, key, proxy, startOptions)
 	if err != nil {
 		account.Status = domain.CloudAgentStatusError
 		account.LastError = err.Error()
@@ -382,7 +387,7 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 		cloudSession.Status = domain.CloudAgentSessionStatusPending
 		cloudSession.LastError = err.Error()
 		_ = handler.store.UpsertCloudAgentSession(context.WithoutCancel(ctx), cloudSession)
-		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "Cloud Agent 启动失败：", "Cloud agent startup failed: ") + err.Error())
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "Claude Code 启动失败：", "Claude Code startup failed: ") + err.Error())
 	}
 	now = time.Now().UTC()
 	account.ContainerID = strings.TrimSpace(instance.ContainerID)
@@ -391,7 +396,7 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 	account.LastError = ""
 	account.LastStartedAt = &now
 	account.LastSeenAt = &now
-	if err := handler.applyConsoleChatCloudAgentASSRelease(ctx, account, assSHA256URL); err != nil {
+	if err := handler.applyConsoleChatCloudAgentRelease(ctx, account, assSHA256URL, firstNonEmpty(strings.TrimSpace(instance.BuildRevision), expectedBuildRevision)); err != nil {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
 	cloudSession.WorkerID = worker.ID
@@ -409,7 +414,18 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 }
 
 func (handler *Handler) resolveConsoleChatShellTarget(ctx context.Context, r *http.Request) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
-	return handler.resolveConsoleChatCloudAgentRuntimeTarget(ctx, r, r.URL.Query().Get("session"))
+	chatSessionID := strings.TrimSpace(r.URL.Query().Get("session"))
+	worker, key, account, cloudSession, err := handler.resolveConsoleChatCloudAgentTarget(ctx, r, chatSessionID)
+	if err != nil {
+		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
+	}
+	// Interactive shell only needs SSH + docker exec. When the stored runtime already
+	// looks ready, avoid a second remote ensure that waits on aiyolo-ass and can fail
+	// even though the container itself is usable.
+	if strings.TrimSpace(account.LastBuildRevision) != "" && consoleChatCloudAgentReusable(account, worker.ID, account.ModelPublicName, "", time.Now().UTC()) {
+		return worker, key, account, cloudSession, nil
+	}
+	return handler.resolveConsoleChatCloudAgentRuntimeTarget(ctx, r, chatSessionID)
 }
 
 func (handler *Handler) chatShellPageStateForSession(ctx context.Context, r *http.Request, chatSessionID string) (consoleChatShellPageState, error) {
@@ -544,6 +560,8 @@ func (handler *Handler) saveChatShellState(w http.ResponseWriter, r *http.Reques
 func (handler *Handler) chatShellSocket(w http.ResponseWriter, r *http.Request) {
 	worker, key, account, cloudSession, err := handler.resolveConsoleChatShellTarget(r.Context(), r)
 	if err != nil {
+		chatSessionID := firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("session")), strings.TrimSpace(cloudSession.ChatSessionID))
+		log.Printf("console chat shell resolve failed session_id=%s terminal_id=%s worker_id=%s container=%s err=%v", chatSessionID, consoleChatShellTerminalID(r), worker.ID, account.ContainerName, err)
 		http.Error(w, err.Error(), consoleChatShellErrorStatus(err))
 		return
 	}

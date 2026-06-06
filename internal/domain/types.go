@@ -535,22 +535,23 @@ type WorkerInitJobEvent struct {
 }
 
 type CloudAgentAccount struct {
-	ID              string
-	UserID          string
-	WorkerID        string
-	AgentType       string
-	ModelPublicName string
-	ContainerID     string
-	ContainerName   string
-	WorkspacePath   string
-	Credential      string
-	Status          string
-	LastError       string
-	LastASSSHA256   string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	LastStartedAt   *time.Time
-	LastSeenAt      *time.Time
+	ID                string
+	UserID            string
+	WorkerID          string
+	AgentType         string
+	ModelPublicName   string
+	ContainerID       string
+	ContainerName     string
+	WorkspacePath     string
+	Credential        string
+	Status            string
+	LastError         string
+	LastASSSHA256     string
+	LastBuildRevision string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	LastStartedAt     *time.Time
+	LastSeenAt        *time.Time
 }
 
 type CloudAgentSession struct {
@@ -773,6 +774,7 @@ func NormalizeCloudAgentAccount(account CloudAgentAccount) (CloudAgentAccount, e
 	account.Status = strings.TrimSpace(account.Status)
 	account.LastError = strings.TrimSpace(account.LastError)
 	account.LastASSSHA256 = strings.ToLower(strings.TrimSpace(account.LastASSSHA256))
+	account.LastBuildRevision = strings.TrimSpace(account.LastBuildRevision)
 	if account.ID == "" {
 		return CloudAgentAccount{}, fmt.Errorf("cloud agent account id is required")
 	}
@@ -783,7 +785,7 @@ func NormalizeCloudAgentAccount(account CloudAgentAccount) (CloudAgentAccount, e
 		return CloudAgentAccount{}, fmt.Errorf("cloud agent account worker id is required")
 	}
 	if account.AgentType == "" {
-		account.AgentType = CloudAgentTypeCodex
+		account.AgentType = CloudAgentTypeClaudeCode
 	}
 	if account.WorkspacePath == "" || account.WorkspacePath == "." {
 		account.WorkspacePath = DefaultCloudAgentWorkspacePath
@@ -821,7 +823,7 @@ func NormalizeCloudAgentSession(session CloudAgentSession) (CloudAgentSession, e
 		return CloudAgentSession{}, fmt.Errorf("cloud agent session account id is required")
 	}
 	if session.AgentType == "" {
-		session.AgentType = CloudAgentTypeCodex
+		session.AgentType = CloudAgentTypeClaudeCode
 	}
 	if session.WorkspacePath == "" || session.WorkspacePath == "." {
 		session.WorkspacePath = DefaultCloudAgentWorkspacePath

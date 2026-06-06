@@ -327,6 +327,30 @@ func TestShellExecRunsInWorkspace(t *testing.T) {
 	}
 }
 
+func TestJobStreamCapturesProcessOutput(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root)
+
+	response := performRequest(server, http.MethodPost, "/v1/jobs", `{"id":"job-output","kind":"test","argv":["/bin/sh","-c","printf 'alpha\\n'; printf 'beta\\n' >&2"]}`)
+	if response.Code != http.StatusCreated && response.Code != http.StatusOK {
+		t.Fatalf("create job status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = performRequest(server, http.MethodGet, "/v1/jobs/job-output/stream", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("stream job status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "closed pipe") {
+		t.Fatalf("job stream should not report a closed pipe: %s", body)
+	}
+	for _, expected := range []string{"alpha", "beta", `"type":"done"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("job stream missing %q: %s", expected, body)
+		}
+	}
+}
+
 func newTestServer(t *testing.T, root string) *Server {
 	t.Helper()
 	execUser := "root"

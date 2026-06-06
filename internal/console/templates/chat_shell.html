@@ -12,9 +12,9 @@
   <div class="chat-terminal-page" data-chat-shell-page {{if .ChatShell.SocketURL}}data-chat-shell-socket-url="{{.ChatShell.SocketURL}}"{{end}}>
     <header class="chat-terminal-header">
       <div class="chat-terminal-heading">
-        <p class="chat-terminal-kicker">{{msg .Locale "Cloud Agent Terminal" "Cloud Agent Terminal"}}</p>
+        <p class="chat-terminal-kicker">{{msg .Locale "Claude Code Terminal" "Claude Code Terminal"}}</p>
         <h1>{{if .ChatShell.WorkerID}}{{.ChatShell.WorkerID}}{{else}}AIYolo{{end}}</h1>
-        <p class="chat-terminal-copy">{{msg .Locale "直接进入当前 chat 绑定的 Cloud Agent 容器终端，默认打开 bash 交互 shell。" "Directly attach to the Cloud Agent container terminal bound to this chat. The terminal opens an interactive bash shell by default."}}</p>
+        <p class="chat-terminal-copy">{{msg .Locale "直接进入当前 chat 绑定的 Claude Code 容器终端，默认打开 bash 交互 shell。" "Directly attach to the Claude Code container terminal bound to this chat. The terminal opens an interactive bash shell by default."}}</p>
       </div>
       <div class="chat-terminal-actions">
         {{if .ChatShell.ChatURL}}

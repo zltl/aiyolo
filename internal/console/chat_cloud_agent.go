@@ -38,18 +38,19 @@ type consoleCloudAgentStreamParser struct {
 	reasoning      strings.Builder
 	finalOutput    string
 	finalReasoning string
-	sessionID    string
-	finishReason string
-	durationMS   int64
-	inputTokens  int
-	outputTokens int
-	totalTokens  int
-	errMessage   string
+	toolNames      map[string]string
+	sessionID      string
+	finishReason   string
+	durationMS     int64
+	inputTokens    int
+	outputTokens   int
+	totalTokens    int
+	errMessage     string
 }
 
 func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error) {
 	publicName := firstNonEmpty(strings.TrimSpace(request.PublicName), strings.TrimSpace(account.ModelPublicName))
-	threadID := consoleCloudAgentCodexThreadID(request.PreviousResponseID)
+	threadID := consoleCloudAgentClaudeSessionID(request.PreviousResponseID)
 	parser := &consoleCloudAgentStreamParser{}
 	handlers := consoleCloudAgentStreamHandlers{
 		OnDelta:     request.OnDelta,
@@ -82,7 +83,7 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 		Result: consoleChatResultView{
 			PublicName:    publicName,
 			ProviderID:    "cloud-agent:" + strings.TrimSpace(worker.ID),
-			ProviderName:  "Codex · " + strings.TrimSpace(worker.ID),
+			ProviderName:  "Claude Code · " + strings.TrimSpace(worker.ID),
 			UpstreamModel: firstNonEmpty(publicName, strings.TrimSpace(account.ModelPublicName)),
 			Output:        parser.resultText(),
 			Reasoning:     parser.reasoningText(),
@@ -98,6 +99,9 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 			TotalTokens:  parser.totalTokens,
 			Stream:       request.Stream,
 		},
+	}
+	if strings.TrimSpace(result.Result.Output) == "" && strings.TrimSpace(result.Result.Reasoning) == "" && err == nil {
+		err = errors.New("claude code returned no assistant output")
 	}
 	if result.Result.Output == "" {
 		result.Result.Output = consoleChatEmptyOutput
@@ -121,7 +125,7 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 	return result, nil
 }
 
-func consoleCloudAgentCodexThreadID(value string) string {
+func consoleCloudAgentClaudeSessionID(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
@@ -163,22 +167,14 @@ func consoleCloudAgentCurrentPrompt(userInput string, attachments []consoleChatA
 }
 
 func consoleCloudAgentInitialPrompt(history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) string {
-	sections := consoleCloudAgentInteractivePromptSections()
-	sections = append(sections, "Treat the following transcript as the full prior conversation for this AIYolo chat session.")
-	if transcript := consoleCloudAgentTranscript(history); transcript != "" {
-		sections = append(sections, "Previous conversation:\n"+transcript)
-	}
-	if latest := consoleCloudAgentMessageBody(userInput, attachments); latest != "" {
-		sections = append(sections, "Latest user message:\n"+latest)
-	}
-	return strings.TrimSpace(strings.Join(sections, "\n\n"))
+	return consoleCloudAgentCurrentPrompt(userInput, attachments)
 }
 
 func consoleCloudAgentInteractivePromptSections() []string {
 	return []string{
-		"Continue this AIYolo chat session inside Codex as an interactive collaboration, not a one-shot completion.",
+		"Continue this AIYolo chat session inside Claude Code as an interactive collaboration, not a one-shot completion.",
 		"Work on the latest user message in the current workspace when you have enough information.",
-		"If the request is ambiguous, missing a decision, requires credentials, or could reasonably branch into different implementations, ask a concise clarification question and stop. The user will answer in the AIYolo chat input, and the next turn will resume this same Codex session.",
+		"If the request is ambiguous, missing a decision, requires credentials, or could reasonably branch into different implementations, ask a concise clarification question and stop. The user will answer in the AIYolo chat input, and the next turn will resume this same Claude Code session.",
 		"Do not invent missing requirements or mark the task complete while you are waiting for the user's answer.",
 	}
 }
@@ -299,7 +295,20 @@ func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, handlers co
 		return nil
 	}
 	parser.captureSessionID(payload)
-	switch strings.TrimSpace(stringValue(payload["type"])) {
+	eventType := strings.TrimSpace(stringValue(payload["type"]))
+	switch eventType {
+	case "assistant":
+		message, _ := payload["message"].(map[string]any)
+		if err := parser.consumeClaudeAssistantMessage(message, handlers); err != nil {
+			return err
+		}
+		if usage, ok := message["usage"].(map[string]any); ok {
+			parser.applyUsage(usage)
+		}
+		parser.finishReason = firstNonEmpty(strings.TrimSpace(stringValue(message["stop_reason"])), parser.finishReason)
+	case "user":
+		message, _ := payload["message"].(map[string]any)
+		return parser.consumeClaudeUserMessage(message, handlers)
 	case "thread.started":
 		parser.captureSessionID(payload)
 	case "item.delta", "item.updated", "message.delta", "agent_message.delta", "agent_message_delta":
@@ -334,6 +343,65 @@ func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, handlers co
 		parser.applyUsage(payload["usage"])
 		parser.finishReason = firstNonEmpty(strings.TrimSpace(stringValue(payload["finish_reason"])), parser.finishReason, "stop")
 	case "turn.failed":
+		parser.errMessage = firstNonEmpty(codexErrorMessage(payload["error"]), strings.TrimSpace(stringValue(payload["message"])), "codex execution failed")
+	case "response.output_text.delta":
+		if text := strings.TrimSpace(stringValue(payload["delta"])); text != "" {
+			parser.output.WriteString(text)
+			if handlers.OnDelta != nil {
+				return handlers.OnDelta(text)
+			}
+		}
+	case "response.output_text.done":
+		if text := strings.TrimSpace(firstNonEmpty(stringValue(payload["text"]), stringValue(payload["delta"]))); text != "" {
+			parser.finalOutput = text
+			if handlers.OnDelta != nil && parser.output.Len() == 0 {
+				parser.output.WriteString(text)
+				return handlers.OnDelta(text)
+			}
+		}
+	case "response.content_part.added", "response.content_part.done":
+		part, _ := payload["part"].(map[string]any)
+		partType := strings.ToLower(strings.TrimSpace(stringValue(part["type"])))
+		if partType == "text" || partType == "output_text" {
+			text := strings.TrimSpace(firstNonEmpty(stringValue(part["text"]), stringValue(part["content"]), stringValue(payload["text"])))
+			if text != "" {
+				if eventType == "response.content_part.done" {
+					parser.finalOutput = firstNonEmpty(parser.finalOutput, text)
+				}
+				if handlers.OnDelta != nil && parser.output.Len() == 0 {
+					parser.output.WriteString(text)
+					return handlers.OnDelta(text)
+				}
+			}
+		}
+	case "response.output_item.added", "response.output_item.done":
+		item, _ := payload["item"].(map[string]any)
+		if isCodexReasoningItem(item) {
+			if text := codexReasoningItemText(item); text != "" {
+				if eventType == "response.output_item.done" {
+					parser.finalReasoning = firstNonEmpty(parser.finalReasoning, text)
+				}
+				return parser.appendReasoning(text, handlers)
+			}
+		}
+		if text := codexAssistantItemText(item); text != "" {
+			if eventType == "response.output_item.done" {
+				parser.finalOutput = firstNonEmpty(parser.finalOutput, text)
+			}
+			if handlers.OnDelta != nil && parser.output.Len() == 0 {
+				parser.output.WriteString(text)
+				return handlers.OnDelta(text)
+			}
+		}
+	case "response.completed":
+		response, _ := payload["response"].(map[string]any)
+		if err := parser.applyResponsePayload(response, handlers); err != nil {
+			return err
+		}
+		if parser.finishReason == "" {
+			parser.finishReason = firstNonEmpty(strings.TrimSpace(stringValue(payload["finish_reason"])), "stop")
+		}
+	case "response.failed", "response.error":
 		parser.errMessage = firstNonEmpty(codexErrorMessage(payload["error"]), strings.TrimSpace(stringValue(payload["message"])), "codex execution failed")
 	case "error":
 		parser.errMessage = firstNonEmpty(codexErrorMessage(payload["error"]), strings.TrimSpace(stringValue(payload["message"])), "codex execution failed")
@@ -379,8 +447,269 @@ func (parser *consoleCloudAgentStreamParser) consumeLine(raw string, handlers co
 		if strings.TrimSpace(stringValue(payload["subtype"])) == "init" {
 			parser.sessionID = firstNonEmpty(strings.TrimSpace(stringValue(payload["session_id"])), parser.sessionID)
 		}
+	default:
+		if text := strings.TrimSpace(firstNonEmpty(
+			stringValue(payload["output_text"]),
+			stringValue(payload["text"]),
+			codexTextFromValue(payload["content"]),
+			codexTextFromValue(payload["message"]),
+		)); text != "" {
+			parser.output.WriteString(text)
+			if handlers.OnDelta != nil {
+				return handlers.OnDelta(text)
+			}
+		}
 	}
 	return nil
+}
+
+func (parser *consoleCloudAgentStreamParser) consumeClaudeAssistantMessage(message map[string]any, handlers consoleCloudAgentStreamHandlers) error {
+	if parser == nil || len(message) == 0 {
+		return nil
+	}
+	parser.captureSessionID(message)
+	for _, block := range claudeContentBlocks(message["content"]) {
+		blockType := strings.ToLower(strings.TrimSpace(stringValue(block["type"])))
+		switch blockType {
+		case "text", "output_text":
+			text := firstNonEmpty(stringValue(block["text"]), stringValue(block["content"]))
+			if text != "" {
+				parser.output.WriteString(text)
+				if handlers.OnDelta != nil {
+					if err := handlers.OnDelta(text); err != nil {
+						return err
+					}
+				}
+			}
+		case "tool_use":
+			if text := parser.claudeToolUseStep(block); text != "" {
+				if err := parser.appendReasoning(text, handlers); err != nil {
+					return err
+				}
+			}
+		case "thinking", "reasoning":
+			if text := firstNonEmpty(stringValue(block["thinking"]), stringValue(block["reasoning"]), stringValue(block["text"])); text != "" {
+				if err := parser.appendReasoning(text, handlers); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (parser *consoleCloudAgentStreamParser) consumeClaudeUserMessage(message map[string]any, handlers consoleCloudAgentStreamHandlers) error {
+	if parser == nil || len(message) == 0 {
+		return nil
+	}
+	for _, block := range claudeContentBlocks(message["content"]) {
+		if strings.ToLower(strings.TrimSpace(stringValue(block["type"]))) != "tool_result" {
+			continue
+		}
+		if text := parser.claudeToolResultStep(block); text != "" {
+			if err := parser.appendReasoning(text, handlers); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func claudeContentBlocks(value any) []map[string]any {
+	switch typed := value.(type) {
+	case []any:
+		blocks := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			block, _ := item.(map[string]any)
+			if len(block) > 0 {
+				blocks = append(blocks, block)
+			}
+		}
+		return blocks
+	case map[string]any:
+		return []map[string]any{typed}
+	case string:
+		if typed == "" {
+			return nil
+		}
+		return []map[string]any{{"type": "text", "text": typed}}
+	default:
+		return nil
+	}
+}
+
+func (parser *consoleCloudAgentStreamParser) claudeToolUseStep(block map[string]any) string {
+	if parser == nil || len(block) == 0 {
+		return ""
+	}
+	name := strings.TrimSpace(stringValue(block["name"]))
+	if name == "" {
+		name = "tool"
+	}
+	if id := strings.TrimSpace(stringValue(block["id"])); id != "" {
+		if parser.toolNames == nil {
+			parser.toolNames = make(map[string]string)
+		}
+		parser.toolNames[id] = name
+	}
+	detail := claudeToolInputSummary(block["input"])
+	if detail == "" {
+		return fmt.Sprintf("- Tool %s started.\n", name)
+	}
+	return fmt.Sprintf("- Tool %s: %s\n", name, detail)
+}
+
+func (parser *consoleCloudAgentStreamParser) claudeToolResultStep(block map[string]any) string {
+	if parser == nil || len(block) == 0 {
+		return ""
+	}
+	name := "tool"
+	if id := strings.TrimSpace(stringValue(block["tool_use_id"])); id != "" && parser.toolNames != nil {
+		name = firstNonEmpty(strings.TrimSpace(parser.toolNames[id]), name)
+	}
+	status := "completed"
+	if isTrueValue(block["is_error"]) {
+		status = "failed"
+	}
+	summary := strings.TrimSpace(claudeToolResultSummary(block["content"]))
+	if summary == "" {
+		return fmt.Sprintf("- Tool %s %s.\n", name, status)
+	}
+	return fmt.Sprintf("- Tool %s %s: %s\n", name, status, summary)
+}
+
+func claudeToolInputSummary(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"command", "pattern", "path", "file_path", "query", "description"} {
+			if text := strings.TrimSpace(stringValue(typed[key])); text != "" {
+				return truncateCloudAgentStepText(text, 240)
+			}
+		}
+		payload, err := json.Marshal(typed)
+		if err == nil {
+			return truncateCloudAgentStepText(string(payload), 240)
+		}
+	case string:
+		return truncateCloudAgentStepText(typed, 240)
+	}
+	return ""
+}
+
+func claudeToolResultSummary(value any) string {
+	text := strings.TrimSpace(claudeToolResultText(value))
+	if text == "" {
+		return ""
+	}
+	return truncateCloudAgentStepText(text, 360)
+}
+
+func claudeToolResultText(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(claudeToolResultText(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		for _, key := range []string{"text", "content", "value"} {
+			if text := claudeToolResultText(typed[key]); strings.TrimSpace(text) != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func truncateCloudAgentStepText(value string, limit int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if limit <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "..."
+}
+
+func (parser *consoleCloudAgentStreamParser) applyResponsePayload(response map[string]any, handlers consoleCloudAgentStreamHandlers) error {
+	if parser == nil || len(response) == 0 {
+		return nil
+	}
+	parser.captureSessionID(response)
+	parser.finishReason = firstNonEmpty(strings.TrimSpace(stringValue(response["finish_reason"])), strings.TrimSpace(stringValue(response["status"])), parser.finishReason)
+	if usage, ok := response["usage"].(map[string]any); ok {
+		parser.applyUsage(usage)
+	}
+	for _, text := range codexResponseOutputText(response) {
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		parser.finalOutput += text
+		if handlers.OnDelta != nil && parser.output.Len() == 0 {
+			parser.output.WriteString(text)
+			if err := handlers.OnDelta(text); err != nil {
+				return err
+			}
+		}
+	}
+	for _, text := range codexResponseReasoningText(response) {
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		parser.finalReasoning += text
+		if handlers.OnReasoning != nil {
+			if err := handlers.OnReasoning(text); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func codexResponseOutputText(response map[string]any) []string {
+	output, _ := response["output"].([]any)
+	if len(output) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(output))
+	for _, item := range output {
+		itemMap, _ := item.(map[string]any)
+		if len(itemMap) == 0 {
+			continue
+		}
+		if text := codexAssistantItemText(itemMap); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return parts
+}
+
+func codexResponseReasoningText(response map[string]any) []string {
+	output, _ := response["output"].([]any)
+	if len(output) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(output))
+	for _, item := range output {
+		itemMap, _ := item.(map[string]any)
+		if len(itemMap) == 0 {
+			continue
+		}
+		if !isCodexReasoningItem(itemMap) {
+			continue
+		}
+		if text := codexReasoningItemText(itemMap); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return parts
 }
 
 func (parser *consoleCloudAgentStreamParser) captureSessionID(payload map[string]any) {
@@ -468,7 +797,7 @@ func codexTextFromValue(value any) string {
 		return strings.Join(parts, "")
 	case map[string]any:
 		blockType := strings.ToLower(strings.TrimSpace(stringValue(typed["type"])))
-		if blockType == "tool_call" || blockType == "function_call" || blockType == "reasoning" {
+		if blockType == "tool_call" || blockType == "function_call" || blockType == "reasoning" || blockType == "tool_use" || blockType == "tool_result" {
 			return ""
 		}
 		for _, key := range []string{"text", "content", "value"} {

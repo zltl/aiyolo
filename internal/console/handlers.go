@@ -59,6 +59,7 @@ type Handler struct {
 	executeWorkerBootstrap          func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, plan workerops.BootstrapPlan) (string, error)
 	verifyWorkerBootstrap           func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey) (workerops.BootstrapHealth, error)
 	ensureCloudAgent                func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error)
+	ensureCloudAgentWithProgress    func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options workerops.CloudAgentStartOptions, onEvent func(workerops.CloudAgentEnsureEvent) error) (workerops.CloudAgentInstance, error)
 	openCloudAgentShell             func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, cols, rows int) (workerops.InteractiveShell, error)
 	runCloudAgentCommand            func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, script string) (string, error)
 	listCloudAgentWorkspaceTree     func(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, relativePath string) (workerops.CloudAgentWorkspaceTree, error)
@@ -90,7 +91,7 @@ func NewHandler(cfg Config, store storage.Store) *Handler {
 		return artifacts.NewObjectReader(cfg)
 	}, newChatAttachmentCatalogReader: func(cfg artifacts.Config) (artifacts.CatalogReader, error) {
 		return artifacts.NewCatalogReader(cfg)
-	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentCommand: workerops.RunCloudAgentCommand, listCloudAgentWorkspaceTree: workerops.ListCloudAgentWorkspaceTree, readCloudAgentWorkspaceFile: workerops.ReadCloudAgentWorkspaceFile, downloadCloudAgentWorkspaceFile: workerops.DownloadCloudAgentWorkspaceFile, writeCloudAgentWorkspaceFile: workerops.WriteCloudAgentWorkspaceFile, createCloudAgentWorkspaceFile: workerops.CreateCloudAgentWorkspaceFile, uploadCloudAgentWorkspaceFile: workerops.UploadCloudAgentWorkspaceFile, createCloudAgentWorkspaceDir: workerops.CreateCloudAgentWorkspaceDirectory, copyCloudAgentWorkspacePath: workerops.CopyCloudAgentWorkspacePath, renameCloudAgentWorkspacePath: workerops.RenameCloudAgentWorkspacePath, deleteCloudAgentWorkspacePath: workerops.DeleteCloudAgentWorkspacePath, runCloudAgentChat: runConsoleCloudAgentChat}
+	}, probeWorker: workerops.Probe, buildWorkerBootstrap: workerops.BuildBootstrapPlan, executeWorkerBootstrap: workerops.ExecuteBootstrap, verifyWorkerBootstrap: workerops.VerifyBootstrap, ensureCloudAgent: workerops.EnsureCloudAgent, ensureCloudAgentWithProgress: workerops.EnsureCloudAgentWithProgress, openCloudAgentShell: workerops.OpenCloudAgentShell, runCloudAgentCommand: workerops.RunCloudAgentCommand, listCloudAgentWorkspaceTree: workerops.ListCloudAgentWorkspaceTree, readCloudAgentWorkspaceFile: workerops.ReadCloudAgentWorkspaceFile, downloadCloudAgentWorkspaceFile: workerops.DownloadCloudAgentWorkspaceFile, writeCloudAgentWorkspaceFile: workerops.WriteCloudAgentWorkspaceFile, createCloudAgentWorkspaceFile: workerops.CreateCloudAgentWorkspaceFile, uploadCloudAgentWorkspaceFile: workerops.UploadCloudAgentWorkspaceFile, createCloudAgentWorkspaceDir: workerops.CreateCloudAgentWorkspaceDirectory, copyCloudAgentWorkspacePath: workerops.CopyCloudAgentWorkspacePath, renameCloudAgentWorkspacePath: workerops.RenameCloudAgentWorkspacePath, deleteCloudAgentWorkspacePath: workerops.DeleteCloudAgentWorkspacePath, runCloudAgentChat: runConsoleCloudAgentChat}
 }
 
 func (handler *Handler) Routes() http.Handler {
@@ -127,6 +128,7 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Post("/chat/workspace/rename", handler.renameChatWorkspacePath)
 		protected.Delete("/chat/workspace/path", handler.deleteChatWorkspacePath)
 		protected.Post("/chat/environment/ensure", handler.chatEnvironmentEnsure)
+		protected.Post("/chat/environment/ensure/stream", handler.chatEnvironmentEnsureStream)
 		protected.Post("/chat/session", handler.saveChatSession)
 		protected.Delete("/chat/session/{sessionID}", handler.deleteChatSession)
 		protected.Post("/chat/stream", handler.streamChat)
@@ -805,7 +807,20 @@ func (handler *Handler) vendorAssets() http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		})
 	}
-	return http.StripPrefix("/static/vendor/", cacheControlFileServer(vendorFS, "public, max-age=86400"))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(chi.URLParam(r, "*"), "/")
+		if name == "" {
+			name = strings.TrimPrefix(r.URL.Path, "/console/static/vendor/")
+			name = strings.TrimPrefix(name, "/static/vendor/")
+			name = strings.TrimPrefix(name, "/")
+		}
+		if name == "" || strings.Contains(name, "..") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.ServeFileFS(w, r, vendorFS, name)
+	})
 }
 
 func cacheControlFileServer(content fs.FS, cacheControl string) http.Handler {

@@ -24,7 +24,7 @@ htop --version
 strace -V | sed -n '1p'
 node --version
 npm --version
-codex --version
+claude --version
 python3 --version
 jq --version
 docker --version

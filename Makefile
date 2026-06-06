@@ -5,7 +5,7 @@ GO ?= go
 APP ?= aiyolo-gateway
 BUILD_DIR ?= bin
 CONFIG ?= aiyolo.private.yaml
-VERSION ?= dev
+VERSION ?= v$(shell date +%Y%m%d-%H%M%S)
 CLOUD_AGENT_USER ?= aiyolo
 CLOUD_AGENT_IMAGE ?= aiyolo/local-cloud-agent:ubuntu-26.04-v4
 
@@ -21,8 +21,8 @@ help:
 	  '  make build-aiyolo-windows Build ./cmd/aiyolo for Windows into bin/' \
 	  '  make build-ass-release Build ./cmd/aiyolo-ass for linux/amd64 into bin/' \
 	  '  make build-release-artifacts Build gateway + wrapper + aiyolo-ass release artifacts into bin/' \
-	  '  make ass-release       Upload linux-amd64/aiyolo-ass release aliases + checksums to the configured OSS/S3 bucket' \
-	  '  make publish-release-artifacts Upload release artifacts, including aiyolo-ass, to the configured OSS/S3 bucket' \
+	  '  make ass-release       Upload aiyolo-ass (VERSION defaults to vYYYYMMDD-HHMMSS)' \
+	  '  make publish-release-artifacts Upload release artifacts (VERSION defaults to vYYYYMMDD-HHMMSS)' \
 	  '  make bootstrap-local-worker Bootstrap the current Ubuntu host as a local worker' \
 	  '  make build-cloud-agent-image Build the local Ubuntu 26.04 cloud-agent image with desktop/Chrome/DinD' \
 	  '  make run-cloud-agent-local Launch a local cloud-agent container for CLOUD_AGENT_USER' \
@@ -57,11 +57,13 @@ build-release-artifacts:
 	@GOOS=linux GOARCH=amd64 $(GO) build -o $(BUILD_DIR)/aiyolo-ass-linux-amd64 ./cmd/aiyolo-ass
 
 ass-release: build-ass-release
+	@printf 'Publishing aiyolo-ass version=%s\n' '$(VERSION)'
 	@$(GO) run ./cmd/gateway --config $(CONFIG) publish-artifacts \
 	  --version $(VERSION) \
 	  --artifact $(BUILD_DIR)/aiyolo-ass-linux-amd64=linux-amd64/aiyolo-ass
 
 publish-release-artifacts: build-release-artifacts
+	@printf 'Publishing release artifacts version=%s\n' '$(VERSION)'
 	@$(GO) run ./cmd/gateway --config $(CONFIG) publish-artifacts \
 	  --version $(VERSION) \
 	  --artifact $(BUILD_DIR)/aiyolo.exe=windows/aiyolo.exe \

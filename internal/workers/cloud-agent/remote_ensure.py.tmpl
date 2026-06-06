@@ -7,14 +7,47 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import urllib.request
 
 payload = json.loads(__PAYLOAD_JSON__)
 
 
+def emit_progress(phase, message, **extra):
+    event = {"type": "phase", "phase": phase, "message": message}
+    event.update(extra)
+    print("AIYOLO_PROGRESS\t" + json.dumps(event, ensure_ascii=True), file=sys.stderr, flush=True)
+
+
+def emit_log(message, phase="log"):
+    text = str(message or "").strip()
+    if not text:
+        return
+    print("AIYOLO_PROGRESS\t" + json.dumps({"type": "log", "phase": phase, "message": text}, ensure_ascii=True), file=sys.stderr, flush=True)
+
+
 def run(args, env=None):
     return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+
+
+def run_stream(args, env=None, phase="build_image"):
+    emit_progress(phase, "Running: " + " ".join(str(part) for part in args[:4]))
+    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    lines = []
+    if process.stdout is not None:
+        for line in process.stdout:
+            text = line.rstrip("\n")
+            if text:
+                emit_log(text, phase=phase)
+                lines.append(text)
+    code = process.wait()
+    if code != 0:
+        detail = "\n".join(lines[-20:]).strip()
+        if detail:
+            raise SystemExit(f"command failed ({code}): {detail}")
+        raise SystemExit(f"command failed ({code}): {' '.join(str(part) for part in args)}")
+    return "\n".join(lines)
 
 
 def ensure_dirs():
@@ -93,6 +126,10 @@ def expected_ass_sha256():
     return str(payload.get("ass_sha256", "")).strip()
 
 
+def expected_build_revision():
+    return str(payload.get("build_revision", "")).strip()
+
+
 def image_label(inspected, key):
     labels = inspected.get("Config", {}).get("Labels") or {}
     value = labels.get(key)
@@ -102,14 +139,19 @@ def image_label(inspected, key):
 
 
 def image_ass_sha256_matches():
-    expected = expected_ass_sha256()
-    if not expected:
+    expected_ass = expected_ass_sha256()
+    expected_revision = expected_build_revision()
+    if not expected_ass and not expected_revision:
         return True
     try:
         inspected = inspect_image()
     except subprocess.CalledProcessError:
         return False
-    return image_label(inspected, "aiyolo.ass.sha256") == expected
+    if expected_ass and image_label(inspected, "aiyolo.ass.sha256") != expected_ass:
+        return False
+    if expected_revision and image_label(inspected, "aiyolo.cloud_agent.build_revision") != expected_revision:
+        return False
+    return True
 
 
 def container_ass_sha256_matches(inspected):
@@ -123,16 +165,30 @@ def container_ass_sha256_matches(inspected):
     return str(value) == expected
 
 
+def container_build_revision_matches(inspected):
+    expected = expected_build_revision()
+    if not expected:
+        return True
+    labels = inspected.get("Config", {}).get("Labels") or {}
+    value = labels.get("aiyolo.cloud_agent.build_revision")
+    if value is None:
+        return False
+    return str(value) == expected
+
+
 def replace_container_for_ass_upgrade():
     if not exact_container_id():
         return
+    emit_progress("upgrade_container", "Replacing cloud agent container for aiyolo-ass upgrade")
     run(["docker", "stop", "-t", "10", payload["container_name"]])
     run(["docker", "rm", payload["container_name"]])
 
 
-def ensure_image():
-    if image_ass_sha256_matches():
+def ensure_image(force_rebuild=False):
+    if not force_rebuild and image_ass_sha256_matches():
+        emit_progress("reuse_image", "Cloud agent image already matches the published aiyolo-ass checksum")
         return
+    emit_progress("build_image", "Building cloud agent image with the latest aiyolo-ass")
     build_env = os.environ.copy()
     for key, value in (payload.get("proxy_env") or {}).items():
         build_env[key] = value
@@ -143,12 +199,14 @@ def ensure_image():
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_text(content, encoding="utf-8")
         ass_path = temp_root / "aiyolo-ass"
+        emit_progress("download_ass", "Downloading aiyolo-ass release binary")
         with urllib.request.urlopen(payload["ass_download_url"], timeout=60) as response, open(ass_path, "wb") as handle:
             shutil.copyfileobj(response, handle)
         actual_ass_sha256 = file_sha256(ass_path)
         if actual_ass_sha256 != payload.get("ass_sha256", ""):
             raise SystemExit(f"downloaded aiyolo-ass checksum mismatch: {actual_ass_sha256}")
         ass_path.chmod(0o755)
+        emit_progress("download_rootfs", "Downloading Ubuntu base rootfs")
         rootfs_url = resolve_rootfs_url()
         rootfs_path = temp_root / "rootfs.tar.gz"
         with urllib.request.urlopen(rootfs_url, timeout=60) as response, open(rootfs_path, "wb") as handle:
@@ -164,7 +222,7 @@ def ensure_image():
         for key in sorted((payload.get("proxy_env") or {}).keys()):
             build_args.extend(["--build-arg", f"{key}={payload['proxy_env'][key]}"])
         build_args.extend(["-t", payload["image"], "-f", str(temp_root / "Dockerfile"), str(temp_root)])
-        run(build_args, env=build_env)
+        run_stream(build_args, env=build_env, phase="build_image")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
@@ -248,6 +306,28 @@ def container_matches(inspected):
     return True
 
 
+def container_can_migrate_agent_type(inspected):
+    labels = inspected.get("Config", {}).get("Labels") or {}
+    actual_agent_type = str(labels.get("aiyolo.agent_type") or "").strip()
+    target_agent_type = str(payload.get("agent_type") or "").strip()
+    if actual_agent_type == "" or target_agent_type == "" or actual_agent_type == target_agent_type:
+        return False
+    # Only auto-replace when container identity still matches this user/session shape.
+    if not label_matches(labels, "aiyolo.user_id", payload["user_id"]):
+        return False
+    if not label_matches(labels, "aiyolo.workspace_path", payload["workspace_path"]):
+        return False
+    if not label_matches(labels, "aiyolo.ass.container_port", payload.get("container_ass_port", "")):
+        return False
+    if not label_matches(labels, "aiyolo.ass.host_port", payload.get("host_ass_port", "")):
+        return False
+    if mount_source(inspected, payload["workspace_path"]) != payload["workspace_root"]:
+        return False
+    if mount_source(inspected, "/var/lib/docker") != payload["docker_data_root"]:
+        return False
+    return True
+
+
 def wait_for(command, timeout_seconds):
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
@@ -287,6 +367,17 @@ def wait_for_container_runtime():
     wait_for_tcp("127.0.0.1", payload["host_ass_port"], 30)
 
 
+def container_has_claude_cli():
+    result = subprocess.run(
+        ["docker", "exec", payload["container_name"], "bash", "-lc", "command -v claude >/dev/null 2>&1"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def ensure_container():
     existing_id = exact_container_id()
     if existing_id:
@@ -297,16 +388,38 @@ def ensure_container():
             suffix = f": {detail}" if detail else ""
             raise SystemExit(f"failed to inspect existing cloud agent container {payload['container_name']}; stop and remove it manually before retrying{suffix}")
         if not container_matches(inspected):
-            raise SystemExit(f"cloud agent container {payload['container_name']} already exists but does not match the expected user, workspace, or ASS port; stop and remove it manually before starting a replacement")
+            if container_can_migrate_agent_type(inspected):
+                emit_progress("upgrade_container", "Replacing cloud agent container for agent type migration")
+                run(["docker", "stop", "-t", "10", payload["container_name"]])
+                run(["docker", "rm", payload["container_name"]])
+                ensure_image()
+            else:
+                raise SystemExit(f"cloud agent container {payload['container_name']} already exists but does not match the expected user, workspace, or ASS port; stop and remove it manually before starting a replacement")
+        if not container_build_revision_matches(inspected):
+            emit_progress("upgrade_container", "Replacing cloud agent container for image revision update")
+            run(["docker", "stop", "-t", "10", payload["container_name"]])
+            run(["docker", "rm", payload["container_name"]])
+            ensure_image()
         if not container_ass_sha256_matches(inspected):
             replace_container_for_ass_upgrade()
             ensure_image()
         else:
             if not inspected.get("State", {}).get("Running"):
+                emit_progress("start_container", "Starting existing cloud agent container")
                 run(["docker", "start", payload["container_name"]])
-            wait_for_container_runtime()
-            return container_summary(inspect_container())
+            else:
+                emit_progress("reuse_container", "Reusing existing cloud agent container")
+            if not container_has_claude_cli():
+                emit_progress("upgrade_container", "Replacing cloud agent container because claude CLI is missing")
+                run(["docker", "stop", "-t", "10", payload["container_name"]])
+                run(["docker", "rm", payload["container_name"]])
+                ensure_image(force_rebuild=True)
+            else:
+                emit_progress("wait_runtime", "Waiting for aiyolo-ass control plane")
+                wait_for_container_runtime()
+                return container_summary(inspect_container())
     ensure_image()
+    emit_progress("create_container", "Creating cloud agent container")
     args = [
         "docker", "run", "-d",
         "--name", payload["container_name"],
@@ -335,6 +448,7 @@ def ensure_container():
     args.extend(["-p", f"127.0.0.1:{payload['host_ass_port']}:{payload['container_ass_port']}"])
     args.append(payload["image"])
     run(args)
+    emit_progress("wait_runtime", "Waiting for aiyolo-ass control plane")
     wait_for_container_runtime()
     return container_summary(inspect_container())
 
@@ -342,10 +456,14 @@ def ensure_container():
 if __name__ == "__main__":
     import time
 
+    emit_progress("prepare", "Preparing cloud agent workspace")
     ensure_dirs()
     write_workspace_files()
+    emit_progress("lock", "Acquiring cloud agent container lock")
     lock_handle = acquire_container_lock()
     try:
-        print(json.dumps(ensure_container(), ensure_ascii=True, sort_keys=True))
+        summary = ensure_container()
+        emit_progress("ready", "Cloud agent runtime is ready", container_name=summary.get("container_name", ""))
+        print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
     finally:
         lock_handle.close()

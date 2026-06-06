@@ -1,35 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-base_url="${OPENAI_BASE_URL:-${AIYOLO_API_BASE_URL:-}}"
-if [[ -z "$base_url" ]]; then
-  exit 0
-fi
-
 agent_user="${AIYOLO_AGENT_USER:-${AIYOLO_CLAUDE_USER:-aiyolo}}"
 agent_home="${AIYOLO_AGENT_HOME:-${AIYOLO_CLAUDE_HOME:-/workspace}}"
-codex_home="${CODEX_HOME:-${agent_home}/.codex}"
-config_path="${codex_home}/config.toml"
+claude_config_dir="${CLAUDE_CONFIG_DIR:-${agent_home}/.claude}"
 
 as_root=()
 if [[ "${EUID}" -ne 0 ]]; then
   as_root=(sudo -n)
 fi
 
-"${as_root[@]}" install -d -o "$agent_user" -g "$agent_user" -m 0755 "$codex_home"
-cat <<EOF | "${as_root[@]}" tee "$config_path" >/dev/null
-model_provider = "aiyolo"
-
-[model_providers.aiyolo]
-name = "AIYolo Gateway"
-base_url = "${base_url}"
-env_key = "OPENAI_API_KEY"
-wire_api = "responses"
-supports_websockets = false
-
-hide_agent_reasoning = false
-model_reasoning_summary = "detailed"
-show_raw_agent_reasoning = true
-EOF
-"${as_root[@]}" chown "$agent_user:$agent_user" "$config_path"
-"${as_root[@]}" chmod 0644 "$config_path"
+"${as_root[@]}" install -d -o "$agent_user" -g "$agent_user" -m 0755 "$claude_config_dir"

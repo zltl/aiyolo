@@ -44,6 +44,46 @@ type consoleChatEnvironmentEnsureResponse struct {
 	Error         string `json:"error,omitempty"`
 }
 
+type consoleChatEnvironmentEnsureStreamEvent struct {
+	Type          string `json:"type"`
+	Phase         string `json:"phase,omitempty"`
+	Message       string `json:"message,omitempty"`
+	WorkerID      string `json:"workerId,omitempty"`
+	ContainerName string `json:"containerName,omitempty"`
+	WorkspacePath string `json:"workspacePath,omitempty"`
+	SessionID     string `json:"sessionId,omitempty"`
+	Environment   string `json:"environment,omitempty"`
+	Notice        string `json:"notice,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+func consoleChatEnvironmentEnsureReadyEvent(response consoleChatEnvironmentEnsureResponse) consoleChatEnvironmentEnsureStreamEvent {
+	return consoleChatEnvironmentEnsureStreamEvent{
+		Type:          "ready",
+		SessionID:     response.SessionID,
+		Environment:   response.Environment,
+		WorkerID:      response.WorkerID,
+		ContainerName: response.ContainerName,
+		WorkspacePath: response.WorkspacePath,
+		Notice:        response.Notice,
+		Message:       response.Notice,
+	}
+}
+
+func writeConsoleChatEnvironmentEnsureEvent(w http.ResponseWriter, event consoleChatEnvironmentEnsureStreamEvent) error {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(append(payload, '\n')); err != nil {
+		return err
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
 func consoleChatEnvironmentValue(workerID string) string {
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
@@ -360,8 +400,11 @@ func (handler *Handler) closeConsoleChatEnvironmentSession(ctx context.Context, 
 	return handler.store.UpsertCloudAgentSession(ctx, session)
 }
 
-func consoleChatCloudAgentReusable(account domain.CloudAgentAccount, workerID string, publicName string, now time.Time) bool {
+func consoleChatCloudAgentReusable(account domain.CloudAgentAccount, workerID string, publicName string, expectedBuildRevision string, now time.Time) bool {
 	if strings.TrimSpace(account.WorkerID) != strings.TrimSpace(workerID) {
+		return false
+	}
+	if strings.TrimSpace(account.AgentType) != domain.CloudAgentTypeClaudeCode {
 		return false
 	}
 	if strings.TrimSpace(account.Status) != domain.CloudAgentStatusRunning {
@@ -373,7 +416,27 @@ func consoleChatCloudAgentReusable(account domain.CloudAgentAccount, workerID st
 	if currentModel := strings.TrimSpace(account.ModelPublicName); currentModel != "" && strings.TrimSpace(publicName) != "" && currentModel != strings.TrimSpace(publicName) {
 		return false
 	}
+	storedBuildRevision := strings.TrimSpace(account.LastBuildRevision)
+	if expectedBuildRevision = strings.TrimSpace(expectedBuildRevision); expectedBuildRevision != "" {
+		if storedBuildRevision != expectedBuildRevision {
+			return false
+		}
+	} else if strings.TrimSpace(account.LastASSSHA256) != "" && storedBuildRevision == "" {
+		return false
+	}
 	return true
+}
+
+func (handler *Handler) consoleChatCloudAgentExpectedBuildRevision(ctx context.Context, assSHA256URL string, worker domain.WorkerServer, options workerops.CloudAgentStartOptions) (string, error) {
+	assSHA256URL = strings.TrimSpace(assSHA256URL)
+	if assSHA256URL == "" {
+		return "", nil
+	}
+	assSHA256, err := workerops.ResolveCloudAgentASSSHA256(ctx, assSHA256URL)
+	if err != nil {
+		return "", nil
+	}
+	return workerops.CloudAgentBuildRevision(worker, options, assSHA256)
 }
 
 func (handler *Handler) consoleChatCloudAgentNeedsASSUpgrade(ctx context.Context, assSHA256URL string, account domain.CloudAgentAccount) (bool, error) {
@@ -392,15 +455,18 @@ func (handler *Handler) consoleChatCloudAgentNeedsASSUpgrade(ctx context.Context
 	return stored != current, nil
 }
 
-func (handler *Handler) applyConsoleChatCloudAgentASSRelease(ctx context.Context, account domain.CloudAgentAccount, assSHA256URL string) error {
+func (handler *Handler) applyConsoleChatCloudAgentRelease(ctx context.Context, account domain.CloudAgentAccount, assSHA256URL string, buildRevision string) error {
 	if sha, err := workerops.ResolveCloudAgentASSSHA256(ctx, assSHA256URL); err == nil {
 		account.LastASSSHA256 = sha
+	}
+	if buildRevision = strings.TrimSpace(buildRevision); buildRevision != "" {
+		account.LastBuildRevision = buildRevision
 	}
 	return handler.store.UpsertCloudAgentAccount(ctx, account)
 }
 
-func (handler *Handler) reusableConsoleChatCloudAgentEnvironment(ctx context.Context, assSHA256URL string, userID string, chatSessionID string, workerID string, publicName string, account domain.CloudAgentAccount, now time.Time) (domain.CloudAgentAccount, domain.CloudAgentSession, bool, error) {
-	if !consoleChatCloudAgentReusable(account, workerID, publicName, now) {
+func (handler *Handler) reusableConsoleChatCloudAgentEnvironment(ctx context.Context, assSHA256URL string, userID string, chatSessionID string, workerID string, publicName string, expectedBuildRevision string, account domain.CloudAgentAccount, now time.Time) (domain.CloudAgentAccount, domain.CloudAgentSession, bool, error) {
+	if !consoleChatCloudAgentReusable(account, workerID, publicName, expectedBuildRevision, now) {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, nil
 	}
 	if needsUpgrade, err := handler.consoleChatCloudAgentNeedsASSUpgrade(ctx, assSHA256URL, account); err != nil {
@@ -428,8 +494,18 @@ func (handler *Handler) reusableConsoleChatCloudAgentEnvironment(ctx context.Con
 }
 
 func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *http.Request, state *consoleChatPageState) (consoleChatEnvironmentEnsureResponse, error) {
+	return handler.ensureConsoleChatEnvironmentWithEvents(ctx, r, state, nil)
+}
+
+func (handler *Handler) ensureConsoleChatEnvironmentWithEvents(ctx context.Context, r *http.Request, state *consoleChatPageState, onEvent func(consoleChatEnvironmentEnsureStreamEvent) error) (consoleChatEnvironmentEnsureResponse, error) {
 	if state == nil {
 		return consoleChatEnvironmentEnsureResponse{}, fmt.Errorf("chat state is required")
+	}
+	emit := func(event consoleChatEnvironmentEnsureStreamEvent) {
+		if onEvent == nil {
+			return
+		}
+		_ = onEvent(event)
 	}
 	state.Form.Environment = normalizeConsoleChatEnvironmentValue(state.Form.Environment, state.EnvironmentOptions)
 	userID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
@@ -437,12 +513,20 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 		if err := handler.closeConsoleChatEnvironmentSession(ctx, userID, state.Form.ClientSessionID); err != nil {
 			return consoleChatEnvironmentEnsureResponse{}, err
 		}
-		return consoleChatEnvironmentEnsureResponse{
+		response := consoleChatEnvironmentEnsureResponse{
 			Status:      "local",
 			SessionID:   strings.TrimSpace(state.Form.ClientSessionID),
 			Environment: consoleChatEnvironmentLocal,
 			Notice:      handler.requestText(r, "已切回本地环境", "Switched back to the local environment"),
-		}, nil
+		}
+		emit(consoleChatEnvironmentEnsureStreamEvent{
+			Type:        "local",
+			SessionID:   response.SessionID,
+			Environment: response.Environment,
+			Message:     response.Notice,
+			Notice:      response.Notice,
+		})
+		return response, nil
 	}
 	workerID := consoleChatEnvironmentWorkerID(state.Form.Environment)
 	if workerID == "" {
@@ -472,7 +556,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 			ID:            accountID,
 			UserID:        userID,
 			WorkerID:      workerID,
-			AgentType:     domain.CloudAgentTypeCodex,
+			AgentType:     domain.CloudAgentTypeClaudeCode,
 			WorkspacePath: domain.DefaultCloudAgentWorkspacePath,
 			CreatedAt:     now,
 		}
@@ -480,33 +564,14 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
 	account.WorkerID = workerID
+	account.AgentType = domain.CloudAgentTypeClaudeCode
+	account.ModelPublicName = firstNonEmpty(strings.TrimSpace(state.Form.PublicName), strings.TrimSpace(account.ModelPublicName))
+	account.WorkspacePath = firstNonEmpty(strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
 	account, err = handler.ensureConsoleChatEnvironmentAPIKey(ctx, userID, workerID, account, allowedModels, now)
 	if err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
-	assUpgradeNeeded, _ := handler.consoleChatCloudAgentNeedsASSUpgrade(ctx, assSHA256URL, account)
-	if account, cloudSession, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, userID, state.Form.ClientSessionID, workerID, state.Form.PublicName, account, now); err != nil {
-		return consoleChatEnvironmentEnsureResponse{}, err
-	} else if ok {
-		return consoleChatEnvironmentEnsureResponse{
-			Status:        "ready",
-			SessionID:     state.Form.ClientSessionID,
-			Environment:   state.Form.Environment,
-			WorkerID:      workerID,
-			ContainerName: account.ContainerName,
-			WorkspacePath: firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath)),
-			Notice:        handler.requestText(r, "Cloud Agent 已在 "+workerID+" 就绪", "Cloud agent is ready on "+workerID),
-		}, nil
-	}
-	account.AgentType = domain.CloudAgentTypeCodex
-	account.ModelPublicName = firstNonEmpty(strings.TrimSpace(state.Form.PublicName), strings.TrimSpace(account.ModelPublicName))
-	account.WorkspacePath = firstNonEmpty(strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
-	account.Status = domain.CloudAgentStatusStarting
-	account.LastError = ""
-	if err := handler.store.UpsertCloudAgentAccount(ctx, account); err != nil {
-		return consoleChatEnvironmentEnsureResponse{}, err
-	}
-	instance, err := handler.ensureCloudAgent(ctx, worker, key, proxy, workerops.CloudAgentStartOptions{
+	startOptions := workerops.CloudAgentStartOptions{
 		UserID:         userID,
 		AgentType:      account.AgentType,
 		ContainerName:  strings.TrimSpace(account.ContainerName),
@@ -519,7 +584,58 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 		OpenURL:        strings.TrimRight(baseURL, "/") + "/console/chat?session=" + url.QueryEscape(state.Form.ClientSessionID),
 		ASSDownloadURL: assDownloadURL,
 		ASSSHA256URL:   assSHA256URL,
+	}
+	expectedBuildRevision, err := handler.consoleChatCloudAgentExpectedBuildRevision(ctx, assSHA256URL, worker, startOptions)
+	if err != nil {
+		return consoleChatEnvironmentEnsureResponse{}, err
+	}
+	assUpgradeNeeded, _ := handler.consoleChatCloudAgentNeedsASSUpgrade(ctx, assSHA256URL, account)
+	if account, cloudSession, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, userID, state.Form.ClientSessionID, workerID, state.Form.PublicName, expectedBuildRevision, account, now); err != nil {
+		return consoleChatEnvironmentEnsureResponse{}, err
+	} else if ok {
+		response := consoleChatEnvironmentEnsureResponse{
+			Status:        "ready",
+			SessionID:     state.Form.ClientSessionID,
+			Environment:   state.Form.Environment,
+			WorkerID:      workerID,
+			ContainerName: account.ContainerName,
+			WorkspacePath: firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath)),
+			Notice:        handler.requestText(r, "Cloud Agent 已在 "+workerID+" 就绪", "Cloud agent is ready on "+workerID),
+		}
+		emit(consoleChatEnvironmentEnsureStreamEvent{
+			Type:    "phase",
+			Phase:   "reuse",
+			Message: handler.requestText(r, "复用已就绪的 Cloud Agent", "Reusing the ready cloud agent"),
+		})
+		emit(consoleChatEnvironmentEnsureReadyEvent(response))
+		return response, nil
+	}
+	account.Status = domain.CloudAgentStatusStarting
+	account.LastError = ""
+	if err := handler.store.UpsertCloudAgentAccount(ctx, account); err != nil {
+		return consoleChatEnvironmentEnsureResponse{}, err
+	}
+	emit(consoleChatEnvironmentEnsureStreamEvent{
+		Type:     "phase",
+		Phase:    "starting",
+		Message:  handler.requestText(r, "正在准备 Cloud Agent 运行时", "Preparing the cloud agent runtime"),
+		WorkerID: workerID,
 	})
+	var instance workerops.CloudAgentInstance
+	if onEvent != nil && handler.ensureCloudAgentWithProgress != nil {
+		instance, err = handler.ensureCloudAgentWithProgress(ctx, worker, key, proxy, startOptions, func(event workerops.CloudAgentEnsureEvent) error {
+			return onEvent(consoleChatEnvironmentEnsureStreamEvent{
+				Type:          event.Type,
+				Phase:         event.Phase,
+				Message:       event.Message,
+				WorkerID:      workerID,
+				ContainerName: event.ContainerName,
+				WorkspacePath: event.WorkspacePath,
+			})
+		})
+	} else {
+		instance, err = handler.ensureCloudAgent(ctx, worker, key, proxy, startOptions)
+	}
 	if err != nil {
 		account.Status = domain.CloudAgentStatusError
 		account.LastError = err.Error()
@@ -535,7 +651,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 			Status:        domain.CloudAgentSessionStatusPending,
 			LastError:     err.Error(),
 		})
-		return consoleChatEnvironmentEnsureResponse{}, errors.New(handler.requestText(r, "Cloud Agent 启动失败：", "Cloud agent startup failed: ") + err.Error())
+		return consoleChatEnvironmentEnsureResponse{}, errors.New(handler.requestText(r, "Claude Code 启动失败：", "Claude Code startup failed: ") + err.Error())
 	}
 	now = time.Now().UTC()
 	account.ContainerID = strings.TrimSpace(instance.ContainerID)
@@ -544,7 +660,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	account.LastError = ""
 	account.LastStartedAt = &now
 	account.LastSeenAt = &now
-	if err := handler.applyConsoleChatCloudAgentASSRelease(ctx, account, assSHA256URL); err != nil {
+	if err := handler.applyConsoleChatCloudAgentRelease(ctx, account, assSHA256URL, firstNonEmpty(strings.TrimSpace(instance.BuildRevision), expectedBuildRevision)); err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
 	if err := handler.store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
@@ -564,7 +680,7 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 	if assUpgradeNeeded {
 		notice = handler.requestText(r, "Cloud Agent 已更新 aiyolo-ass 并在 "+workerID+" 就绪", "Cloud agent upgraded aiyolo-ass and is ready on "+workerID)
 	}
-	return consoleChatEnvironmentEnsureResponse{
+	response := consoleChatEnvironmentEnsureResponse{
 		Status:        "ready",
 		SessionID:     state.Form.ClientSessionID,
 		Environment:   state.Form.Environment,
@@ -572,7 +688,40 @@ func (handler *Handler) ensureConsoleChatEnvironment(ctx context.Context, r *htt
 		ContainerName: account.ContainerName,
 		WorkspacePath: account.WorkspacePath,
 		Notice:        notice,
-	}, nil
+	}
+	emit(consoleChatEnvironmentEnsureReadyEvent(response))
+	return response, nil
+}
+
+func (handler *Handler) chatEnvironmentEnsureStream(w http.ResponseWriter, r *http.Request) {
+	if err := parseConsoleChatForm(r); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	state, err := handler.chatPageState(r.Context(), r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	handler.startChatEventStream(w)
+	writeEvent := func(event consoleChatEnvironmentEnsureStreamEvent) error {
+		return writeConsoleChatEnvironmentEnsureEvent(w, event)
+	}
+	response, err := handler.ensureConsoleChatEnvironmentWithEvents(r.Context(), r, &state, writeEvent)
+	if err != nil {
+		_ = writeEvent(consoleChatEnvironmentEnsureStreamEvent{
+			Type:        "error",
+			SessionID:   strings.TrimSpace(state.Form.ClientSessionID),
+			Environment: normalizeConsoleChatEnvironmentValue(state.Form.Environment, state.EnvironmentOptions),
+			Error:       err.Error(),
+			Message:     err.Error(),
+		})
+		return
+	}
+	if response.Status == "ready" || response.Status == "local" {
+		return
+	}
+	_ = writeEvent(consoleChatEnvironmentEnsureReadyEvent(response))
 }
 
 func (handler *Handler) chatEnvironmentEnsure(w http.ResponseWriter, r *http.Request) {

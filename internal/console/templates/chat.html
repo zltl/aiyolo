@@ -7,7 +7,7 @@
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
   <link rel="stylesheet" href="/console/static/vendor/file-icons-style.css?v=vendor-20260606a">
   <link rel="stylesheet" href="/console/static/vendor/github-dark.min.css?v=vendor-20260606a">
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260606b">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260607b">
   <link rel="stylesheet" href="/console/static/vendor/xterm.css?v=vendor-20260606a">
 </head>
 <body class="chat-workspace-body">
@@ -18,7 +18,7 @@
 
 {{define "chat-content"}}
 <div id="chat-content" class="chat-workspace-page">
-  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-shell-state-url="{{.ChatShellStateURL}}" data-chat-attachment-tree-url="{{.ChatAttachmentTreeURL}}" data-chat-attachment-tree-enabled="{{if .ChatAttachmentTreeEnabled}}true{{else}}false{{end}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-listdir-url="{{.ChatWorkspaceListDirURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-workspace-download-url="{{.ChatWorkspaceDownloadURL}}" data-chat-workspace-upload-url="{{.ChatWorkspaceUploadURL}}" data-chat-workspace-upload-max-bytes="{{.ChatWorkspaceUploadMaxBytes}}" data-chat-workspace-directory-url="{{.ChatWorkspaceDirectoryURL}}" data-chat-workspace-copy-url="{{.ChatWorkspaceCopyURL}}" data-chat-workspace-rename-url="{{.ChatWorkspaceRenameURL}}" data-chat-workspace-delete-url="{{.ChatWorkspaceDeleteURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
+  <form class="chat-shell" method="post" action="/console/chat" data-chat-stream-url="/console/chat/stream" data-chat-stream-resume-url="/console/chat/stream/resume" data-chat-environment-ensure-url="/console/chat/environment/ensure" data-chat-environment-ensure-stream-url="/console/chat/environment/ensure/stream" data-chat-session-save-url="/console/chat/session" data-chat-shell-url="{{.ChatShellPageURL}}" data-chat-shell-socket-url="{{.ChatShellSocketURL}}" data-chat-shell-state-url="{{.ChatShellStateURL}}" data-chat-attachment-tree-url="{{.ChatAttachmentTreeURL}}" data-chat-attachment-tree-enabled="{{if .ChatAttachmentTreeEnabled}}true{{else}}false{{end}}" data-chat-workspace-tree-url="{{.ChatWorkspaceTreeURL}}" data-chat-workspace-listdir-url="{{.ChatWorkspaceListDirURL}}" data-chat-workspace-file-url="{{.ChatWorkspaceFileURL}}" data-chat-workspace-download-url="{{.ChatWorkspaceDownloadURL}}" data-chat-workspace-upload-url="{{.ChatWorkspaceUploadURL}}" data-chat-workspace-upload-max-bytes="{{.ChatWorkspaceUploadMaxBytes}}" data-chat-workspace-directory-url="{{.ChatWorkspaceDirectoryURL}}" data-chat-workspace-copy-url="{{.ChatWorkspaceCopyURL}}" data-chat-workspace-rename-url="{{.ChatWorkspaceRenameURL}}" data-chat-workspace-delete-url="{{.ChatWorkspaceDeleteURL}}" data-chat-user-label="{{msg .Locale "你" "You"}}" data-chat-assistant-label="AIYolo" data-chat-streaming-label="{{msg .Locale "正在回复" "Streaming"}}" data-chat-attachment-upload-url="{{.ChatAttachmentUploadURL}}" data-chat-attachment-upload-enabled="{{if .ChatAttachmentUploadEnabled}}true{{else}}false{{end}}" data-chat-attachment-max-bytes="{{.ChatAttachmentMaxBytes}}">
     <div class="chat-workbench">
       <div class="chat-sidebar-column">
         <nav class="chat-activitybar" aria-label="{{msg .Locale "工作台导航" "Workbench navigation"}}">
@@ -54,8 +54,8 @@
                 <section class="chat-explorer-tree-section" data-chat-workspace-section hidden>
                   <div class="chat-explorer-section-head">
                     <span class="chat-explorer-section-caret" aria-hidden="true">&gt;</span>
-                    <span>{{msg .Locale "Cloud Agent 工作区" "Cloud Agent workspace"}}</span>
-                    <div class="chat-explorer-section-actions" role="toolbar" aria-label="{{msg .Locale "Cloud Agent 工作区操作" "Cloud Agent workspace actions"}}">
+                    <span>{{msg .Locale "Claude Code 工作区" "Claude Code workspace"}}</span>
+                    <div class="chat-explorer-section-actions" role="toolbar" aria-label="{{msg .Locale "Claude Code 工作区操作" "Claude Code workspace actions"}}">
                       <button class="chat-explorer-action" type="button" data-chat-action="create-workspace-file" aria-label="{{msg .Locale "新建文件" "New file"}}" title="{{msg .Locale "新建文件" "New file"}}">
                         <i class="chat-control-icon" data-lucide="file-plus-2" aria-hidden="true"></i>
                       </button>
@@ -64,7 +64,7 @@
                       </button>
                     </div>
                   </div>
-                  <div class="chat-explorer-root" data-chat-workspace-root-copy>{{msg .Locale "等待 Cloud Agent 工作区" "Waiting for the Cloud Agent workspace"}}</div>
+                  <div class="chat-explorer-root" data-chat-workspace-root-copy>{{msg .Locale "等待 Claude Code 工作区" "Waiting for the Claude Code workspace"}}</div>
                   <p class="chat-workspace-status" data-chat-workspace-status hidden></p>
                   <div class="chat-workspace-tree" data-chat-workspace-tree></div>
                 </section>
@@ -353,7 +353,7 @@
   <script src="/console/static/vendor/xterm.js?v=vendor-20260606a"></script>
   <script src="/console/static/vendor/addon-fit.js?v=vendor-20260606a"></script>
   <script src="/console/static/chat-shell.js?v=chat-shell-20260604a"></script>
-  <script src="/console/static/chat.js?v=chat-codex-reconnect-20260605d"></script>
+  <script src="/console/static/chat.js?v=chat-env-toast-20260607b"></script>
   <script src="/console/static/chat-workspace.js?v=chat-workspace-20260604a"></script>
 </div>
 {{end}}

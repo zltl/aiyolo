@@ -287,10 +287,10 @@ func (store *PostgresStore) UpsertCloudAgentAccount(ctx context.Context, account
 	}
 	normalized.UpdatedAt = now
 	_, err = store.pool.Exec(ctx, `
-INSERT INTO cloud_agent_accounts (user_id, id, worker_id, agent_type, model_public_name, container_id, container_name, workspace_path, credential_ciphertext, status, last_error, last_ass_sha256, created_at, updated_at, last_started_at, last_seen_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-ON CONFLICT (user_id, id) DO UPDATE SET worker_id = excluded.worker_id, agent_type = excluded.agent_type, model_public_name = excluded.model_public_name, container_id = excluded.container_id, container_name = excluded.container_name, workspace_path = excluded.workspace_path, credential_ciphertext = CASE WHEN excluded.credential_ciphertext = '' THEN cloud_agent_accounts.credential_ciphertext ELSE excluded.credential_ciphertext END, status = excluded.status, last_error = excluded.last_error, last_ass_sha256 = excluded.last_ass_sha256, updated_at = excluded.updated_at, last_started_at = excluded.last_started_at, last_seen_at = excluded.last_seen_at`,
-		normalized.UserID, normalized.ID, normalized.WorkerID, normalized.AgentType, normalized.ModelPublicName, normalized.ContainerID, normalized.ContainerName, normalized.WorkspacePath, credentialCiphertext, normalized.Status, normalized.LastError, normalized.LastASSSHA256, normalized.CreatedAt, normalized.UpdatedAt, normalized.LastStartedAt, normalized.LastSeenAt)
+INSERT INTO cloud_agent_accounts (user_id, id, worker_id, agent_type, model_public_name, container_id, container_name, workspace_path, credential_ciphertext, status, last_error, last_ass_sha256, last_build_revision, created_at, updated_at, last_started_at, last_seen_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+ON CONFLICT (user_id, id) DO UPDATE SET worker_id = excluded.worker_id, agent_type = excluded.agent_type, model_public_name = excluded.model_public_name, container_id = excluded.container_id, container_name = excluded.container_name, workspace_path = excluded.workspace_path, credential_ciphertext = CASE WHEN excluded.credential_ciphertext = '' THEN cloud_agent_accounts.credential_ciphertext ELSE excluded.credential_ciphertext END, status = excluded.status, last_error = excluded.last_error, last_ass_sha256 = excluded.last_ass_sha256, last_build_revision = excluded.last_build_revision, updated_at = excluded.updated_at, last_started_at = excluded.last_started_at, last_seen_at = excluded.last_seen_at`,
+		normalized.UserID, normalized.ID, normalized.WorkerID, normalized.AgentType, normalized.ModelPublicName, normalized.ContainerID, normalized.ContainerName, normalized.WorkspacePath, credentialCiphertext, normalized.Status, normalized.LastError, normalized.LastASSSHA256, normalized.LastBuildRevision, normalized.CreatedAt, normalized.UpdatedAt, normalized.LastStartedAt, normalized.LastSeenAt)
 	return err
 }
 
@@ -298,9 +298,9 @@ func (store *PostgresStore) ListCloudAgentAccounts(ctx context.Context, userID s
 	var rows pgx.Rows
 	var err error
 	if strings.TrimSpace(workerID) == "" {
-		rows, err = store.pool.Query(ctx, `SELECT user_id, id, worker_id, agent_type, model_public_name, container_id, container_name, workspace_path, credential_ciphertext, status, last_error, last_ass_sha256, created_at, updated_at, last_started_at, last_seen_at FROM cloud_agent_accounts WHERE user_id = $1 ORDER BY updated_at DESC, created_at DESC, id ASC`, strings.TrimSpace(userID))
+		rows, err = store.pool.Query(ctx, `SELECT user_id, id, worker_id, agent_type, model_public_name, container_id, container_name, workspace_path, credential_ciphertext, status, last_error, last_ass_sha256, last_build_revision, created_at, updated_at, last_started_at, last_seen_at FROM cloud_agent_accounts WHERE user_id = $1 ORDER BY updated_at DESC, created_at DESC, id ASC`, strings.TrimSpace(userID))
 	} else {
-		rows, err = store.pool.Query(ctx, `SELECT user_id, id, worker_id, agent_type, model_public_name, container_id, container_name, workspace_path, credential_ciphertext, status, last_error, last_ass_sha256, created_at, updated_at, last_started_at, last_seen_at FROM cloud_agent_accounts WHERE user_id = $1 AND worker_id = $2 ORDER BY updated_at DESC, created_at DESC, id ASC`, strings.TrimSpace(userID), strings.TrimSpace(workerID))
+		rows, err = store.pool.Query(ctx, `SELECT user_id, id, worker_id, agent_type, model_public_name, container_id, container_name, workspace_path, credential_ciphertext, status, last_error, last_ass_sha256, last_build_revision, created_at, updated_at, last_started_at, last_seen_at FROM cloud_agent_accounts WHERE user_id = $1 AND worker_id = $2 ORDER BY updated_at DESC, created_at DESC, id ASC`, strings.TrimSpace(userID), strings.TrimSpace(workerID))
 	}
 	if err != nil {
 		return nil, err
@@ -318,7 +318,7 @@ func (store *PostgresStore) ListCloudAgentAccounts(ctx context.Context, userID s
 }
 
 func (store *PostgresStore) GetCloudAgentAccount(ctx context.Context, userID string, accountID string) (domain.CloudAgentAccount, error) {
-	row := store.pool.QueryRow(ctx, `SELECT user_id, id, worker_id, agent_type, model_public_name, container_id, container_name, workspace_path, credential_ciphertext, status, last_error, last_ass_sha256, created_at, updated_at, last_started_at, last_seen_at FROM cloud_agent_accounts WHERE user_id = $1 AND id = $2`, strings.TrimSpace(userID), strings.TrimSpace(accountID))
+	row := store.pool.QueryRow(ctx, `SELECT user_id, id, worker_id, agent_type, model_public_name, container_id, container_name, workspace_path, credential_ciphertext, status, last_error, last_ass_sha256, last_build_revision, created_at, updated_at, last_started_at, last_seen_at FROM cloud_agent_accounts WHERE user_id = $1 AND id = $2`, strings.TrimSpace(userID), strings.TrimSpace(accountID))
 	item, err := store.scanCloudAgentAccount(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.CloudAgentAccount{}, ErrNotFound
@@ -402,7 +402,7 @@ func (store *PostgresStore) scanWorkerSSHKey(scanner interface{ Scan(dest ...any
 func (store *PostgresStore) scanCloudAgentAccount(scanner interface{ Scan(dest ...any) error }) (domain.CloudAgentAccount, error) {
 	var item domain.CloudAgentAccount
 	var credentialCiphertext string
-	if err := scanner.Scan(&item.UserID, &item.ID, &item.WorkerID, &item.AgentType, &item.ModelPublicName, &item.ContainerID, &item.ContainerName, &item.WorkspacePath, &credentialCiphertext, &item.Status, &item.LastError, &item.LastASSSHA256, &item.CreatedAt, &item.UpdatedAt, &item.LastStartedAt, &item.LastSeenAt); err != nil {
+	if err := scanner.Scan(&item.UserID, &item.ID, &item.WorkerID, &item.AgentType, &item.ModelPublicName, &item.ContainerID, &item.ContainerName, &item.WorkspacePath, &credentialCiphertext, &item.Status, &item.LastError, &item.LastASSSHA256, &item.LastBuildRevision, &item.CreatedAt, &item.UpdatedAt, &item.LastStartedAt, &item.LastSeenAt); err != nil {
 		return domain.CloudAgentAccount{}, err
 	}
 	credential, err := store.box.Decrypt(credentialCiphertext)

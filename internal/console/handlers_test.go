@@ -24,9 +24,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/zltl/aiyolo/internal/app"
 	"github.com/zltl/aiyolo/internal/artifacts"
 	"github.com/zltl/aiyolo/internal/auth"
+	"github.com/zltl/aiyolo/internal/console"
 	"github.com/zltl/aiyolo/internal/domain"
 	"github.com/zltl/aiyolo/internal/storage"
 )
@@ -1883,6 +1886,35 @@ func TestConsoleChatPageOmitsAdvancedSettings(t *testing.T) {
 	}
 	if !strings.Contains(html, `data-lucide="send-horizontal"`) || !strings.Contains(html, `data-lucide="square"`) {
 		t.Fatalf("chat page should render lucide placeholders for the primary composer action: %s", html)
+	}
+}
+
+func TestConsoleVendorAssetsAreServed(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	handler := console.NewHandler(console.Config{SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password"}, store)
+	router := chi.NewRouter()
+	router.Mount("/console", handler.Routes())
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	for _, path := range []string{
+		"/console/static/vendor/xterm.js",
+		"/console/static/vendor/xterm.css",
+		"/console/static/vendor/addon-fit.js",
+		"/console/static/vendor/lucide.min.js",
+		"/console/static/chat.js",
+	} {
+		response, err := http.Get(server.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("expected %s to return 200, got %d", path, response.StatusCode)
+		}
 	}
 }
 

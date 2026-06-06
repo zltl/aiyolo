@@ -140,7 +140,7 @@ func runCloudAgentCodexASSJob(ctx context.Context, worker domain.WorkerServer, k
 	script := buildCloudAgentCodexASSScript(options)
 	argv := []string{"/bin/bash", "-lc", script}
 	env := buildCloudAgentCodexASSJobEnv(apiKey)
-	if _, err := StartCloudAgentASSJob(ctx, worker, key, account, cloudSession, jobID, "codex", workingDirectory, argv, env, ""); err != nil {
+	if _, err := StartCloudAgentASSJob(ctx, worker, key, account, cloudSession, jobID, "claude-code", workingDirectory, argv, env, ""); err != nil {
 		return "", err
 	}
 	output := strings.Builder{}
@@ -171,20 +171,6 @@ func runCloudAgentCodexASSJob(ctx context.Context, worker domain.WorkerServer, k
 	return output.String(), nil
 }
 
-const cloudAgentCodexExecConfigScript = `
-if [[ -n "${OPENAI_BASE_URL:-}" ]]; then
-  cmd+=(-c 'model_provider="aiyolo"')
-  cmd+=(-c "model_providers.aiyolo.base_url=${OPENAI_BASE_URL}")
-  cmd+=(-c 'model_providers.aiyolo.name="AIYolo Gateway"')
-  cmd+=(-c 'model_providers.aiyolo.env_key="OPENAI_API_KEY"')
-  cmd+=(-c 'model_providers.aiyolo.wire_api="responses"')
-  cmd+=(-c 'model_providers.aiyolo.supports_websockets=false')
-fi
-cmd+=(-c 'hide_agent_reasoning=false')
-cmd+=(-c 'model_reasoning_summary="detailed"')
-cmd+=(-c 'show_raw_agent_reasoning=true')
-`
-
 func normalizeCloudAgentWorkingDirectory(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" || strings.ContainsAny(trimmed, "\x00\r\n") || !strings.HasPrefix(trimmed, "/") {
@@ -212,7 +198,6 @@ if [[ -n "$api_key" ]]; then
 	credential_env_args=(
 		-e "AIYOLO_API_KEY=$api_key"
 		-e "OPENAI_API_KEY=$api_key"
-		-e "CODEX_API_KEY=$api_key"
 		-e "ANTHROPIC_API_KEY=$api_key"
 	)
 fi
@@ -222,7 +207,7 @@ docker exec -i \
   -w "$workspace_path" \
   -e HOME=%s \
   -e USER=%s \
-	-e CODEX_HOME=%s \
+	-e CLAUDE_CONFIG_DIR=%s \
 	"${credential_env_args[@]}" \
   -e TERM=xterm-256color \
   -e COLORTERM=truecolor \
@@ -238,20 +223,21 @@ prompt=%s
 initial_prompt=%s
 model=%s
 
-mkdir -p "${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 prompt_to_send="$initial_prompt"
-cmd=(codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox)
-%s
+cmd=(claude -p --output-format stream-json --verbose --dangerously-skip-permissions)
 if [[ -n "$model" ]]; then
-  cmd+=(-m "$model")
+  cmd+=(--model "$model")
 fi
 if [[ -n "$thread_id" ]]; then
   prompt_to_send="$prompt"
-  cmd+=(resume "$thread_id" "$prompt_to_send")
+	if ! "${cmd[@]}" --resume "$thread_id" "$prompt_to_send"; then
+		printf '{"type":"system","subtype":"resume_failed","message":"claude session resume failed; starting a new session"}\n'
+		"${cmd[@]}" "$prompt_to_send"
+	fi
 else
-  cmd+=("$prompt_to_send")
+	"${cmd[@]}" "$prompt_to_send"
 fi
-"${cmd[@]}"
 CONTAINER_CODEX
-`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(strings.TrimSpace(apiKey)), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentCodexHome), shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model), cloudAgentCodexExecConfigScript)
+`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(strings.TrimSpace(apiKey)), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentClaudeConfigDir), shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model))
 }

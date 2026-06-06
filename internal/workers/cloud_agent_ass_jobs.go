@@ -156,6 +156,14 @@ func CloudAgentASSJobNotFound(err error) bool {
 	return strings.Contains(message, "job_not_found") || strings.Contains(message, "job was not found")
 }
 
+func CloudAgentASSJobsEndpointUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "aiyolo-ass endpoint not available") && strings.Contains(message, "/v1/jobs")
+}
+
 func CloudAgentASSJobResumable(info CloudAgentASSJobInfo, err error) bool {
 	if err != nil {
 		return false
@@ -183,20 +191,19 @@ func normalizeJobID(value string) string {
 
 func buildCloudAgentCodexASSJobEnv(apiKey string) map[string]string {
 	env := map[string]string{
-		"HOME":       defaultCloudAgentHome,
-		"USER":       defaultCloudAgentUser,
-		"CODEX_HOME": defaultCloudAgentCodexHome,
-		"TERM":       "xterm-256color",
-		"COLORTERM":  "truecolor",
-		"SHELL":      "/bin/bash",
-		"LANG":       "C.UTF-8",
-		"LC_ALL":     "C.UTF-8",
+		"HOME":              defaultCloudAgentHome,
+		"USER":              defaultCloudAgentUser,
+		"CLAUDE_CONFIG_DIR": defaultCloudAgentClaudeConfigDir,
+		"TERM":              "xterm-256color",
+		"COLORTERM":         "truecolor",
+		"SHELL":             "/bin/bash",
+		"LANG":              "C.UTF-8",
+		"LC_ALL":            "C.UTF-8",
 	}
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey != "" {
 		env["AIYOLO_API_KEY"] = apiKey
 		env["OPENAI_API_KEY"] = apiKey
-		env["CODEX_API_KEY"] = apiKey
 		env["ANTHROPIC_API_KEY"] = apiKey
 	}
 	return env
@@ -208,19 +215,20 @@ thread_id=%s
 prompt=%s
 initial_prompt=%s
 model=%s
-mkdir -p "${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 prompt_to_send="$initial_prompt"
-cmd=(codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox)
-%s
+cmd=(claude -p --output-format stream-json --verbose --dangerously-skip-permissions)
 if [[ -n "$model" ]]; then
-  cmd+=(-m "$model")
+  cmd+=(--model "$model")
 fi
 if [[ -n "$thread_id" ]]; then
   prompt_to_send="$prompt"
-  cmd+=(resume "$thread_id" "$prompt_to_send")
+	if ! "${cmd[@]}" --resume "$thread_id" "$prompt_to_send"; then
+		printf '{"type":"system","subtype":"resume_failed","message":"claude session resume failed; starting a new session"}\n'
+		"${cmd[@]}" "$prompt_to_send"
+	fi
 else
-  cmd+=("$prompt_to_send")
+	"${cmd[@]}" "$prompt_to_send"
 fi
-"${cmd[@]}"
-`, shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model), cloudAgentCodexExecConfigScript)
+`, shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model))
 }

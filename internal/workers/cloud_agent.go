@@ -38,7 +38,7 @@ const (
 	defaultCloudAgentDockerStorageDriver = "vfs"
 	defaultCloudAgentUser                = "aiyolo"
 	defaultCloudAgentHome                = "/workspace"
-	defaultCloudAgentCodexHome           = "/workspace/.codex"
+	defaultCloudAgentClaudeConfigDir     = "/workspace/.claude"
 	cloudAgentImageBuildRevisionLabel    = "aiyolo.cloud_agent.build_revision"
 	cloudAgentImageASSSHA256Label        = "aiyolo.ass.sha256"
 )
@@ -99,6 +99,7 @@ type CloudAgentInstance struct {
 	ConsoleURL        string   `json:"console_url,omitempty"`
 	APIBaseURL        string   `json:"api_base_url,omitempty"`
 	LastStartedAt     string   `json:"last_started_at,omitempty"`
+	BuildRevision     string   `json:"build_revision,omitempty"`
 }
 
 type cloudAgentRemotePayload struct {
@@ -145,10 +146,24 @@ type cloudAgentRemotePayload struct {
 }
 
 func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options CloudAgentStartOptions) (CloudAgentInstance, error) {
+	return ensureCloudAgent(ctx, worker, key, proxy, options, nil)
+}
+
+func EnsureCloudAgentWithProgress(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options CloudAgentStartOptions, onEvent func(CloudAgentEnsureEvent) error) (CloudAgentInstance, error) {
+	return ensureCloudAgent(ctx, worker, key, proxy, options, onEvent)
+}
+
+func ensureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options CloudAgentStartOptions, onEvent func(CloudAgentEnsureEvent) error) (CloudAgentInstance, error) {
 	select {
 	case <-ctx.Done():
 		return CloudAgentInstance{}, ctx.Err()
 	default:
+	}
+	emitPhase := func(phase, message string) {
+		if onEvent == nil {
+			return
+		}
+		_ = onEvent(CloudAgentEnsureEvent{Type: "phase", Phase: phase, Message: message})
 	}
 	worker, err := domain.NormalizeWorkerServer(worker)
 	if err != nil {
@@ -162,11 +177,13 @@ func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	if err != nil {
 		return CloudAgentInstance{}, err
 	}
+	emitPhase("connect", fmt.Sprintf("Connecting to worker %s over SSH", worker.ID))
 	proxyEnv := RenderProxyEnv(proxy)
 	containerEnv := cloudAgentContainerEnv(options)
 	for key, value := range proxyEnv {
 		containerEnv[key] = value
 	}
+	emitPhase("resolve_ass", "Resolving published aiyolo-ass checksum")
 	resolveCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	assSHA256, err := ResolveCloudAgentASSSHA256(resolveCtx, options.ASSSHA256URL)
@@ -225,7 +242,13 @@ func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	}
 	defer client.Close()
 	command := buildCloudAgentRemoteCommand(string(payload))
-	output, err := runSSHCommand(client, command)
+	emitPhase("ensure_remote", "Ensuring cloud agent container on worker")
+	var output string
+	if onEvent != nil {
+		output, err = runSSHCommandWithProgress(ctx, client, command, onEvent)
+	} else {
+		output, err = runSSHCommand(client, command)
+	}
 	if err != nil {
 		return CloudAgentInstance{}, fmt.Errorf("ensure cloud agent on %s: %w", worker.ID, err)
 	}
@@ -233,6 +256,7 @@ func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &instance); err != nil {
 		return CloudAgentInstance{}, fmt.Errorf("parse cloud agent response: %w", err)
 	}
+	instance.BuildRevision = buildRevision
 	return instance, nil
 }
 
@@ -243,7 +267,7 @@ func normalizeCloudAgentStartOptions(worker domain.WorkerServer, options CloudAg
 	}
 	options.AgentType = strings.TrimSpace(options.AgentType)
 	if options.AgentType == "" {
-		options.AgentType = domain.CloudAgentTypeCodex
+		options.AgentType = domain.CloudAgentTypeClaudeCode
 	}
 	options.Image = strings.TrimSpace(options.Image)
 	if options.Image == "" {
@@ -492,11 +516,10 @@ func cloudAgentContainerEnv(options CloudAgentStartOptions) map[string]string {
 		"OPENAI_BASE_URL":                      options.APIBaseURL,
 		"OPENAI_API_BASE":                      options.APIBaseURL,
 		"OPENAI_API_KEY":                       options.APIKey,
-		"CODEX_API_KEY":                        options.APIKey,
-		"CODEX_HOME":                           defaultCloudAgentCodexHome,
 		"ANTHROPIC_API_KEY":                    options.APIKey,
 		"ANTHROPIC_BASE_URL":                   apiRoot,
 		"ANTHROPIC_API_URL":                    apiRoot,
+		"CLAUDE_CONFIG_DIR":                    defaultCloudAgentClaudeConfigDir,
 		"AIYOLO_CLOUD_AGENT_ENABLE_DISPLAY":    boolString(options.EnableDisplay),
 		"AIYOLO_CLOUD_AGENT_ENABLE_DOCKERD":    boolString(options.EnableDockerd),
 		"AIYOLO_CLOUD_AGENT_AUTO_START_CHROME": boolString(options.AutoStartChrome),
@@ -547,14 +570,26 @@ func buildCloudAgentRemoteCommand(payloadJSON string) string {
 	return "python3 - <<'PY'\n" + script + "\nPY"
 }
 
+func CloudAgentBuildRevision(worker domain.WorkerServer, options CloudAgentStartOptions, assSHA256 string) (string, error) {
+	worker, err := domain.NormalizeWorkerServer(worker)
+	if err != nil {
+		return "", err
+	}
+	options, err = normalizeCloudAgentStartOptions(worker, options)
+	if err != nil {
+		return "", err
+	}
+	return cloudAgentBuildRevision(options, cloudAgentBuildContextFiles, assSHA256), nil
+}
+
 var cloudAgentBuildContextFiles = map[string]string{
-	"Dockerfile":                        cloudAgentAssetString("cloud-agent/Dockerfile"),
-	"cloud-agent-base.json":             cloudAgentAssetString("cloud-agent/cloud-agent-base.json"),
-	"aiyolo-cloud-agent-entrypoint":     cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-entrypoint"),
-	"aiyolo-cloud-agent-info":           cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-info"),
-	"aiyolo-cloud-agent-start-display":  cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-display"),
-	"aiyolo-cloud-agent-open-chrome":    cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-open-chrome"),
-	"aiyolo-cloud-agent-start-docker":   cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-docker"),
+	"Dockerfile":                            cloudAgentAssetString("cloud-agent/Dockerfile"),
+	"cloud-agent-base.json":                 cloudAgentAssetString("cloud-agent/cloud-agent-base.json"),
+	"aiyolo-cloud-agent-entrypoint":         cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-entrypoint"),
+	"aiyolo-cloud-agent-info":               cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-info"),
+	"aiyolo-cloud-agent-start-display":      cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-display"),
+	"aiyolo-cloud-agent-open-chrome":        cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-open-chrome"),
+	"aiyolo-cloud-agent-start-docker":       cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-docker"),
 	"aiyolo-cloud-agent-start-services":     cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-services"),
 	"aiyolo-cloud-agent-write-codex-config": cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-write-codex-config"),
 }

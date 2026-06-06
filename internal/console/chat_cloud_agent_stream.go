@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 )
 
 const consoleChatStreamResumePath = "/console/chat/stream/resume"
+
+var errConsoleCloudAgentStreamClientDisconnected = errors.New("console cloud agent stream client disconnected")
 
 type consoleCloudAgentRunRegistry struct {
 	mu   sync.Mutex
@@ -186,7 +189,7 @@ func (run *consoleCloudAgentRun) complete(execution consoleChatExecution, execut
 	if executionErr != nil {
 		failureDetail := strings.TrimSpace(executionErr.Error())
 		if failureDetail == "" {
-			failureDetail = consoleText(run.locale, "Cloud Agent 执行失败。", "Cloud agent execution failed.")
+			failureDetail = consoleText(run.locale, "Claude Code 执行失败。", "Claude Code execution failed.")
 		}
 		messages := consoleChatAppendResultMessage(run.locale, run.baseMessages, displayed)
 		status := consoleChatSessionStatusForError(displayed)
@@ -195,11 +198,11 @@ func (run *consoleCloudAgentRun) complete(execution consoleChatExecution, execut
 		}
 		run.mu.Lock()
 		run.lastError = failureDetail
-		run.eventError = fmt.Sprintf(consoleText(run.locale, "对话失败：%s", "Chat failed: %s"), failureDetail)
+		run.eventError = consoleChatFormatFailure(run.locale, failureDetail)
 		run.mu.Unlock()
 		run.broadcast(consoleChatStreamEvent{
 			Type:    "error",
-			Error:   fmt.Sprintf(consoleText(run.locale, "对话失败：%s", "Chat failed: %s"), failureDetail),
+			Error:   run.eventError,
 			Message: consoleChatStreamMessage(run.locale, displayed),
 			Result:  consoleChatStreamResult(run.locale, displayed),
 		})
@@ -410,10 +413,7 @@ func (handler *Handler) consoleCloudAgentStoredResumeEvents(ctx context.Context,
 	case consoleChatSessionStatusCompleted:
 		return []consoleChatStreamEvent{{Type: "done", Message: message}}, nil
 	case consoleChatSessionStatusInterrupted, consoleChatSessionStatusFailed:
-		errorText := strings.TrimSpace(record.LastError)
-		if errorText != "" {
-			errorText = fmt.Sprintf(consoleText(locale, "对话失败：%s", "Chat failed: %s"), errorText)
-		}
+		errorText := consoleChatFormatFailure(locale, record.LastError)
 		return []consoleChatStreamEvent{{Type: "error", Error: errorText, Message: message}}, nil
 	case consoleChatSessionStatusStreaming:
 		reconnectMessage := consoleText(locale,
@@ -474,13 +474,22 @@ func (handler *Handler) streamConsoleCloudAgentASSJobResume(r *http.Request, str
 		return
 	}
 	jobInfo, err := workerops.GetCloudAgentASSJob(r.Context(), worker, key, account, cloudSession, sessionID)
+	if workerops.CloudAgentASSJobsEndpointUnavailable(err) {
+		var ensureErr error
+		worker, key, account, cloudSession, ensureErr = handler.resolveConsoleChatCloudAgentRuntimeTarget(r.Context(), r, sessionID)
+		if ensureErr != nil {
+			err = ensureErr
+		} else {
+			jobInfo, err = workerops.GetCloudAgentASSJob(r.Context(), worker, key, account, cloudSession, sessionID)
+		}
+	}
 	if !workerops.CloudAgentASSJobResumable(jobInfo, err) {
 		detail := consoleText(locale,
-			"Cloud Agent 后台任务已结束或丢失，无法继续重连。",
-			"The cloud agent background task ended or was lost; unable to reconnect.",
+			"Claude Code 后台任务已结束或丢失，无法继续重连。",
+			"The Claude Code background task ended or was lost; unable to reconnect.",
 		)
-		if err != nil && !workerops.CloudAgentASSJobNotFound(err) {
-			detail = strings.TrimSpace(err.Error())
+		if err != nil {
+			detail = consoleCloudAgentASSJobResumeDetail(locale, err)
 		}
 		handler.finishConsoleCloudAgentLostResume(r, streamWriter, sessionID, locale, userID, detail)
 		return
@@ -492,14 +501,20 @@ func (handler *Handler) streamConsoleCloudAgentASSJobResume(r *http.Request, str
 	}
 	parser := &consoleCloudAgentStreamParser{}
 	content := strings.Builder{}
+	writeStreamEvent := func(event consoleChatStreamEvent) error {
+		if err := streamWriter.Write(event); err != nil {
+			return errConsoleCloudAgentStreamClientDisconnected
+		}
+		return nil
+	}
 	onDelta := func(delta string) error {
 		content.WriteString(delta)
-		return streamWriter.Write(consoleChatStreamEvent{Type: "delta", Delta: delta})
+		return writeStreamEvent(consoleChatStreamEvent{Type: "delta", Delta: delta})
 	}
 	handlers := consoleCloudAgentStreamHandlers{
 		OnDelta: onDelta,
 		OnReasoning: func(reasoning string) error {
-			return streamWriter.Write(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning})
+			return writeStreamEvent(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning})
 		},
 	}
 	streamErr := workerops.StreamCloudAgentASSJobLive(r.Context(), worker, key, account, cloudSession, sessionID, func(event workerops.CloudAgentASSJobStreamEvent) error {
@@ -516,18 +531,23 @@ func (handler *Handler) streamConsoleCloudAgentASSJobResume(r *http.Request, str
 		}
 		return nil
 	})
-	_ = parser.finish(handlers)
+	if finishErr := parser.finish(handlers); streamErr == nil {
+		streamErr = finishErr
+	}
+	if errors.Is(streamErr, errConsoleCloudAgentStreamClientDisconnected) || errors.Is(streamErr, context.Canceled) || r.Context().Err() != nil {
+		return
+	}
 	result := consoleChatResultView{
-		PublicName: firstNonEmpty(strings.TrimSpace(record.PublicName), strings.TrimSpace(account.ModelPublicName)),
-		ProviderID: "cloud-agent:" + strings.TrimSpace(worker.ID),
-		ProviderName: "Codex · " + strings.TrimSpace(worker.ID),
+		PublicName:    firstNonEmpty(strings.TrimSpace(record.PublicName), strings.TrimSpace(account.ModelPublicName)),
+		ProviderID:    "cloud-agent:" + strings.TrimSpace(worker.ID),
+		ProviderName:  "Claude Code · " + strings.TrimSpace(worker.ID),
 		UpstreamModel: firstNonEmpty(strings.TrimSpace(record.PublicName), strings.TrimSpace(account.ModelPublicName)),
-		Output: parser.resultText(),
-		Reasoning: parser.reasoningText(),
-		ResponseID: firstNonEmpty(parser.sessionID, strings.TrimSpace(record.LastResponseID)),
-		FinishReason: parser.finishReason,
-		DurationMS: parser.durationMS,
-		TotalTokens: parser.totalTokens,
+		Output:        parser.resultText(),
+		Reasoning:     parser.reasoningText(),
+		ResponseID:    firstNonEmpty(parser.sessionID, strings.TrimSpace(record.LastResponseID)),
+		FinishReason:  parser.finishReason,
+		DurationMS:    parser.durationMS,
+		TotalTokens:   parser.totalTokens,
 	}
 	if result.Output == "" {
 		result.Output = strings.TrimSpace(content.String())
@@ -536,7 +556,7 @@ func (handler *Handler) streamConsoleCloudAgentASSJobResume(r *http.Request, str
 	if streamErr != nil {
 		failureDetail := strings.TrimSpace(streamErr.Error())
 		if failureDetail == "" {
-			failureDetail = consoleText(locale, "Cloud Agent 执行失败。", "Cloud agent execution failed.")
+			failureDetail = consoleText(locale, "Claude Code 执行失败。", "Claude Code execution failed.")
 		}
 		messages = consoleChatAppendResultMessage(locale, messages, result)
 		if _, persistErr := handler.persistConsoleChatSessionForUser(r.Context(), locale, userID, sessionID, record.PublicName, record.SystemPrompt, record.Draft, decodeConsoleChatSessionAttachments(record.DraftAttachmentsJSON, handler.cfg.ChatAttachments), messages, consoleChatSessionStatusForError(result), record.LastRequestID, result.ResponseID, failureDetail); persistErr != nil {
@@ -544,7 +564,7 @@ func (handler *Handler) streamConsoleCloudAgentASSJobResume(r *http.Request, str
 		}
 		_ = streamWriter.Write(consoleChatStreamEvent{
 			Type:    "error",
-			Error:   fmt.Sprintf(consoleText(locale, "对话失败：%s", "Chat failed: %s"), failureDetail),
+			Error:   consoleChatFormatFailure(locale, failureDetail),
 			Message: consoleChatStreamMessage(locale, result),
 			Result:  consoleChatStreamResult(locale, result),
 		})
@@ -562,9 +582,9 @@ func (handler *Handler) streamConsoleCloudAgentASSJobResume(r *http.Request, str
 }
 
 func (handler *Handler) finishConsoleCloudAgentLostResume(r *http.Request, streamWriter *consoleChatEventStreamWriter, sessionID, locale, userID, detail string) {
-	detail = strings.TrimSpace(detail)
+	detail = stripConsoleChatFailurePrefix(locale, detail)
 	if detail == "" {
-		detail = consoleText(locale, "Cloud Agent 后台任务已结束或丢失，无法继续重连。", "The cloud agent background task ended or was lost; unable to reconnect.")
+		detail = consoleText(locale, "Claude Code 后台任务已结束或丢失，无法继续重连。", "The Claude Code background task ended or was lost; unable to reconnect.")
 	}
 	record, err := handler.store.GetConsoleChatSession(r.Context(), userID, sessionID)
 	var message *consoleChatAPIMessage
@@ -593,7 +613,7 @@ func (handler *Handler) finishConsoleCloudAgentLostResume(r *http.Request, strea
 	}
 	_ = streamWriter.Write(consoleChatStreamEvent{
 		Type:    "error",
-		Error:   fmt.Sprintf(consoleText(locale, "对话失败：%s", "Chat failed: %s"), detail),
+		Error:   consoleChatFormatFailure(locale, detail),
 		Message: message,
 	})
 }

@@ -83,7 +83,7 @@ func TestInstallProxyEndpointAddressDefaultsHTTPPort(t *testing.T) {
 func TestCloudAgentContainerEnvUsesConsoleBaseURLAndCustomModel(t *testing.T) {
 	env := cloudAgentContainerEnv(CloudAgentStartOptions{
 		UserID:         "user-1",
-		AgentType:      domain.CloudAgentTypeCodex,
+		AgentType:      domain.CloudAgentTypeClaudeCode,
 		WorkspacePath:  domain.DefaultCloudAgentWorkspacePath,
 		APIBaseURL:     "https://aiyolo.quant67.com/v1",
 		ConsoleBaseURL: "https://aiyolo.quant67.com",
@@ -94,8 +94,8 @@ func TestCloudAgentContainerEnvUsesConsoleBaseURLAndCustomModel(t *testing.T) {
 	if env["ANTHROPIC_BASE_URL"] != "https://aiyolo.quant67.com" || env["ANTHROPIC_API_URL"] != "https://aiyolo.quant67.com" {
 		t.Fatalf("unexpected anthropic urls: %+v", env)
 	}
-	if env["CODEX_API_KEY"] != "test-key" || env["CODEX_HOME"] != "/workspace/.codex" {
-		t.Fatalf("missing codex env: %+v", env)
+	if env["ANTHROPIC_API_KEY"] != "test-key" || env["CLAUDE_CONFIG_DIR"] != "/workspace/.claude" {
+		t.Fatalf("missing claude env: %+v", env)
 	}
 	if env["ANTHROPIC_MODEL"] != "deepseek-v4-pro" {
 		t.Fatalf("unexpected anthropic model: %+v", env)
@@ -133,8 +133,8 @@ func TestCloudAgentDockerfileInstallsASS(t *testing.T) {
 	if !strings.Contains(dockerfile, "COPY aiyolo-ass /usr/local/bin/aiyolo-ass") {
 		t.Fatalf("cloud-agent Dockerfile should copy aiyolo-ass: %s", dockerfile)
 	}
-	if !strings.Contains(dockerfile, `@openai/codex@${CODEX_VERSION}`) || !strings.Contains(dockerfile, "codex --version") {
-		t.Fatalf("cloud-agent Dockerfile should install Codex CLI: %s", dockerfile)
+	if !strings.Contains(dockerfile, `@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`) || !strings.Contains(dockerfile, "claude --version") {
+		t.Fatalf("cloud-agent Dockerfile should install Claude Code CLI: %s", dockerfile)
 	}
 	if !strings.Contains(dockerfile, cloudAgentImageASSSHA256Label) || !strings.Contains(dockerfile, cloudAgentImageBuildRevisionLabel) {
 		t.Fatalf("cloud-agent Dockerfile should label aiyolo-ass builds: %s", dockerfile)
@@ -205,8 +205,8 @@ func TestCloudAgentDockerfileInstallsCommonDeveloperTools(t *testing.T) {
 			t.Fatalf("cloud-agent manifest should include %s: %+v", packageName, manifest.Features)
 		}
 	}
-	if !features["codex-cli"] {
-		t.Fatalf("cloud-agent manifest should include codex-cli: %+v", manifest.Features)
+	if !features["claude-code-cli"] {
+		t.Fatalf("cloud-agent manifest should include claude-code-cli: %+v", manifest.Features)
 	}
 
 	infoScript := cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-info")
@@ -284,6 +284,16 @@ func TestCloudAgentASSJobNotFound(t *testing.T) {
 	}
 	if CloudAgentASSJobNotFound(fmt.Errorf("connect aiyolo-ass: connection refused")) {
 		t.Fatal("connection errors should not be treated as job_not_found")
+	}
+}
+
+func TestCloudAgentASSJobsEndpointUnavailable(t *testing.T) {
+	err := fmt.Errorf("aiyolo-ass endpoint not available: GET /v1/jobs/chat_abc returned HTTP 404: 404 page not found")
+	if !CloudAgentASSJobsEndpointUnavailable(err) {
+		t.Fatalf("expected missing jobs endpoint to be detected: %v", err)
+	}
+	if CloudAgentASSJobsEndpointUnavailable(fmt.Errorf("aiyolo-ass endpoint not available: PUT /v1/fs/directory returned HTTP 404: 404 page not found")) {
+		t.Fatal("non-jobs missing endpoints should not be treated as jobs endpoint drift")
 	}
 }
 
@@ -424,46 +434,48 @@ func TestBuildCloudAgentCodexRemoteScriptIncludesResumeAndFlags(t *testing.T) {
 	script := buildCloudAgentCodexRemoteScript("aiyolo-cloud-agent-user", "/workspace/subdir", "aiyolo_live_current", CloudAgentCodexOptions{
 		ThreadID:      "550e8400-e29b-41d4-a716-446655440000",
 		Prompt:        "continue from the current state",
-		InitialPrompt: "reconstruct the chat transcript first",
+		InitialPrompt: "start a Claude Code collaboration",
 		Model:         "deepseek-v4-pro",
 		Stream:        true,
 	})
-	if !strings.Contains(script, `cmd=(codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox)`) {
-		t.Fatalf("script should run codex exec in JSON mode with approvals bypassed: %s", script)
+	if !strings.Contains(script, `cmd=(claude -p --output-format stream-json --verbose --dangerously-skip-permissions)`) {
+		t.Fatalf("script should run claude in stream-json non-interactive mode: %s", script)
 	}
 	if !strings.Contains(script, `workspace_path='/workspace/subdir'`) {
-		t.Fatalf("script should launch codex in the requested working directory: %s", script)
+		t.Fatalf("script should launch claude in the requested working directory: %s", script)
 	}
-	if !strings.Contains(script, `cmd+=(resume "$thread_id" "$prompt_to_send")`) {
-		t.Fatalf("script should resume a previous codex thread when provided: %s", script)
+	if !strings.Contains(script, `if ! "${cmd[@]}" --resume "$thread_id" "$prompt_to_send"; then`) {
+		t.Fatalf("script should attempt to continue using the previous claude session id: %s", script)
 	}
-	if !strings.Contains(script, `cmd+=("$prompt_to_send")`) {
-		t.Fatalf("script should start a new codex thread when no thread id exists: %s", script)
+	assScript := buildCloudAgentCodexASSScript(CloudAgentCodexOptions{
+		ThreadID:      "550e8400-e29b-41d4-a716-446655440000",
+		Prompt:        "continue from the current state",
+		InitialPrompt: "start a Claude Code collaboration",
+		Model:         "deepseek-v4-pro",
+		Stream:        true,
+	})
+	if !strings.Contains(assScript, `if ! "${cmd[@]}" --resume "$thread_id" "$prompt_to_send"; then`) {
+		t.Fatalf("ASS script should resume the previous claude session id: %s", assScript)
 	}
-	if !strings.Contains(script, `-u 'aiyolo'`) || !strings.Contains(script, `-e HOME='/workspace'`) || !strings.Contains(script, `-e CODEX_HOME='/workspace/.codex'`) {
-		t.Fatalf("script should run codex as the non-root cloud-agent user: %s", script)
+	if strings.Contains(assScript, `--session-id`) {
+		t.Fatalf("ASS script should use claude resume instead of session-id: %s", assScript)
 	}
-	for _, expected := range []string{`api_key='aiyolo_live_current'`, `-e "OPENAI_API_KEY=$api_key"`, `-e "CODEX_API_KEY=$api_key"`} {
+	if !strings.Contains(script, `"${cmd[@]}" "$prompt_to_send"`) {
+		t.Fatalf("script should support starting a new claude session when session reuse fails or no thread id exists: %s", script)
+	}
+	if !strings.Contains(script, `-u 'aiyolo'`) || !strings.Contains(script, `-e HOME='/workspace'`) || !strings.Contains(script, `-e CLAUDE_CONFIG_DIR='/workspace/.claude'`) {
+		t.Fatalf("script should run claude as the non-root cloud-agent user: %s", script)
+	}
+	for _, expected := range []string{`api_key='aiyolo_live_current'`, `-e "OPENAI_API_KEY=$api_key"`, `-e "ANTHROPIC_API_KEY=$api_key"`} {
 		if !strings.Contains(script, expected) {
-			t.Fatalf("script should inject fresh codex credentials %s: %s", expected, script)
+			t.Fatalf("script should inject fresh claude credentials %s: %s", expected, script)
 		}
 	}
-	if !strings.Contains(script, `cmd+=(-m "$model")`) {
-		t.Fatalf("script should forward the selected model: %s", script)
-	}
-	for _, expected := range []string{
-		`cmd+=(-c 'model_provider="aiyolo"')`,
-		`cmd+=(-c "model_providers.aiyolo.base_url=${OPENAI_BASE_URL}")`,
-		`cmd+=(-c 'model_providers.aiyolo.supports_websockets=false')`,
-		`cmd+=(-c 'hide_agent_reasoning=false')`,
-		`cmd+=(-c 'model_reasoning_summary="detailed"')`,
-	} {
-		if !strings.Contains(script, expected) {
-			t.Fatalf("script should configure the AIYolo gateway for HTTP responses %s: %s", expected, script)
-		}
+	if !strings.Contains(script, `cmd+=(--model "$model")`) {
+		t.Fatalf("script should forward the selected model to claude: %s", script)
 	}
 	if strings.Contains(script, `--append-system-prompt`) || strings.Contains(script, `system_prompt=`) {
-		t.Fatalf("script should not inject a system prompt into codex: %s", script)
+		t.Fatalf("script should not inject a system prompt into claude: %s", script)
 	}
 }
 
@@ -554,8 +566,23 @@ func TestBuildCloudAgentRemoteCommandWaitsForReusedContainerRuntime(t *testing.T
 	if !strings.Contains(script, `if not container_matches(inspected):`) {
 		t.Fatalf("remote script should validate existing container identity before reuse: %s", script)
 	}
-	if !regexp.MustCompile(`if not container_ass_sha256_matches\(inspected\):\n            replace_container_for_ass_upgrade\(\)\n            ensure_image\(\)\n        else:\n            if not inspected.get\("State", \{\}\).get\("Running"\):\n                run\(\["docker", "start", payload\["container_name"\]\]\)\n            wait_for_container_runtime\(\)\n            return container_summary\(inspect_container\(\)\)`).MatchString(script) {
-		t.Fatalf("reused containers should be started if stopped and wait for runtime readiness before returning: %s", script)
+	if !strings.Contains(script, `if container_can_migrate_agent_type(inspected):`) || !strings.Contains(script, `Replacing cloud agent container for agent type migration`) {
+		t.Fatalf("remote script should auto-replace containers when only agent type changes: %s", script)
+	}
+	if !strings.Contains(script, `if not container_build_revision_matches(inspected):`) || !strings.Contains(script, `Replacing cloud agent container for image revision update`) {
+		t.Fatalf("remote script should auto-replace containers when image build revision changes: %s", script)
+	}
+	if !strings.Contains(script, `if not container_ass_sha256_matches(inspected):`) || !strings.Contains(script, `replace_container_for_ass_upgrade()`) {
+		t.Fatalf("remote script should still replace containers when aiyolo-ass checksum drifts: %s", script)
+	}
+	if !strings.Contains(script, `if not container_has_claude_cli():`) || !strings.Contains(script, `Replacing cloud agent container because claude CLI is missing`) {
+		t.Fatalf("remote script should replace reused containers when claude CLI is missing: %s", script)
+	}
+	if !strings.Contains(script, `if not inspected.get("State", {}).get("Running"):`) || !strings.Contains(script, `run(["docker", "start", payload["container_name"]])`) {
+		t.Fatalf("reused containers should be started if currently stopped: %s", script)
+	}
+	if !strings.Contains(script, `emit_progress("wait_runtime", "Waiting for aiyolo-ass control plane")`) || !strings.Contains(script, `wait_for_container_runtime()`) || !strings.Contains(script, `return container_summary(inspect_container())`) {
+		t.Fatalf("reused containers should wait for runtime readiness before returning a summary: %s", script)
 	}
 	if !strings.Contains(script, `wait_for(["docker", "exec", payload["container_name"], "bash", "-lc", "test -S ${AIYOLO_ASS_SOCKET_PATH:-/run/aiyolo/ass.sock}"], 30)`) {
 		t.Fatalf("remote script should wait for the aiyolo-ass socket: %s", script)
@@ -575,7 +602,6 @@ func TestBuildCloudAgentRemoteCommandIgnoresRuntimeEnvDrift(t *testing.T) {
 		t.Fatalf("remote script should not compare container env when deciding whether to reuse an existing container: %s", script)
 	}
 	for _, unexpected := range []string{
-		`labels.get("aiyolo.cloud_agent.build_revision") !=`,
 		`inspected.get("Config", {}).get("Image") != payload["image"]`,
 	} {
 		if strings.Contains(script, unexpected) {
@@ -607,9 +633,11 @@ func TestBuildCloudAgentRemoteCommandDownloadsPublishedASSBinary(t *testing.T) {
 func TestBuildCloudAgentRemoteCommandReusesExistingImage(t *testing.T) {
 	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user","image":"aiyolo/local-cloud-agent:ubuntu-26.04-v4"}`)
 
-	if !strings.Contains(script, `def image_ass_sha256_matches():`) || !strings.Contains(script, `if image_ass_sha256_matches():
-        return`) {
+	if !strings.Contains(script, `def image_ass_sha256_matches():`) || !strings.Contains(script, `if not force_rebuild and image_ass_sha256_matches():`) || !strings.Contains(script, `emit_progress("reuse_image",`) {
 		t.Fatalf("remote script should reuse an existing image when aiyolo-ass checksum matches: %s", script)
+	}
+	if !strings.Contains(script, `def ensure_image(force_rebuild=False):`) || !strings.Contains(script, `if not force_rebuild and image_ass_sha256_matches():`) {
+		t.Fatalf("remote script should allow forcing an image rebuild when runtime probes detect stale tooling: %s", script)
 	}
 	if strings.Contains(script, `image_matches(inspected)`) {
 		t.Fatalf("remote script should not rebuild an existing image only because labels differ: %s", script)

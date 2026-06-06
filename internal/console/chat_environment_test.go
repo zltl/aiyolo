@@ -346,6 +346,29 @@ func TestChatEnvironmentEnsureReusesActiveCloudAgentSessionAfterOldLastSeen(t *t
 	}
 }
 
+func TestConsoleChatFormatFailureDedupesPrefix(t *testing.T) {
+	raw := "aiyolo-ass endpoint not available: GET /v1/jobs/chat_abc returned HTTP 404: 404 page not found"
+	wrapped := "对话失败：" + raw
+	got := consoleChatFormatFailure("zh-CN", "对话失败："+wrapped)
+	if strings.Count(got, "对话失败：") != 1 {
+		t.Fatalf("expected a single failure prefix, got %q", got)
+	}
+	if !strings.Contains(got, raw) {
+		t.Fatalf("expected underlying error to remain: %q", got)
+	}
+}
+
+func TestConsoleCloudAgentASSJobResumeDetailForMissingJobsEndpoint(t *testing.T) {
+	err := errors.New("aiyolo-ass endpoint not available: GET /v1/jobs/chat_abc returned HTTP 404: 404 page not found")
+	detail := consoleCloudAgentASSJobResumeDetail("zh-CN", err)
+	if strings.Contains(detail, "404 page not found") {
+		t.Fatalf("expected friendly resume detail, got %q", detail)
+	}
+	if !strings.Contains(detail, "aiyolo-ass") {
+		t.Fatalf("expected ass upgrade guidance, got %q", detail)
+	}
+}
+
 func TestConsoleChatCloudAgentNeedsASSUpgrade(t *testing.T) {
 	const oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const newSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -401,19 +424,20 @@ func TestReusableConsoleChatCloudAgentEnvironmentHonorsASSRelease(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{
-		ID:              accountID,
-		UserID:          "admin@example.com",
-		WorkerID:        "worker-0",
-		AgentType:       domain.CloudAgentTypeCodex,
-		ModelPublicName: "gpt-5.4",
-		ContainerID:     "container-123",
-		ContainerName:   "aiyolo-cloud-agent-worker-0",
-		WorkspacePath:   "/srv/aiyolo/workspace/chat-session",
-		Status:          domain.CloudAgentStatusRunning,
-		LastASSSHA256:   currentSHA,
-		CreatedAt:       now,
-		LastStartedAt:   &now,
-		LastSeenAt:      &now,
+		ID:                accountID,
+		UserID:            "admin@example.com",
+		WorkerID:          "worker-0",
+		AgentType:         domain.CloudAgentTypeClaudeCode,
+		ModelPublicName:   "gpt-5.4",
+		ContainerID:       "container-123",
+		ContainerName:     "aiyolo-cloud-agent-worker-0",
+		WorkspacePath:     "/srv/aiyolo/workspace/chat-session",
+		Status:            domain.CloudAgentStatusRunning,
+		LastASSSHA256:     currentSHA,
+		LastBuildRevision: "revision-current",
+		CreatedAt:         now,
+		LastStartedAt:     &now,
+		LastSeenAt:        &now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +446,7 @@ func TestReusableConsoleChatCloudAgentEnvironmentHonorsASSRelease(t *testing.T) 
 		UserID:        "admin@example.com",
 		WorkerID:      "worker-0",
 		AccountID:     accountID,
-		AgentType:     domain.CloudAgentTypeCodex,
+		AgentType:     domain.CloudAgentTypeClaudeCode,
 		ChatSessionID: "session-ass-current",
 		WorkspacePath: "/srv/aiyolo/workspace/chat-session",
 		Status:        domain.CloudAgentSessionStatusActive,
@@ -436,12 +460,18 @@ func TestReusableConsoleChatCloudAgentEnvironmentHonorsASSRelease(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, "admin@example.com", "session-ass-current", "worker-0", "gpt-5.4", account, now); err != nil || !ok {
+	if _, _, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, "admin@example.com", "session-ass-current", "worker-0", "gpt-5.4", "revision-current", account, now); err != nil || !ok {
 		t.Fatalf("expected reusable cloud agent session when ass checksum matches: ok=%v err=%v", ok, err)
 	}
 
+	account.LastBuildRevision = "revision-old"
+	if _, _, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, "admin@example.com", "session-ass-current", "worker-0", "gpt-5.4", "revision-current", account, now); err != nil || ok {
+		t.Fatalf("expected non-reusable cloud agent session when build revision changed: ok=%v err=%v", ok, err)
+	}
+	account.LastBuildRevision = "revision-current"
+
 	account.LastASSSHA256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-	if _, _, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, "admin@example.com", "session-ass-current", "worker-0", "gpt-5.4", account, now); err != nil || ok {
+	if _, _, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, "admin@example.com", "session-ass-current", "worker-0", "gpt-5.4", "revision-current", account, now); err != nil || ok {
 		t.Fatalf("expected non-reusable cloud agent session when ass checksum changed: ok=%v err=%v", ok, err)
 	}
 }
@@ -773,7 +803,7 @@ func TestSendChatEnsuresCloudAgentEnvironment(t *testing.T) {
 			Result: consoleChatResultView{
 				PublicName:    request.PublicName,
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Codex · worker-0",
+				ProviderName:  "Claude Code · worker-0",
 				UpstreamModel: request.PublicName,
 				Output:        "Cloud container is ready.",
 				ResponseID:    "codex-thread-send",
@@ -875,7 +905,7 @@ func TestStreamChatEnsuresCloudAgentEnvironment(t *testing.T) {
 			Result: consoleChatResultView{
 				PublicName:    request.PublicName,
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Codex · worker-0",
+				ProviderName:  "Claude Code · worker-0",
 				UpstreamModel: request.PublicName,
 				Output:        "Cloud agent is live.",
 				ResponseID:    "codex-thread-stream",
@@ -968,7 +998,7 @@ func TestStreamChatReusesRecentlyEnsuredCloudAgentEnvironment(t *testing.T) {
 			Result: consoleChatResultView{
 				PublicName:    request.PublicName,
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Codex · worker-0",
+				ProviderName:  "Claude Code · worker-0",
 				UpstreamModel: request.PublicName,
 				Output:        "reused cloud agent",
 				ResponseID:    "codex-thread-stream-reuse",
@@ -1028,6 +1058,135 @@ func TestStreamChatReusesRecentlyEnsuredCloudAgentEnvironment(t *testing.T) {
 	}
 }
 
+func TestStreamChatRevalidatesCloudAgentWhenBuildRevisionMissing(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedChatEnvironmentRoute(t, ctx, store, "https://provider.invalid")
+	seedChatEnvironmentWorker(t, ctx, store, "worker-0")
+	currentSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	checksumServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(currentSHA + "  aiyolo-ass\n"))
+	}))
+	defer checksumServer.Close()
+
+	var ensureCalls atomic.Int32
+	var cloudChatCalls atomic.Int32
+	handler := NewHandler(Config{
+		SecretKey:          "test-secret",
+		AdminEmail:         "admin@example.com",
+		AdminPassword:      "password",
+		CodexPublicBaseURL: checksumServer.URL,
+	}, store)
+	handler.ensureCloudAgent = func(_ context.Context, worker domain.WorkerServer, _ domain.WorkerSSHKey, _ domain.ProxyProfile, _ workerops.CloudAgentStartOptions) (workerops.CloudAgentInstance, error) {
+		ensureCalls.Add(1)
+		return workerops.CloudAgentInstance{
+			Status:        domain.CloudAgentStatusRunning,
+			WorkerID:      worker.ID,
+			ContainerID:   "container-stream-revalidated",
+			ContainerName: "aiyolo-cloud-agent-worker-0",
+			WorkspacePath: "/srv/aiyolo/workspace/session-stream-revalidate",
+			BuildRevision: "sha256:claude-runtime",
+		}, nil
+	}
+	handler.runCloudAgentChat = func(_ context.Context, _ domain.WorkerServer, _ domain.WorkerSSHKey, account domain.CloudAgentAccount, session domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error) {
+		cloudChatCalls.Add(1)
+		if account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-stream-revalidate" {
+			t.Fatalf("unexpected cloud chat target account=%+v session=%+v", account, session)
+		}
+		if err := request.OnDelta("revalidated cloud agent"); err != nil {
+			return consoleChatExecution{}, err
+		}
+		return consoleChatExecution{
+			Result: consoleChatResultView{
+				PublicName:    request.PublicName,
+				ProviderID:    "cloud-agent:worker-0",
+				ProviderName:  "Claude Code · worker-0",
+				UpstreamModel: request.PublicName,
+				Output:        "revalidated cloud agent",
+				ResponseID:    "claude-thread-stream-revalidated",
+			},
+			StatusCode: http.StatusOK,
+			Usage:      domain.UsageRecord{Currency: "USD", StatusCode: http.StatusOK, Stream: true},
+		}, nil
+	}
+
+	server := mountedConsoleTestServer(handler)
+	defer server.Close()
+
+	now := time.Now().UTC()
+	accountID := consoleChatCloudAgentAccountID("worker-0")
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{
+		ID:              accountID,
+		UserID:          "admin@example.com",
+		WorkerID:        "worker-0",
+		AgentType:       domain.CloudAgentTypeClaudeCode,
+		ModelPublicName: "gpt-5.4",
+		ContainerID:     "container-old-codex",
+		ContainerName:   "aiyolo-cloud-agent-worker-0",
+		WorkspacePath:   "/srv/aiyolo/workspace/session-stream-revalidate",
+		Status:          domain.CloudAgentStatusRunning,
+		LastASSSHA256:   currentSHA,
+		CreatedAt:       now,
+		LastStartedAt:   &now,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{
+		ID:            consoleChatCloudAgentSessionID("session-stream-revalidate"),
+		UserID:        "admin@example.com",
+		WorkerID:      "worker-0",
+		AccountID:     accountID,
+		AgentType:     domain.CloudAgentTypeClaudeCode,
+		ChatSessionID: "session-stream-revalidate",
+		WorkspacePath: "/srv/aiyolo/workspace/session-stream-revalidate",
+		Status:        domain.CloudAgentSessionStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := loggedInWorkersClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(url.Values{
+		"chat_client_session_id": {"session-stream-revalidate"},
+		"chat_public_name":       {"gpt-5.4"},
+		"chat_environment":       {consoleChatEnvironmentValue("worker-0")},
+		"chat_draft":             {"reuse without toggling local"},
+	}.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("stream status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	if text := string(body); !strings.Contains(text, "revalidated cloud agent") || !strings.Contains(text, `"type":"done"`) {
+		t.Fatalf("unexpected stream body: %s", text)
+	}
+	if ensureCalls.Load() != 1 || cloudChatCalls.Load() != 1 {
+		t.Fatalf("ensure_calls=%d cloud_chat_calls=%d", ensureCalls.Load(), cloudChatCalls.Load())
+	}
+	account, err := store.GetCloudAgentAccount(ctx, "admin@example.com", accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.LastBuildRevision != "sha256:claude-runtime" {
+		t.Fatalf("expected refreshed build revision, got account=%+v", account)
+	}
+}
+
 func TestSendChatRoutesThroughCloudAgentCodex(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
@@ -1076,7 +1235,7 @@ func TestSendChatRoutesThroughCloudAgentCodex(t *testing.T) {
 			Result: consoleChatResultView{
 				PublicName:    "gpt-5.4",
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Codex · worker-0",
+				ProviderName:  "Claude Code · worker-0",
 				UpstreamModel: "gpt-5.4",
 				Output:        "Codex 已接管当前 Cloud Agent，会在容器里继续工作。",
 				ResponseID:    "codex-thread-send",
@@ -1165,7 +1324,7 @@ func TestStreamChatRoutesThroughCloudAgentCodex(t *testing.T) {
 			Result: consoleChatResultView{
 				PublicName:    "gpt-5.4",
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Codex · worker-0",
+				ProviderName:  "Claude Code · worker-0",
 				UpstreamModel: "gpt-5.4",
 				Output:        "Codex 已经开始处理。",
 				ResponseID:    "codex-thread-stream",
@@ -1251,7 +1410,7 @@ func TestCloudAgentStreamResumeAfterClientDisconnect(t *testing.T) {
 			Result: consoleChatResultView{
 				PublicName:    "gpt-5.4",
 				ProviderID:    "cloud-agent:worker-0",
-				ProviderName:  "Codex · worker-0",
+				ProviderName:  "Claude Code · worker-0",
 				UpstreamModel: "gpt-5.4",
 				Output:        "Codex continues after refresh.",
 				ResponseID:    "codex-thread-resume",
@@ -1601,6 +1760,9 @@ func TestChatPageRestoresCloudAgentEnvironment(t *testing.T) {
 	html := string(body)
 	if !strings.Contains(html, "data-chat-environment-ensure-url=\"/console/chat/environment/ensure\"") {
 		t.Fatalf("chat page is missing ensure url wiring: %s", html)
+	}
+	if !strings.Contains(html, "data-chat-environment-ensure-stream-url=\"/console/chat/environment/ensure/stream\"") {
+		t.Fatalf("chat page is missing ensure stream url wiring: %s", html)
 	}
 	if !strings.Contains(html, "name=\"chat_environment\" value=\"cloud-agent:worker-0\" data-chat-environment-input") {
 		t.Fatalf("chat page did not restore the selected environment value: %s", html)
@@ -2934,8 +3096,8 @@ func TestChatShellSocketBridgesInteractiveShell(t *testing.T) {
 		if worker.ID != "worker-0" || key.ID != "ssh-key-1" || account.ContainerName != "aiyolo-cloud-agent-worker-0" || session.ChatSessionID != "session-shell" {
 			t.Fatalf("unexpected shell bridge inputs worker=%+v key=%+v account=%+v session=%+v", worker, key, account, session)
 		}
-		if ensureCalls.Load() == 0 {
-			t.Fatal("interactive shell opened before ensuring cloud agent runtime")
+		if ensureCalls.Load() != 0 {
+			t.Fatalf("interactive shell should reuse the ready runtime without a second ensure; ensure calls=%d", ensureCalls.Load())
 		}
 		if cols != consoleChatShellCols || rows != consoleChatShellRows {
 			t.Fatalf("unexpected default shell size cols=%d rows=%d", cols, rows)
@@ -3001,8 +3163,8 @@ func TestChatShellSocketBridgesInteractiveShell(t *testing.T) {
 			echoSeen = true
 		}
 	}
-	if ensureCalls.Load() != 1 {
-		t.Fatalf("ensure calls=%d, want 1", ensureCalls.Load())
+	if ensureCalls.Load() != 0 {
+		t.Fatalf("ensure calls=%d, want 0", ensureCalls.Load())
 	}
 	if openContextHadDeadline.Load() || openContextHadDone.Load() {
 		t.Fatal("interactive shell open context must not expire and close the terminal after connection")
@@ -3124,8 +3286,8 @@ func TestChatShellSocketReusesTerminalAfterWebSocketDisconnect(t *testing.T) {
 	if openCalls.Load() != 1 {
 		t.Fatalf("open shell calls=%d, want 1", openCalls.Load())
 	}
-	if ensureCalls.Load() != 2 {
-		t.Fatalf("ensure calls=%d, want 2", ensureCalls.Load())
+	if ensureCalls.Load() != 0 {
+		t.Fatalf("ensure calls=%d, want 0", ensureCalls.Load())
 	}
 }
 

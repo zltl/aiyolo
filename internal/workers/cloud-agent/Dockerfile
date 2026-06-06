@@ -8,7 +8,7 @@ ARG CHROME_DEB_URL=https://dl.google.com/linux/direct/google-chrome-stable_curre
 ARG AIYOLO_ASS_SHA256=
 ARG AIYOLO_CLOUD_AGENT_BUILD_REVISION=dev
 ARG NODE_VERSION=20.20.2
-ARG CODEX_VERSION=latest
+ARG CLAUDE_CODE_VERSION=latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
@@ -18,7 +18,7 @@ ENV XDG_RUNTIME_DIR=/tmp/runtime-aiyolo
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
 ENV AIYOLO_AGENT_USER=aiyolo
 ENV AIYOLO_AGENT_HOME=/workspace
-ENV CODEX_HOME=/workspace/.codex
+ENV CLAUDE_CONFIG_DIR=/workspace/.claude
 ENV HOME=/workspace
 ENV USER=aiyolo
 
@@ -52,7 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && groupadd --gid 1000 "${AIYOLO_AGENT_USER}" \
  && useradd --uid 1000 --gid 1000 --create-home --home-dir "${AIYOLO_AGENT_HOME}" --shell /bin/bash "${AIYOLO_AGENT_USER}" \
  && usermod -aG sudo,docker "${AIYOLO_AGENT_USER}" \
- && install -d -o "${AIYOLO_AGENT_USER}" -g "${AIYOLO_AGENT_USER}" -m 0755 /workspace "${CODEX_HOME}" "${XDG_RUNTIME_DIR}" /run/aiyolo \
+ && install -d -o "${AIYOLO_AGENT_USER}" -g "${AIYOLO_AGENT_USER}" -m 0755 /workspace "${CLAUDE_CONFIG_DIR}" "${XDG_RUNTIME_DIR}" /run/aiyolo \
  && install -d -m 0755 /etc/aiyolo /etc/sudoers.d /usr/local/bin /opt \
  && printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${AIYOLO_AGENT_USER}" >/etc/sudoers.d/aiyolo \
  && chmod 0440 /etc/sudoers.d/aiyolo \
@@ -65,10 +65,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/node" /usr/local/bin/node \
  && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npm" /usr/local/bin/npm \
  && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npx" /usr/local/bin/npx \
- && npm install -g --prefix /usr/local "@openai/codex@${CODEX_VERSION}" --cache /tmp/.npm-cache --fund=false --audit=false \
+ && npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" --cache /tmp/.npm-cache --fund=false --audit=false \
  && node --version \
  && npm --version \
- && codex --version \
+ && claude --version \
  && rm -f /tmp/node.tar.gz \
  && rm -rf /tmp/.npm-cache \
  && rm -rf /var/lib/apt/lists/*

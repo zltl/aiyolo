@@ -27,16 +27,16 @@ type jobSession struct {
 	id       string
 	kind     string
 
-	mu            sync.Mutex
-	cmd           *exec.Cmd
-	outputPath    string
-	outputSize    int64
-	replay        []byte
-	done          bool
-	exitCode      int
-	lastError     string
-	subscribers   map[int]chan jobStreamEvent
-	nextSubID     int
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	outputPath  string
+	outputSize  int64
+	replay      []byte
+	done        bool
+	exitCode    int
+	lastError   string
+	subscribers map[int]chan jobStreamEvent
+	nextSubID   int
 }
 
 type jobStreamEvent struct {
@@ -47,12 +47,12 @@ type jobStreamEvent struct {
 }
 
 type jobCreateRequest struct {
-	ID      string            `json:"id"`
-	Kind    string            `json:"kind"`
-	Argv    []string          `json:"argv"`
-	CWD     string            `json:"cwd,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	Stdin   string            `json:"stdin,omitempty"`
+	ID    string            `json:"id"`
+	Kind  string            `json:"kind"`
+	Argv  []string          `json:"argv"`
+	CWD   string            `json:"cwd,omitempty"`
+	Env   map[string]string `json:"env,omitempty"`
+	Stdin string            `json:"stdin,omitempty"`
 }
 
 type jobInfo struct {
@@ -165,8 +165,8 @@ func (registry *jobRegistry) start(id, kind, cwd string, argv []string, env map[
 	}
 	registry.mu.Unlock()
 
-	outputDir := filepath.Join("/run/aiyolo", "jobs")
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+	outputDir, err := ensureJobOutputDir(cwd)
+	if err != nil {
 		return nil, false, err
 	}
 	outputPath := filepath.Join(outputDir, id+".log")
@@ -185,12 +185,12 @@ func (registry *jobRegistry) start(id, kind, cwd string, argv []string, env map[
 	cmd.Stdout = pipeWriter
 	cmd.Stderr = pipeWriter
 	job := &jobSession{
-		registry:     registry,
-		id:           id,
-		kind:         kind,
-		cmd:          cmd,
-		outputPath:   outputPath,
-		subscribers:  make(map[int]chan jobStreamEvent),
+		registry:    registry,
+		id:          id,
+		kind:        kind,
+		cmd:         cmd,
+		outputPath:  outputPath,
+		subscribers: make(map[int]chan jobStreamEvent),
 	}
 	registry.mu.Lock()
 	if existing := registry.jobs[id]; existing != nil && !existing.isDone() {
@@ -212,6 +212,22 @@ func (registry *jobRegistry) start(id, kind, cwd string, argv []string, env map[
 	go job.copyOutput(pipeReader, outputFile)
 	go job.waitAndClose(pipeWriter)
 	return job, true, nil
+}
+
+func ensureJobOutputDir(cwd string) (string, error) {
+	primary := filepath.Join("/run/aiyolo", "jobs")
+	if err := os.MkdirAll(primary, 0o755); err == nil {
+		return primary, nil
+	}
+	fallbackRoot := strings.TrimSpace(cwd)
+	if fallbackRoot == "" {
+		fallbackRoot = os.TempDir()
+	}
+	fallback := filepath.Join(fallbackRoot, ".aiyolo", "jobs")
+	if err := os.MkdirAll(fallback, 0o755); err != nil {
+		return "", err
+	}
+	return fallback, nil
 }
 
 func mergeJobEnv(base []string, extra map[string]string) []string {
@@ -242,8 +258,8 @@ func (job *jobSession) copyOutput(reader *io.PipeReader, file *os.File) {
 }
 
 func (job *jobSession) waitAndClose(pipe *io.PipeWriter) {
-	_ = pipe.Close()
 	err := job.cmd.Wait()
+	_ = pipe.Close()
 	exitCode := 0
 	lastError := ""
 	if err != nil {

@@ -61,7 +61,7 @@ func TestMemoryStoreCloudWorkersRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected events: %+v", events)
 	}
 
-	accountA := domain.CloudAgentAccount{ID: "acct-1", UserID: "user-a", WorkerID: worker.ID, Credential: "token-a"}
+	accountA := domain.CloudAgentAccount{ID: "acct-1", UserID: "user-a", WorkerID: worker.ID, Credential: "token-a", LastBuildRevision: "sha256:runtime-a"}
 	accountB := domain.CloudAgentAccount{ID: "acct-2", UserID: "user-b", WorkerID: worker.ID, Credential: "token-b"}
 	if err := store.UpsertCloudAgentAccount(ctx, accountA); err != nil {
 		t.Fatal(err)
@@ -95,8 +95,8 @@ func TestMemoryStoreCloudWorkersRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storedAccount.Credential != accountA.Credential {
-		t.Fatalf("unexpected credential: %q", storedAccount.Credential)
+	if storedAccount.Credential != accountA.Credential || storedAccount.LastBuildRevision != accountA.LastBuildRevision {
+		t.Fatalf("unexpected stored cloud agent account: %+v", storedAccount)
 	}
 	storedSession, err := store.GetCloudAgentSession(ctx, "user-a", sessionA.ID)
 	if err != nil {

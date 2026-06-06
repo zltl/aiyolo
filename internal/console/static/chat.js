@@ -898,6 +898,153 @@
     refreshEnvironmentOptionStates(form);
   };
   const environmentEnsureURL = (form = currentForm()) => String(form?.dataset.chatEnvironmentEnsureUrl || "").trim();
+  const environmentEnsureStreamURL = (form = currentForm()) => {
+    const explicit = String(form?.dataset.chatEnvironmentEnsureStreamUrl || "").trim();
+    if (explicit !== "") {
+      return explicit;
+    }
+    const base = environmentEnsureURL(form);
+    return base === "" ? "" : `${base}/stream`;
+  };
+  let environmentToastTimer = null;
+
+  const dismissEnvironmentToast = () => {
+    if (environmentToastTimer) {
+      window.clearTimeout(environmentToastTimer);
+      environmentToastTimer = null;
+    }
+    document.querySelector("[data-chat-environment-toast]")?.remove();
+  };
+
+  const showEnvironmentToast = (message, tone = "info", options = {}) => {
+    const text = String(message || "").trim();
+    if (text === "") {
+      dismissEnvironmentToast();
+      return;
+    }
+    let host = document.querySelector("[data-chat-environment-toast-host]");
+    if (!(host instanceof HTMLElement)) {
+      host = document.createElement("div");
+      host.className = "chat-environment-toast-host";
+      host.dataset.chatEnvironmentToastHost = "";
+      document.body.appendChild(host);
+    }
+    let toast = host.querySelector("[data-chat-environment-toast]");
+    if (!(toast instanceof HTMLElement)) {
+      toast = document.createElement("div");
+      toast.className = "chat-environment-toast";
+      toast.dataset.chatEnvironmentToast = "";
+      toast.setAttribute("role", "status");
+      toast.setAttribute("aria-live", "polite");
+      host.appendChild(toast);
+    }
+    toast.className = `chat-environment-toast is-${tone}`;
+    toast.textContent = text;
+    if (environmentToastTimer) {
+      window.clearTimeout(environmentToastTimer);
+      environmentToastTimer = null;
+    }
+    if (!options.persistent) {
+      const delay = tone === "error" ? 9000 : 4500;
+      environmentToastTimer = window.setTimeout(() => dismissEnvironmentToast(), delay);
+    }
+  };
+
+  const environmentStatusPhaseLabel = (phase, fallback = "") => {
+    const key = String(phase || "").trim().toLowerCase();
+    switch (key) {
+      case "connect":
+        return t("正在连接 Worker SSH…", "Connecting to worker over SSH…");
+      case "resolve_ass":
+        return t("正在解析 aiyolo-ass 版本…", "Resolving published aiyolo-ass checksum…");
+      case "starting":
+        return t("正在准备 Claude Code 运行时…", "Preparing the Claude Code runtime…");
+      case "ensure_remote":
+        return t("正在远程确保 Claude Code 容器…", "Ensuring the Claude Code container remotely…");
+      case "prepare":
+        return t("正在准备远程工作区…", "Preparing remote workspace…");
+      case "lock":
+        return t("正在获取容器锁…", "Acquiring container lock…");
+      case "download_ass":
+        return t("正在下载 aiyolo-ass…", "Downloading aiyolo-ass…");
+      case "download_rootfs":
+        return t("正在下载基础 rootfs…", "Downloading base rootfs…");
+      case "build_image":
+        return t("正在构建 Claude Code 镜像…", "Building Claude Code image…");
+      case "reuse_image":
+        return t("镜像已是最新，跳过构建", "Image already matches release; skipping build");
+      case "upgrade_container":
+        return t("正在替换 Claude Code 容器…", "Replacing Claude Code container…");
+      case "create_container":
+        return t("正在创建 Claude Code 容器…", "Creating Claude Code container…");
+      case "start_container":
+        return t("正在启动 Claude Code 容器…", "Starting Claude Code container…");
+      case "reuse_container":
+        return t("复用现有 Claude Code 容器", "Reusing existing Claude Code container");
+      case "wait_runtime":
+        return t("正在等待 aiyolo-ass 控制面就绪…", "Waiting for aiyolo-ass control plane…");
+      case "reuse":
+        return t("复用已就绪的 Claude Code", "Reusing the ready Claude Code");
+      case "ready":
+        return t("Claude Code 已连接并就绪", "Claude Code is connected and ready");
+      default:
+        return String(fallback || "").trim();
+    }
+  };
+
+  const applyEnvironmentEnsureEvent = (form, event) => {
+    if (!event || typeof event !== "object") {
+      return null;
+    }
+    const type = String(event.type || "").trim().toLowerCase();
+    if (type === "log") {
+      const phase = String(event.phase || "").trim().toLowerCase();
+      if (phase === "build_image") {
+        const message = String(event.message || "").trim();
+        if (message) {
+          showEnvironmentToast(
+            `${t("镜像构建中：", "Image build: ")}${message}`,
+            "info",
+            { persistent: true }
+          );
+        }
+      }
+      return null;
+    }
+    if (type === "phase") {
+      const phase = String(event.phase || "").trim().toLowerCase();
+      showEnvironmentToast(environmentStatusPhaseLabel(phase, event.message), "info", { persistent: true });
+      return null;
+    }
+    if (type === "local") {
+      showEnvironmentToast(String(event.message || event.notice || t("已切回本地环境", "Switched back to local chat")), "info");
+      return {
+        status: "local",
+        sessionId: event.sessionId,
+        environment: event.environment,
+        notice: event.notice || event.message || "",
+      };
+    }
+    if (type === "ready") {
+      const notice = String(event.notice || event.message || environmentStatusPhaseLabel("ready")).trim();
+      showEnvironmentToast(notice, "success");
+      return {
+        status: "ready",
+        sessionId: event.sessionId,
+        environment: event.environment,
+        workerId: event.workerId,
+        containerName: event.containerName,
+        workspacePath: event.workspacePath,
+        notice,
+      };
+    }
+    if (type === "error") {
+      const message = String(event.error || event.message || t("环境准备失败。", "Failed to prepare the selected environment."));
+      showEnvironmentToast(message, "error");
+      throw new Error(message);
+    }
+    return null;
+  };
 
   const currentSelectedModel = (form) => {
     const checked = pickerFormControls(form, "input[name=\"chat_public_name\"]:checked")[0];
@@ -1753,7 +1900,7 @@
         return;
       }
       if (!result) {
-        setWorkdirStatus(form, t("请先打开 Cloud Agent 会话", "Open a Cloud Agent session first"), true);
+        setWorkdirStatus(form, t("请先打开 Claude Code 会话", "Open a Claude Code session first"), true);
         renderWorkdirSuggestions(form, dir, prefix, [], rawInput);
         return;
       }
@@ -2427,12 +2574,12 @@
       shellButton.title = hiddenShellReady
         ? t("显示 Claude Code 终端", "Show the Claude Code terminal")
         : environmentOpening
-        ? t("正在启动 Cloud Agent…", "Starting the Cloud Agent…")
+        ? t("正在启动 Claude Code…", "Starting the Claude Code…")
         : shellOpenInFlight
-        ? t("正在打开 cloud agent…", "Opening the cloud agent…")
+        ? t("正在打开 Claude Code…", "Opening the Claude Code…")
         : canOpenShell
         ? t("打开 Claude Code 终端", "Open the Claude Code terminal")
-        : t("切换到 Cloud Agent 环境后即可打开 Claude Code 终端", "Switch to a Cloud Agent environment to open the Claude Code terminal");
+        : t("切换到 Claude Code 环境后即可打开 Claude Code 终端", "Switch to a Claude Code environment to open the Claude Code terminal");
       shellButton.setAttribute("aria-label", hiddenShellReady
         ? t("显示 Claude Code 终端", "Show the Claude Code terminal")
         : t("打开 Claude Code 终端", "Open the Claude Code terminal"));
@@ -3941,6 +4088,7 @@
     const root = currentRoot();
     const field = environmentField(form);
     const ensureURL = environmentEnsureURL(form);
+    const ensureStreamURL = environmentEnsureStreamURL(form);
     const suppressSuccessNotice = Boolean(options && options.suppressSuccessNotice);
     if (!root || !(field instanceof HTMLInputElement || field instanceof HTMLSelectElement) || ensureURL === "") {
       return null;
@@ -3968,22 +4116,74 @@
     const previousDisabled = field.disabled;
     field.disabled = true;
     setEnvironmentPickerBusy(form, true);
-    setAttachmentStatus(root, environment === "local"
-      ? t("正在切回本地环境…", "Switching back to local chat…")
-      : t("正在启动 Cloud Agent…", "Starting cloud agent…"), false);
+    dismissEnvironmentToast();
+    if (environment === "local") {
+      showEnvironmentToast(t("正在切回本地环境…", "Switching back to local chat…"), "info", { persistent: true });
+    } else {
+      showEnvironmentToast(t("正在连接 Claude Code…", "Connecting Claude Code…"), "info", { persistent: true });
+    }
+    setAttachmentStatus(root, "", false);
+    const ensureChatEnvironmentViaJSON = async () => {
+      const response = await fetch(ensureURL, {
+        method: "POST",
+        body: payload,
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      const raw = await response.text();
+      const jsonParsed = safeParseJSON(raw, null);
+      if (!response.ok || !jsonParsed || typeof jsonParsed !== "object") {
+        throw new Error(String(jsonParsed?.error || t("环境准备失败。", "Failed to prepare the selected environment.")));
+      }
+      const notice = String(jsonParsed.notice || "").trim();
+      if (environment === "local") {
+        showEnvironmentToast(notice || t("已切回本地环境", "Switched back to local chat"), "info");
+      } else {
+        showEnvironmentToast(notice || t("Claude Code 已连接并就绪", "Claude Code is connected and ready"), "success");
+      }
+      return jsonParsed;
+    };
+    const ensureChatEnvironmentViaStream = async () => {
+      const response = await fetch(ensureStreamURL, {
+        method: "POST",
+        body: payload,
+        credentials: "same-origin",
+        headers: { Accept: "application/x-ndjson" },
+      });
+      if (!response.ok || !response.body) {
+        const raw = await response.text();
+        const fallback = safeParseJSON(raw, null);
+        throw new Error(String(fallback?.error || t("环境准备失败。", "Failed to prepare the selected environment.")));
+      }
+      const contentType = response.headers.get("content-type") || "";
+      if (!contentType.includes("application/x-ndjson")) {
+        throw new Error(t("环境准备流不可用。", "Environment ensure stream is unavailable."));
+      }
+      let streamParsed = null;
+      await decodeStreamEvents(response, (event) => {
+        const result = applyEnvironmentEnsureEvent(form, event);
+        if (result) {
+          streamParsed = result;
+        }
+      });
+      return streamParsed;
+    };
     let ensurePromise = null;
     ensurePromise = (async () => {
       try {
-        const response = await fetch(ensureURL, {
-          method: "POST",
-          body: payload,
-          credentials: "same-origin",
-          headers: { Accept: "application/json" },
-        });
-        const raw = await response.text();
-        const parsed = safeParseJSON(raw, null);
-        if (!response.ok || !parsed || typeof parsed !== "object") {
-          throw new Error(String(parsed?.error || t("环境准备失败。", "Failed to prepare the selected environment.")));
+        let parsed = null;
+        if (environment !== "local" && ensureStreamURL !== "") {
+          try {
+            parsed = await ensureChatEnvironmentViaStream();
+          } catch (_streamError) {
+            showEnvironmentToast(t("正在准备 Claude Code…", "Preparing Claude Code…"), "info", { persistent: true });
+            parsed = await ensureChatEnvironmentViaJSON();
+          }
+        } else {
+          parsed = await ensureChatEnvironmentViaJSON();
+        }
+        if (!parsed || typeof parsed !== "object") {
+          throw new Error(t("环境准备失败。", "Failed to prepare the selected environment."));
         }
         if (typeof parsed.environment === "string" && parsed.environment.trim() !== "") {
           setSelectedEnvironment(form, parsed.environment.trim());
@@ -3991,9 +4191,10 @@
         if (typeof parsed.sessionId === "string" && parsed.sessionId.trim() !== "") {
           writeClientSessionID(form, parsed.sessionId.trim());
         }
-        setAttachmentStatus(root, "", false);
         const notice = String(parsed.notice || "").trim();
-        if (notice === "") {
+        if (notice !== "" && environment !== "local" && suppressSuccessNotice) {
+          showEnvironmentToast(notice, "success");
+        } else if (notice === "") {
           setInlineFlash(root, "", false);
         } else if (!suppressSuccessNotice) {
           setInlineFlash(root, notice, false);
@@ -4002,8 +4203,11 @@
         emitChatState({ source: "ensure-environment", ensured: parsed });
         return parsed;
       } catch (error) {
-        setAttachmentStatus(root, "", false);
-        setInlineFlash(root, String(error?.message || t("环境准备失败。", "Failed to prepare the selected environment.")), true);
+        const message = String(error?.message || t("环境准备失败。", "Failed to prepare the selected environment."));
+        if (environment !== "local") {
+          showEnvironmentToast(message, "error");
+        }
+        setInlineFlash(root, message, true);
         throw error;
       } finally {
         if (environmentEnsureInFlight === ensurePromise) {
@@ -4107,7 +4311,7 @@
     }
     const showProgress = options.showProgress !== false;
     if (currentSelectedEnvironment(form) === "local") {
-      setInlineFlash(root, t("先选择 Cloud Agent 环境，再打开 Claude Code 终端。", "Select a Cloud Agent environment before opening the Claude Code terminal."), true);
+      setInlineFlash(root, t("先选择 Claude Code 环境，再打开 Claude Code 终端。", "Select a Claude Code environment before opening the Claude Code terminal."), true);
       return;
     }
     if (currentSelectedModel(form) === "") {
@@ -4116,14 +4320,14 @@
     }
     if (shellOpenInFlight) {
       if (showProgress) {
-        setInlineFlash(root, t("cloud agent 正在打开…", "The cloud agent is already opening…"), false);
+        setInlineFlash(root, t("Claude Code 正在打开…", "Claude Code is already opening…"), false);
       }
       return;
     }
     shellOpenInFlight = true;
     updateComposerControls(form);
     if (showProgress) {
-      setInlineFlash(root, t("正在打开 cloud agent…", "Opening the cloud agent…"), false);
+      setInlineFlash(root, t("正在打开 Claude Code…", "Opening the Claude Code…"), false);
     }
     try {
       const terminalID = String(options.terminalID || makeID("terminal")).trim();

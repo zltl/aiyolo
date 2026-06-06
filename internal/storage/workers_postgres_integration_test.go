@@ -39,7 +39,7 @@ func TestPostgresCloudWorkersSecretRoundTrip(t *testing.T) {
 	if err := store.UpsertWorkerServer(ctx, domain.WorkerServer{ID: workerID, SSHHost: "10.0.0.9", SSHUsername: "ubuntu", SSHKeyID: sshKeyID}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{ID: accountID, UserID: "pg-user", WorkerID: workerID, Credential: "pg-token"}); err != nil {
+	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{ID: accountID, UserID: "pg-user", WorkerID: workerID, Credential: "pg-token", LastBuildRevision: "sha256:pg-runtime"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.UpsertCloudAgentSession(ctx, domain.CloudAgentSession{ID: sessionID, UserID: "pg-user", WorkerID: workerID, AccountID: accountID}); err != nil {
@@ -56,8 +56,8 @@ func TestPostgresCloudWorkersSecretRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storedAccount.Credential != "pg-token" {
-		t.Fatalf("unexpected credential: %q", storedAccount.Credential)
+	if storedAccount.Credential != "pg-token" || storedAccount.LastBuildRevision != "sha256:pg-runtime" {
+		t.Fatalf("unexpected stored account: %+v", storedAccount)
 	}
 	sessions, err := store.ListCloudAgentSessions(ctx, "pg-user", workerID, 10)
 	if err != nil {
