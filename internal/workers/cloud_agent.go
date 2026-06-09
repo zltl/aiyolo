@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -143,6 +145,7 @@ type cloudAgentRemotePayload struct {
 	Files                map[string]string `json:"files"`
 	StartedAt            string            `json:"started_at"`
 	APIKey               string            `json:"api_key"`
+	SyncHostnames        []string          `json:"sync_hostnames,omitempty"`
 }
 
 func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options CloudAgentStartOptions) (CloudAgentInstance, error) {
@@ -232,6 +235,7 @@ func ensureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 		Files:                cloudAgentBuildContextFiles,
 		StartedAt:            time.Now().UTC().Format(time.RFC3339),
 		APIKey:               options.APIKey,
+		SyncHostnames:        cloudAgentSyncHostnames(options),
 	})
 	if err != nil {
 		return CloudAgentInstance{}, err
@@ -243,18 +247,13 @@ func ensureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	defer client.Close()
 	command := buildCloudAgentRemoteCommand(string(payload))
 	emitPhase("ensure_remote", "Ensuring cloud agent container on worker")
-	var output string
-	if onEvent != nil {
-		output, err = runSSHCommandWithProgress(ctx, client, command, onEvent)
-	} else {
-		output, err = runSSHCommand(client, command)
-	}
+	output, err := runSSHCommandWithProgress(ctx, client, command, onEvent)
 	if err != nil {
 		return CloudAgentInstance{}, fmt.Errorf("ensure cloud agent on %s: %w", worker.ID, err)
 	}
-	var instance CloudAgentInstance
-	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &instance); err != nil {
-		return CloudAgentInstance{}, fmt.Errorf("parse cloud agent response: %w", err)
+	instance, err := parseCloudAgentRemoteResponse(output)
+	if err != nil {
+		return CloudAgentInstance{}, err
 	}
 	instance.BuildRevision = buildRevision
 	return instance, nil
@@ -495,6 +494,64 @@ func cloudAgentHostPort(userID, discriminator string, base int) int {
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(strings.TrimSpace(userID) + ":" + strings.TrimSpace(discriminator)))
 	return base + int(hash.Sum32()%defaultCloudAgentHostPortSpan)
+}
+
+func cloudAgentHostIsLoopback(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	parsed := net.ParseIP(host)
+	return parsed != nil && (parsed.IsLoopback() || parsed.IsUnspecified())
+}
+
+func cloudAgentHostnameFromURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" || net.ParseIP(host) != nil || cloudAgentHostIsLoopback(host) {
+		return ""
+	}
+	return strings.ToLower(host)
+}
+
+func cloudAgentSyncHostnames(options CloudAgentStartOptions) []string {
+	candidates := []string{
+		options.APIBaseURL,
+		options.ConsoleBaseURL,
+		options.OpenURL,
+		options.ASSDownloadURL,
+		options.ASSSHA256URL,
+		options.RootFSURL,
+		options.RootFSIndexURL,
+		options.ChromeDEBURL,
+		options.UbuntuMirror,
+		options.DockerRegistryMirror,
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	result := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		host := cloudAgentHostnameFromURL(candidate)
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		result = append(result, host)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func cloudAgentContainerEnv(options CloudAgentStartOptions) map[string]string {

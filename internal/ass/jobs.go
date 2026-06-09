@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -28,6 +29,7 @@ type jobSession struct {
 	kind     string
 
 	mu          sync.Mutex
+	outputWG    sync.WaitGroup
 	cmd         *exec.Cmd
 	outputPath  string
 	outputSize  int64
@@ -209,6 +211,7 @@ func (registry *jobRegistry) start(id, kind, cwd string, argv []string, env map[
 		_ = pipeWriter.Close()
 		return nil, false, err
 	}
+	job.outputWG.Add(1)
 	go job.copyOutput(pipeReader, outputFile)
 	go job.waitAndClose(pipeWriter)
 	return job, true, nil
@@ -242,35 +245,51 @@ func mergeJobEnv(base []string, extra map[string]string) []string {
 }
 
 func (job *jobSession) copyOutput(reader *io.PipeReader, file *os.File) {
+	defer job.outputWG.Done()
 	defer reader.Close()
 	defer file.Close()
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		payload := line + "\n"
-		_, _ = file.WriteString(payload)
-		job.appendDelta(payload)
-	}
-	if err := scanner.Err(); err != nil {
-		job.appendDelta("\n")
+	buffered := bufio.NewReaderSize(reader, 64*1024)
+	for {
+		line, err := buffered.ReadBytes('\n')
+		if len(line) > 0 {
+			_, _ = file.Write(line)
+			job.appendDelta(string(line))
+		}
+		if err != nil {
+			if err != io.EOF && !isJobPipeInfrastructureError(err) {
+				job.appendDelta("\n")
+			}
+			return
+		}
 	}
 }
 
 func (job *jobSession) waitAndClose(pipe *io.PipeWriter) {
 	err := job.cmd.Wait()
 	_ = pipe.Close()
+	job.outputWG.Wait()
 	exitCode := 0
 	lastError := ""
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
-		} else {
+		} else if !isJobPipeInfrastructureError(err) {
 			exitCode = 1
 			lastError = err.Error()
 		}
 	}
 	job.finish(exitCode, lastError)
+}
+
+func isJobPipeInfrastructureError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "closed pipe") || strings.Contains(message, "broken pipe")
 }
 
 func (job *jobSession) finish(exitCode int, lastError string) {

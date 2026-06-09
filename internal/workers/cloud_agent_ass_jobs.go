@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/zltl/aiyolo/internal/domain"
 )
@@ -71,7 +75,7 @@ func StreamCloudAgentASSJobLive(ctx context.Context, worker domain.WorkerServer,
 	if err != nil {
 		return err
 	}
-	sshClient, err := dialSSH(target.worker, target.key)
+	sshClient, err := dialSSHStreaming(target.worker, target.key)
 	if err != nil {
 		return err
 	}
@@ -127,15 +131,77 @@ func StreamCloudAgentASSJobLive(ctx context.Context, worker domain.WorkerServer,
 		}
 		if event.Done || event.Type == "done" || event.Type == "error" {
 			if event.Type == "error" && strings.TrimSpace(event.Error) != "" {
-				return fmt.Errorf("%s", strings.TrimSpace(event.Error))
+				return sanitizeCloudAgentPipeInfrastructureError(fmt.Errorf("%s", strings.TrimSpace(event.Error)))
 			}
 			return nil
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return err
+		return sanitizeCloudAgentPipeInfrastructureError(err)
 	}
 	return nil
+}
+
+func waitForCloudAgentASSJobDone(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, jobID string, interval time.Duration) (CloudAgentASSJobInfo, error) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		info, err := GetCloudAgentASSJob(ctx, worker, key, account, cloudSession, jobID)
+		if err != nil {
+			return CloudAgentASSJobInfo{}, err
+		}
+		if info.Done {
+			return info, nil
+		}
+		select {
+		case <-ctx.Done():
+			return CloudAgentASSJobInfo{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func StreamCloudAgentASSJobWithRecovery(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, jobID string, onEvent func(CloudAgentASSJobStreamEvent) error) error {
+	streamErr := StreamCloudAgentASSJobLive(ctx, worker, key, account, cloudSession, jobID, onEvent)
+	if streamErr == nil || !cloudAgentPipeInfrastructureError(streamErr) {
+		return streamErr
+	}
+	log.Printf("cloud agent ass job stream interrupted job_id=%s err=%v; waiting for job completion", jobID, streamErr)
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+	defer cancel()
+	info, waitErr := waitForCloudAgentASSJobDone(waitCtx, worker, key, account, cloudSession, jobID, 500*time.Millisecond)
+	if waitErr != nil {
+		return streamErr
+	}
+	if info.ExitCode != 0 && strings.TrimSpace(info.LastError) != "" {
+		return fmt.Errorf("%s", strings.TrimSpace(info.LastError))
+	}
+	retryErr := StreamCloudAgentASSJobLive(waitCtx, worker, key, account, cloudSession, jobID, onEvent)
+	if retryErr == nil {
+		return nil
+	}
+	if cloudAgentPipeInfrastructureError(retryErr) && info.Done && info.ExitCode == 0 {
+		return nil
+	}
+	return retryErr
+}
+
+func cloudAgentPipeInfrastructureError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "closed pipe") || strings.Contains(message, "broken pipe")
+}
+
+func sanitizeCloudAgentPipeInfrastructureError(err error) error {
+	if !cloudAgentPipeInfrastructureError(err) {
+		return err
+	}
+	return fmt.Errorf("aiyolo-ass stream transport interrupted; refresh the cloud agent environment and retry")
 }
 
 func cloudAgentASSJobUnavailable(err error) bool {

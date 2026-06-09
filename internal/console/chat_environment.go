@@ -245,13 +245,47 @@ func (handler *Handler) restoreConsoleChatEnvironment(ctx context.Context, userI
 		return consoleChatEnvironmentLocal
 	}
 	session, err := handler.store.GetCloudAgentSession(ctx, strings.TrimSpace(userID), consoleChatCloudAgentSessionID(chatSessionID))
-	if err != nil {
+	if err == nil {
+		if strings.TrimSpace(session.Status) == domain.CloudAgentSessionStatusClosed {
+			return consoleChatEnvironmentLocal
+		}
+		return consoleChatEnvironmentValue(session.WorkerID)
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
 		return consoleChatEnvironmentLocal
 	}
-	if strings.TrimSpace(session.Status) != domain.CloudAgentSessionStatusActive {
+	workers, listErr := handler.store.ListWorkerServers(ctx)
+	if listErr != nil {
 		return consoleChatEnvironmentLocal
 	}
-	return consoleChatEnvironmentValue(session.WorkerID)
+	runningWorkerID := ""
+	runningCount := 0
+	for _, worker := range workers {
+		workerID := strings.TrimSpace(worker.ID)
+		if workerID == "" {
+			continue
+		}
+		account, accountErr := handler.store.GetCloudAgentAccount(ctx, strings.TrimSpace(userID), consoleChatCloudAgentAccountID(workerID))
+		if accountErr != nil {
+			continue
+		}
+		if strings.TrimSpace(account.Status) != domain.CloudAgentStatusRunning || strings.TrimSpace(account.ContainerName) == "" {
+			continue
+		}
+		runningCount++
+		runningWorkerID = workerID
+	}
+	if runningCount == 1 {
+		return consoleChatEnvironmentValue(runningWorkerID)
+	}
+	return consoleChatEnvironmentLocal
+}
+
+func consoleChatEnvironmentForceRuntime(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	return strings.TrimSpace(r.FormValue("chat_environment_force_runtime")) == "1"
 }
 
 func consoleChatRoutePublicNames(routes []consoleChatRouteView) []string {
@@ -413,9 +447,6 @@ func consoleChatCloudAgentReusable(account domain.CloudAgentAccount, workerID st
 	if strings.TrimSpace(account.ContainerName) == "" || strings.TrimSpace(account.LastError) != "" {
 		return false
 	}
-	if currentModel := strings.TrimSpace(account.ModelPublicName); currentModel != "" && strings.TrimSpace(publicName) != "" && currentModel != strings.TrimSpace(publicName) {
-		return false
-	}
 	storedBuildRevision := strings.TrimSpace(account.LastBuildRevision)
 	if expectedBuildRevision = strings.TrimSpace(expectedBuildRevision); expectedBuildRevision != "" {
 		if storedBuildRevision != expectedBuildRevision {
@@ -476,18 +507,31 @@ func (handler *Handler) reusableConsoleChatCloudAgentEnvironment(ctx context.Con
 	}
 	cloudSession, err := handler.store.GetCloudAgentSession(ctx, strings.TrimSpace(userID), consoleChatCloudAgentSessionID(chatSessionID))
 	if errors.Is(err, storage.ErrNotFound) {
-		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, nil
-	}
-	if err != nil {
+		cloudSession = domain.CloudAgentSession{
+			ID:            consoleChatCloudAgentSessionID(chatSessionID),
+			UserID:        userID,
+			WorkerID:      workerID,
+			AccountID:     account.ID,
+			AgentType:     account.AgentType,
+			ChatSessionID: chatSessionID,
+			WorkspacePath: account.WorkspacePath,
+			Status:        domain.CloudAgentSessionStatusActive,
+		}
+	} else if err != nil {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, err
-	}
-	if strings.TrimSpace(cloudSession.Status) != domain.CloudAgentSessionStatusActive ||
+	} else if strings.TrimSpace(cloudSession.Status) != domain.CloudAgentSessionStatusActive ||
 		strings.TrimSpace(cloudSession.WorkerID) != strings.TrimSpace(workerID) ||
 		strings.TrimSpace(cloudSession.AccountID) != strings.TrimSpace(account.ID) {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, nil
 	}
+	if modelName := strings.TrimSpace(publicName); modelName != "" {
+		account.ModelPublicName = modelName
+	}
 	account.LastSeenAt = &now
 	if err := handler.store.UpsertCloudAgentAccount(ctx, account); err != nil {
+		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, err
+	}
+	if err := handler.store.UpsertCloudAgentSession(ctx, cloudSession); err != nil {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, false, err
 	}
 	return account, cloudSession, true, nil
@@ -590,25 +634,35 @@ func (handler *Handler) ensureConsoleChatEnvironmentWithEvents(ctx context.Conte
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
 	assUpgradeNeeded, _ := handler.consoleChatCloudAgentNeedsASSUpgrade(ctx, assSHA256URL, account)
-	if account, cloudSession, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, userID, state.Form.ClientSessionID, workerID, state.Form.PublicName, expectedBuildRevision, account, now); err != nil {
-		return consoleChatEnvironmentEnsureResponse{}, err
-	} else if ok {
-		response := consoleChatEnvironmentEnsureResponse{
-			Status:        "ready",
-			SessionID:     state.Form.ClientSessionID,
-			Environment:   state.Form.Environment,
-			WorkerID:      workerID,
-			ContainerName: account.ContainerName,
-			WorkspacePath: firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath)),
-			Notice:        handler.requestText(r, "Cloud Agent 已在 "+workerID+" 就绪", "Cloud agent is ready on "+workerID),
+	forceRuntime := consoleChatEnvironmentForceRuntime(r)
+	if !forceRuntime {
+		if account, cloudSession, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, userID, state.Form.ClientSessionID, workerID, state.Form.PublicName, expectedBuildRevision, account, now); err != nil {
+			return consoleChatEnvironmentEnsureResponse{}, err
+		} else if ok {
+			response := consoleChatEnvironmentEnsureResponse{
+				Status:        "ready",
+				SessionID:     state.Form.ClientSessionID,
+				Environment:   state.Form.Environment,
+				WorkerID:      workerID,
+				ContainerName: account.ContainerName,
+				WorkspacePath: firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath)),
+				Notice:        handler.requestText(r, "Cloud Agent 已在 "+workerID+" 就绪", "Cloud agent is ready on "+workerID),
+			}
+			emit(consoleChatEnvironmentEnsureStreamEvent{
+				Type:    "phase",
+				Phase:   "reuse",
+				Message: handler.requestText(r, "复用已就绪的 Cloud Agent", "Reusing the ready cloud agent"),
+			})
+			emit(consoleChatEnvironmentEnsureReadyEvent(response))
+			return response, nil
 		}
+	} else {
 		emit(consoleChatEnvironmentEnsureStreamEvent{
-			Type:    "phase",
-			Phase:   "reuse",
-			Message: handler.requestText(r, "复用已就绪的 Cloud Agent", "Reusing the ready cloud agent"),
+			Type:     "phase",
+			Phase:    "connect",
+			Message:  handler.requestText(r, "正在连接 Cloud Agent 运行时", "Connecting to the cloud agent runtime"),
+			WorkerID: workerID,
 		})
-		emit(consoleChatEnvironmentEnsureReadyEvent(response))
-		return response, nil
 	}
 	account.Status = domain.CloudAgentStatusStarting
 	account.LastError = ""

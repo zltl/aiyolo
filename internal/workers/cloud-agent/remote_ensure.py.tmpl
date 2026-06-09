@@ -352,6 +352,69 @@ def wait_for_tcp(host, port, timeout_seconds):
     raise SystemExit(f"timed out waiting for TCP service {host}:{port}")
 
 
+def worker_hosts_skipped_ip(ip):
+    ip = str(ip or "").strip().lower()
+    if not ip:
+        return True
+    if ip.startswith("127.") or ip == "0.0.0.0":
+        return True
+    if ip == "::1" or ip.startswith("fe80:"):
+        return True
+    return False
+
+
+def worker_hosts_mapping():
+    hosts_path = pathlib.Path("/etc/hosts")
+    if not hosts_path.is_file():
+        return {}
+    mapping = {}
+    for line in hosts_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        ip = parts[0]
+        if worker_hosts_skipped_ip(ip):
+            continue
+        for hostname in parts[1:]:
+            hostname = str(hostname or "").strip().lower()
+            if not hostname or hostname == "host.docker.internal":
+                continue
+            mapping[hostname] = ip
+    return mapping
+
+
+def worker_sync_host_entries():
+    hostnames = payload.get("sync_hostnames") or []
+    if not hostnames:
+        return []
+    mapping = worker_hosts_mapping()
+    entries = []
+    seen = set()
+    for hostname in hostnames:
+        hostname = str(hostname or "").strip().lower()
+        if not hostname:
+            continue
+        ip = mapping.get(hostname)
+        if not ip:
+            continue
+        key = f"{hostname}:{ip}"
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(key)
+    return sorted(entries)
+
+
+def docker_add_host_args():
+    args = ["--add-host", "host.docker.internal:host-gateway"]
+    for entry in worker_sync_host_entries():
+        args.extend(["--add-host", entry])
+    return args
+
+
 def acquire_container_lock():
     lock_name = re.sub(r"[^0-9A-Za-z_.-]", "-", payload["container_name"])
     lock_path = pathlib.Path("/tmp") / f"{lock_name}.lock"
@@ -376,6 +439,31 @@ def container_has_claude_cli():
         text=True,
     )
     return result.returncode == 0
+
+
+def container_ready_for_connect():
+    existing_id = exact_container_id()
+    if not existing_id:
+        return None
+    try:
+        inspected = inspect_container()
+    except subprocess.CalledProcessError:
+        return None
+    if not container_matches(inspected):
+        return None
+    if not container_build_revision_matches(inspected):
+        return None
+    if not container_ass_sha256_matches(inspected):
+        return None
+    if not inspected.get("State", {}).get("Running"):
+        return None
+    if not container_has_claude_cli():
+        return None
+    try:
+        wait_for_container_runtime()
+    except SystemExit:
+        return None
+    return container_summary(inspected)
 
 
 def ensure_container():
@@ -419,13 +507,18 @@ def ensure_container():
                 wait_for_container_runtime()
                 return container_summary(inspect_container())
     ensure_image()
+    host_entries = worker_sync_host_entries()
+    if host_entries:
+        emit_progress("sync_hosts", "Applying worker /etc/hosts entries to cloud agent container", entries=host_entries)
     emit_progress("create_container", "Creating cloud agent container")
     args = [
         "docker", "run", "-d",
         "--name", payload["container_name"],
         "--hostname", payload["container_name"],
         "--restart", "unless-stopped",
-        "--add-host", "host.docker.internal:host-gateway",
+    ]
+    args.extend(docker_add_host_args())
+    args.extend([
         "--privileged",
         "--shm-size", payload["shm_size"],
         "--label", f"aiyolo.user_id={payload['user_id']}",
@@ -435,7 +528,7 @@ def ensure_container():
         "--label", f"aiyolo.ass.sha256={payload.get('ass_sha256', '')}",
         "--label", f"aiyolo.ass.container_port={payload['container_ass_port']}",
         "--label", f"aiyolo.ass.host_port={payload['host_ass_port']}",
-    ]
+    ])
     for key in sorted((payload.get("container_env") or {}).keys()):
         args.extend(["-e", f"{key}={payload['container_env'][key]}"])
     args.extend(["-v", f"{payload['workspace_root']}:{payload['workspace_path']}"])
@@ -459,11 +552,17 @@ if __name__ == "__main__":
     emit_progress("prepare", "Preparing cloud agent workspace")
     ensure_dirs()
     write_workspace_files()
-    emit_progress("lock", "Acquiring cloud agent container lock")
-    lock_handle = acquire_container_lock()
-    try:
-        summary = ensure_container()
+    summary = container_ready_for_connect()
+    if summary is not None:
+        emit_progress("reuse_container", "Reusing existing cloud agent container")
         emit_progress("ready", "Cloud agent runtime is ready", container_name=summary.get("container_name", ""))
         print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
-    finally:
-        lock_handle.close()
+    else:
+        emit_progress("lock", "Acquiring cloud agent container lock")
+        lock_handle = acquire_container_lock()
+        try:
+            summary = ensure_container()
+            emit_progress("ready", "Cloud agent runtime is ready", container_name=summary.get("container_name", ""))
+            print(json.dumps(summary, ensure_ascii=True, sort_keys=True))
+        finally:
+            lock_handle.close()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zltl/aiyolo/internal/domain"
 )
@@ -116,6 +117,9 @@ func RunCloudAgentCodex(ctx context.Context, worker domain.WorkerServer, key dom
 	}()
 
 	waitErr := session.Wait()
+	if cloudAgentPipeInfrastructureError(waitErr) && ctx.Err() != nil {
+		waitErr = ctx.Err()
+	}
 	if writeErr := stdoutWriter.Err(); writeErr != nil && waitErr == nil {
 		waitErr = writeErr
 	}
@@ -137,6 +141,11 @@ func runCloudAgentCodexASSJob(ctx context.Context, worker domain.WorkerServer, k
 	if jobID == "" {
 		return "", fmt.Errorf("aiyolo-ass endpoint not available: job id is required")
 	}
+	if info, err := GetCloudAgentASSJob(ctx, worker, key, account, cloudSession, jobID); err == nil && info.Active {
+		if _, waitErr := waitForCloudAgentASSJobDone(ctx, worker, key, account, cloudSession, jobID, 500*time.Millisecond); waitErr != nil && ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+	}
 	script := buildCloudAgentCodexASSScript(options)
 	argv := []string{"/bin/bash", "-lc", script}
 	env := buildCloudAgentCodexASSJobEnv(apiKey)
@@ -144,7 +153,7 @@ func runCloudAgentCodexASSJob(ctx context.Context, worker domain.WorkerServer, k
 		return "", err
 	}
 	output := strings.Builder{}
-	streamErr := StreamCloudAgentASSJobLive(ctx, worker, key, account, cloudSession, jobID, func(event CloudAgentASSJobStreamEvent) error {
+	streamErr := StreamCloudAgentASSJobWithRecovery(ctx, worker, key, account, cloudSession, jobID, func(event CloudAgentASSJobStreamEvent) error {
 		switch event.Type {
 		case "sync", "delta":
 			delta := event.Delta
@@ -163,6 +172,12 @@ func runCloudAgentCodexASSJob(ctx context.Context, worker domain.WorkerServer, k
 		return nil
 	})
 	if streamErr != nil {
+		if text := strings.TrimSpace(output.String()); text != "" {
+			if jobInfo, infoErr := GetCloudAgentASSJob(ctx, worker, key, account, cloudSession, jobID); infoErr == nil && jobInfo.Done && jobInfo.ExitCode == 0 {
+				return text, nil
+			}
+		}
+		streamErr = sanitizeCloudAgentPipeInfrastructureError(streamErr)
 		if text := strings.TrimSpace(output.String()); text != "" {
 			return text, streamErr
 		}

@@ -7,7 +7,7 @@
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
   <link rel="stylesheet" href="/console/static/vendor/file-icons-style.css?v=vendor-20260606a">
   <link rel="stylesheet" href="/console/static/vendor/github-dark.min.css?v=vendor-20260606a">
-  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260607b">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-unified-20260609d">
   <link rel="stylesheet" href="/console/static/vendor/xterm.css?v=vendor-20260606a">
 </head>
 <body class="chat-workspace-body">
@@ -213,6 +213,13 @@
             {{end}}
           </div>
           <div class="chat-attachment-status" data-chat-attachment-status hidden></div>
+          <div class="chat-composer-queue" data-chat-composer-queue hidden>
+            <div class="chat-composer-queue-bar">
+              <span class="chat-queue-indicator" data-chat-queue-indicator></span>
+              <button class="chat-queue-clear" type="button" data-chat-action="clear-queue" hidden>{{msg .Locale "清空队列" "Clear queue"}}</button>
+            </div>
+            <ul class="chat-composer-queue-list" data-chat-queue-list role="list"></ul>
+          </div>
           <div class="chat-composer-footer">
             <div class="chat-composer-left">
               {{if .ChatAttachmentUploadEnabled}}
@@ -319,7 +326,9 @@
               </div>
               {{end}}
               <div class="chat-composer-primary">
-                <span class="chat-queue-indicator" data-chat-queue-indicator hidden></span>
+                <button class="primary-button chat-send-button chat-preempt-button" type="button" data-chat-action="composer-preempt" aria-label="{{msg .Locale "立即发送" "Send now"}}" title="{{msg .Locale "立即发送（终止当前回复）" "Send now (stop current reply)"}}" hidden>
+                  <span class="chat-send-glyph" aria-hidden="true"><i class="chat-control-icon" data-lucide="zap"></i></span>
+                </button>
                 <button class="primary-button chat-send-button" type="button" data-chat-action="composer-primary" aria-label="{{msg .Locale "开始发送" "Start sending"}}" hidden>
                   <span class="chat-send-glyph" data-chat-primary-start aria-hidden="true"><i class="chat-control-icon" data-lucide="send-horizontal"></i></span>
                   <span class="chat-send-glyph" data-chat-primary-stop aria-hidden="true" hidden><i class="chat-control-icon" data-lucide="square"></i></span>
@@ -353,7 +362,7 @@
   <script src="/console/static/vendor/xterm.js?v=vendor-20260606a"></script>
   <script src="/console/static/vendor/addon-fit.js?v=vendor-20260606a"></script>
   <script src="/console/static/chat-shell.js?v=chat-shell-20260604a"></script>
-  <script src="/console/static/chat.js?v=chat-env-toast-20260607b"></script>
-  <script src="/console/static/chat-workspace.js?v=chat-workspace-20260604a"></script>
+  <script src="/console/static/chat.js?v=chat-copy-footer-20260609d"></script>
+  <script src="/console/static/chat-workspace.js?v=chat-workspace-cwd-20260609c"></script>
 </div>
 {{end}}

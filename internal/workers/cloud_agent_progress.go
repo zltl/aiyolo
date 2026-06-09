@@ -52,6 +52,31 @@ func parseCloudAgentProgressLine(line string) (CloudAgentEnsureEvent, bool) {
 	return event, true
 }
 
+func parseCloudAgentRemoteResponse(output string) (CloudAgentInstance, error) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return CloudAgentInstance{}, fmt.Errorf("parse cloud agent response: empty output")
+	}
+	lines := strings.Split(trimmed, "\n")
+	var lastErr error
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.HasPrefix(line, cloudAgentProgressPrefix) {
+			continue
+		}
+		var instance CloudAgentInstance
+		if err := json.Unmarshal([]byte(line), &instance); err != nil {
+			lastErr = err
+			continue
+		}
+		return instance, nil
+	}
+	if lastErr != nil {
+		return CloudAgentInstance{}, fmt.Errorf("parse cloud agent response: %w", lastErr)
+	}
+	return CloudAgentInstance{}, fmt.Errorf("parse cloud agent response: no JSON payload in output")
+}
+
 func runSSHCommandWithProgress(ctx context.Context, client *ssh.Client, command string, onEvent func(CloudAgentEnsureEvent) error) (string, error) {
 	session, err := client.NewSession()
 	if err != nil {
@@ -81,7 +106,7 @@ func runSSHCommandWithProgress(ctx context.Context, client *ssh.Client, command 
 		}
 		_ = onEvent(event)
 	}
-	consume := func(reader io.Reader) {
+	consume := func(reader io.Reader, captureOutput bool) {
 		scanner := bufio.NewScanner(reader)
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
@@ -99,9 +124,11 @@ func runSSHCommandWithProgress(ctx context.Context, client *ssh.Client, command 
 			if trimmed == "" {
 				continue
 			}
-			mu.Lock()
-			outputLines = append(outputLines, trimmed)
-			mu.Unlock()
+			if captureOutput {
+				mu.Lock()
+				outputLines = append(outputLines, trimmed)
+				mu.Unlock()
+			}
 			emit(CloudAgentEnsureEvent{Type: "log", Message: trimmed})
 		}
 	}
@@ -110,11 +137,11 @@ func runSSHCommandWithProgress(ctx context.Context, client *ssh.Client, command 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		consume(stdout)
+		consume(stdout, true)
 	}()
 	go func() {
 		defer wg.Done()
-		consume(stderr)
+		consume(stderr, false)
 	}()
 
 	done := make(chan error, 1)

@@ -53,11 +53,32 @@ func stripConsoleChatFailurePrefix(locale string, detail string) string {
 }
 
 func consoleChatFormatFailure(locale string, detail string) string {
-	detail = stripConsoleChatFailurePrefix(locale, detail)
+	detail = sanitizeConsoleChatFailureDetail(locale, stripConsoleChatFailurePrefix(locale, detail))
 	if detail == "" {
 		return consoleText(locale, "对话失败。", "Chat failed.")
 	}
 	return fmt.Sprintf(consoleText(locale, "对话失败：%s", "Chat failed: %s"), detail)
+}
+
+func sanitizeConsoleChatFailureDetail(locale string, detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return detail
+	}
+	lowerDetail := strings.ToLower(detail)
+	if strings.Contains(lowerDetail, "closed pipe") || strings.Contains(lowerDetail, "broken pipe") {
+		return consoleText(locale,
+			"Claude Code 运行时连接中断。请刷新页面等待容器自动升级后重试，或新建对话。",
+			"The Claude Code runtime connection was interrupted. Refresh the page to auto-upgrade the container and retry, or start a new conversation.",
+		)
+	}
+	if strings.Contains(lowerDetail, "aiyolo-ass stream transport interrupted") {
+		return consoleText(locale,
+			"Claude Code 运行时连接中断。请刷新页面等待容器自动升级后重试，或新建对话。",
+			"The Claude Code runtime connection was interrupted. Refresh the page to auto-upgrade the container and retry, or start a new conversation.",
+		)
+	}
+	return detail
 }
 
 func consoleCloudAgentASSJobResumeDetail(locale string, err error) string {

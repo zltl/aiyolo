@@ -263,6 +263,7 @@
         sessionID: id,
         controller: null,
         stopRequested: false,
+        preemptTurn: null,
         queuedTurns: [],
         active: false,
         assistantHistoryMessage: null,
@@ -757,7 +758,80 @@
     renderHTML: renderMarkdownHTML,
     renderInto: renderMarkdownInto,
     toPlainText: markdownToPlainText,
+    readSource(element) {
+      if (!(element instanceof HTMLElement)) {
+        return "";
+      }
+      return String(element.dataset.chatMarkdownSource || element.textContent || "").trim();
+    },
   });
+
+  const readMarkdownSource = (element) => window.AIYoloMarkdown.readSource(element);
+
+  const copyTextToClipboard = async (text) => {
+    const value = String(text || "");
+    if (value.trim() === "") {
+      return false;
+    }
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+    const helper = document.createElement("textarea");
+    helper.value = value;
+    helper.setAttribute("readonly", "");
+    helper.style.position = "fixed";
+    helper.style.opacity = "0";
+    document.body.appendChild(helper);
+    helper.select();
+    const copied = document.execCommand("copy");
+    helper.remove();
+    if (!copied) {
+      throw new Error("copy failed");
+    }
+    return true;
+  };
+
+  const copyAssistantMessageMarkdown = async (bubble, options = {}) => {
+    if (!(bubble instanceof HTMLElement)) {
+      return false;
+    }
+    const contentNode = bubble.querySelector(".chat-message-copy");
+    const markdown = readMarkdownSource(contentNode);
+    if (markdown === "") {
+      if (options.showToast !== false) {
+        showEnvironmentToast(t("没有可复制的内容。", "Nothing to copy."), "warning");
+      }
+      return false;
+    }
+    try {
+      await copyTextToClipboard(markdown);
+      if (options.showToast !== false) {
+        showEnvironmentToast(t("已复制 Markdown。", "Markdown copied."), "success");
+      }
+      return true;
+    } catch (_error) {
+      if (options.showToast !== false) {
+        showEnvironmentToast(t("复制失败。", "Copy failed."), "error");
+      }
+      return false;
+    }
+  };
+
+  const attachMarkdownCopyHandler = (element) => {
+    if (!(element instanceof HTMLElement) || element.dataset.chatMarkdownCopyBound === "true") {
+      return;
+    }
+    element.dataset.chatMarkdownCopyBound = "true";
+    element.addEventListener("copy", (event) => {
+      const markdown = readMarkdownSource(element);
+      if (markdown === "" || !(event.clipboardData instanceof DataTransfer)) {
+        return;
+      }
+      event.preventDefault();
+      event.clipboardData.setData("text/plain", markdown);
+    });
+  };
 
   const messageSummaryText = (message) => {
     const summary = markdownToPlainText(message?.content || "");
@@ -954,45 +1028,62 @@
     const key = String(phase || "").trim().toLowerCase();
     switch (key) {
       case "connect":
-        return t("正在连接 Worker SSH…", "Connecting to worker over SSH…");
+        return t("正在连接 Worker…", "Connecting to worker…");
       case "resolve_ass":
         return t("正在解析 aiyolo-ass 版本…", "Resolving published aiyolo-ass checksum…");
       case "starting":
-        return t("正在准备 Claude Code 运行时…", "Preparing the Claude Code runtime…");
+        return t("正在准备 Cloud Agent…", "Preparing cloud agent…");
       case "ensure_remote":
-        return t("正在远程确保 Claude Code 容器…", "Ensuring the Claude Code container remotely…");
+        return t("正在远程确保 Cloud Agent…", "Ensuring cloud agent remotely…");
       case "prepare":
         return t("正在准备远程工作区…", "Preparing remote workspace…");
       case "lock":
-        return t("正在获取容器锁…", "Acquiring container lock…");
+        return t("Cloud Agent 正在启动或重建，请稍候…", "Cloud agent is starting or rebuilding, please wait…");
       case "download_ass":
         return t("正在下载 aiyolo-ass…", "Downloading aiyolo-ass…");
       case "download_rootfs":
         return t("正在下载基础 rootfs…", "Downloading base rootfs…");
       case "build_image":
-        return t("正在构建 Claude Code 镜像…", "Building Claude Code image…");
+        return t("正在构建 Cloud Agent 镜像…", "Building cloud agent image…");
       case "reuse_image":
         return t("镜像已是最新，跳过构建", "Image already matches release; skipping build");
       case "upgrade_container":
-        return t("正在替换 Claude Code 容器…", "Replacing Claude Code container…");
+        return t("正在升级 Cloud Agent 容器…", "Upgrading cloud agent container…");
       case "create_container":
-        return t("正在创建 Claude Code 容器…", "Creating Claude Code container…");
+        return t("正在创建 Cloud Agent…", "Creating cloud agent…");
       case "start_container":
-        return t("正在启动 Claude Code 容器…", "Starting Claude Code container…");
+        return t("正在启动 Claude Code…", "Starting Claude Code…");
       case "reuse_container":
-        return t("复用现有 Claude Code 容器", "Reusing existing Claude Code container");
+        return t("正在恢复 Cloud Agent 容器…", "Restoring cloud agent container…");
+      case "sync_hosts":
+        return t("正在同步内网 hosts…", "Syncing internal hosts…");
       case "wait_runtime":
-        return t("正在等待 aiyolo-ass 控制面就绪…", "Waiting for aiyolo-ass control plane…");
+        return t("正在等待 Claude Code 就绪…", "Waiting for Claude Code to become ready…");
       case "reuse":
-        return t("复用已就绪的 Claude Code", "Reusing the ready Claude Code");
+        return t("正在恢复 Cloud Agent 会话…", "Restoring cloud agent session…");
       case "ready":
-        return t("Claude Code 已连接并就绪", "Claude Code is connected and ready");
+        return t("Claude Code 已就绪", "Claude Code is ready");
+      case "sending":
+        return t("正在发送消息…", "Sending message…");
+      case "preparing":
+        return t("正在准备发送…", "Preparing to send…");
       default:
         return String(fallback || "").trim();
     }
   };
 
-  const applyEnvironmentEnsureEvent = (form, event) => {
+  const applyEnvironmentEnsureEvent = (form, event, options = {}) => {
+    const showToast = options.showToast !== false;
+    const notifyPhase = (phase, fallback = "") => {
+      const label = environmentStatusPhaseLabel(phase, fallback);
+      if (typeof options.onPhase === "function") {
+        options.onPhase(phase, label);
+      }
+      if (showToast) {
+        showEnvironmentToast(label, "info", { persistent: true });
+      }
+      return label;
+    };
     if (!event || typeof event !== "object") {
       return null;
     }
@@ -1002,22 +1093,27 @@
       if (phase === "build_image") {
         const message = String(event.message || "").trim();
         if (message) {
-          showEnvironmentToast(
-            `${t("镜像构建中：", "Image build: ")}${message}`,
-            "info",
-            { persistent: true }
-          );
+          const label = `${t("镜像构建中：", "Image build: ")}${message}`;
+          if (typeof options.onPhase === "function") {
+            options.onPhase(phase, label);
+          }
+          if (showToast) {
+            showEnvironmentToast(label, "info", { persistent: true });
+          }
         }
       }
       return null;
     }
     if (type === "phase") {
       const phase = String(event.phase || "").trim().toLowerCase();
-      showEnvironmentToast(environmentStatusPhaseLabel(phase, event.message), "info", { persistent: true });
+      notifyPhase(phase, event.message);
       return null;
     }
     if (type === "local") {
-      showEnvironmentToast(String(event.message || event.notice || t("已切回本地环境", "Switched back to local chat")), "info");
+      const message = String(event.message || event.notice || t("已切回本地环境", "Switched back to local chat"));
+      if (showToast) {
+        showEnvironmentToast(message, "info");
+      }
       return {
         status: "local",
         sessionId: event.sessionId,
@@ -1027,7 +1123,12 @@
     }
     if (type === "ready") {
       const notice = String(event.notice || event.message || environmentStatusPhaseLabel("ready")).trim();
-      showEnvironmentToast(notice, "success");
+      if (typeof options.onPhase === "function") {
+        options.onPhase("ready", notice);
+      }
+      if (showToast) {
+        showEnvironmentToast(notice, "success");
+      }
       return {
         status: "ready",
         sessionId: event.sessionId,
@@ -1040,7 +1141,9 @@
     }
     if (type === "error") {
       const message = String(event.error || event.message || t("环境准备失败。", "Failed to prepare the selected environment."));
-      showEnvironmentToast(message, "error");
+      if (showToast) {
+        showEnvironmentToast(message, "error");
+      }
       throw new Error(message);
     }
     return null;
@@ -1199,8 +1302,11 @@
   };
 
   const composerPrimaryButton = (form = currentForm()) => form?.querySelector("[data-chat-action=\"composer-primary\"]") || null;
+  const composerPreemptButton = (form = currentForm()) => form?.querySelector("[data-chat-action=\"composer-preempt\"]") || null;
   const composerPrimaryStartGlyph = (form = currentForm()) => composerPrimaryButton(form)?.querySelector("[data-chat-primary-start]") || null;
   const composerPrimaryStopGlyph = (form = currentForm()) => composerPrimaryButton(form)?.querySelector("[data-chat-primary-stop]") || null;
+  const composerQueuePanel = (form = currentForm()) => form?.querySelector("[data-chat-composer-queue]") || null;
+  const composerQueueList = (form = currentForm()) => form?.querySelector("[data-chat-queue-list]") || null;
   const composerQueueIndicator = (form = currentForm()) => form?.querySelector("[data-chat-queue-indicator]") || null;
   const shellLaunchButton = (form = currentForm()) => form?.querySelector("[data-chat-action=\"open-shell\"]") || null;
   const shellPageBaseURL = (form = currentForm()) => String(form?.dataset.chatShellUrl || "").trim();
@@ -2524,18 +2630,211 @@
     || (Array.isArray(payload?.attachments) && payload.attachments.length > 0),
   );
 
+  const normalizeQueuedTurn = (turn = {}) => ({
+    id: String(turn.id || makeID("queue")).trim(),
+    prompt: String(turn.prompt || "").trim(),
+    userVisibleText: String(turn.userVisibleText || turn.prompt || "").trim(),
+    attachments: Array.isArray(turn.attachments) ? turn.attachments.map(normalizeAttachment).filter(Boolean) : [],
+  });
+
+  const queueTurnPreview = (turn) => {
+    const text = String(turn?.userVisibleText || turn?.prompt || "").trim();
+    if (text !== "") {
+      return text.length > 120 ? `${text.slice(0, 117)}...` : text;
+    }
+    const count = Array.isArray(turn?.attachments) ? turn.attachments.length : 0;
+    return count > 0 ? t(`已附带 ${count} 个附件`, `${count} attachment(s)`) : t("(空消息)", "(Empty message)");
+  };
+
+  const preserveSessionQueue = (sessionID) => {
+    const state = getSessionStreamState(sessionID);
+    if (!state?.queuedTurns?.length) {
+      return [];
+    }
+    return state.queuedTurns.map(normalizeQueuedTurn);
+  };
+
+  const restoreSessionQueue = (sessionID, queuedTurns) => {
+    if (!Array.isArray(queuedTurns) || queuedTurns.length === 0) {
+      return;
+    }
+    ensureSessionStreamState(sessionID).queuedTurns = queuedTurns.map(normalizeQueuedTurn);
+  };
+
+  const releaseSessionStreamRuntime = (state) => {
+    if (!state?.sessionID) {
+      return;
+    }
+    const queuedTurns = preserveSessionQueue(state.sessionID);
+    const preemptTurn = state.preemptTurn ? normalizeQueuedTurn(state.preemptTurn) : null;
+    sessionStreamStates.delete(state.sessionID);
+    restoreSessionQueue(state.sessionID, queuedTurns);
+    if (preemptTurn) {
+      ensureSessionStreamState(state.sessionID).preemptTurn = preemptTurn;
+    }
+  };
+
+  const renderComposerQueue = (form = currentForm()) => {
+    if (!form) {
+      return;
+    }
+    const panel = composerQueuePanel(form);
+    const list = composerQueueList(form);
+    const sessionID = readClientSessionID(form);
+    const streamState = getSessionStreamState(sessionID);
+    const turns = streamState?.queuedTurns || [];
+    if (panel instanceof HTMLElement) {
+      panel.hidden = turns.length === 0;
+      const clearButton = panel.querySelector("[data-chat-action=\"clear-queue\"]");
+      if (clearButton instanceof HTMLButtonElement) {
+        clearButton.hidden = turns.length === 0;
+      }
+    }
+    const indicator = composerQueueIndicator(form);
+    if (indicator instanceof HTMLElement) {
+      indicator.textContent = turns.length > 0 ? t(`已排队 ${turns.length} 条`, `Queued ${turns.length}`) : "";
+    }
+    if (!(list instanceof HTMLElement)) {
+      return;
+    }
+    list.replaceChildren();
+    turns.forEach((turn, index) => {
+      const item = document.createElement("li");
+      item.className = "chat-composer-queue-item";
+      item.dataset.chatQueueId = turn.id;
+
+      const copy = document.createElement("div");
+      copy.className = "chat-composer-queue-copy";
+      const title = document.createElement("strong");
+      title.textContent = t(`#${index + 1}`, `#${index + 1}`);
+      const preview = document.createElement("span");
+      preview.textContent = queueTurnPreview(turn);
+      copy.appendChild(title);
+      copy.appendChild(preview);
+
+      const actions = document.createElement("div");
+      actions.className = "chat-composer-queue-actions";
+
+      const preemptButton = document.createElement("button");
+      preemptButton.type = "button";
+      preemptButton.className = "chat-composer-queue-action";
+      preemptButton.dataset.chatAction = "preempt-queue-item";
+      preemptButton.dataset.chatQueueId = turn.id;
+      preemptButton.title = t("立即发送", "Send now");
+      preemptButton.setAttribute("aria-label", t("立即发送", "Send now"));
+      preemptButton.innerHTML = '<i class="chat-control-icon" data-lucide="zap" aria-hidden="true"></i>';
+
+      const cancelButton = document.createElement("button");
+      cancelButton.type = "button";
+      cancelButton.className = "chat-composer-queue-action is-danger";
+      cancelButton.dataset.chatAction = "cancel-queue-item";
+      cancelButton.dataset.chatQueueId = turn.id;
+      cancelButton.title = t("取消", "Cancel");
+      cancelButton.setAttribute("aria-label", t("取消排队", "Cancel queued turn"));
+      cancelButton.innerHTML = '<i class="chat-control-icon" data-lucide="x" aria-hidden="true"></i>';
+
+      actions.appendChild(preemptButton);
+      actions.appendChild(cancelButton);
+      item.appendChild(copy);
+      item.appendChild(actions);
+      list.appendChild(item);
+    });
+    syncLucideIcons();
+  };
+
+  const cancelQueuedTurn = (sessionID, turnID) => {
+    const normalizedSessionID = normalizeSessionStreamID(sessionID);
+    const streamState = getSessionStreamState(normalizedSessionID);
+    if (!streamState?.queuedTurns?.length) {
+      return false;
+    }
+    const nextQueue = streamState.queuedTurns.filter((turn) => turn.id !== turnID);
+    if (nextQueue.length === streamState.queuedTurns.length) {
+      return false;
+    }
+    streamState.queuedTurns = nextQueue;
+    renderComposerQueue(currentForm());
+    updateComposerControls(currentForm());
+    return true;
+  };
+
+  const clearQueuedTurns = (sessionID) => {
+    const normalizedSessionID = normalizeSessionStreamID(sessionID);
+    const streamState = getSessionStreamState(normalizedSessionID);
+    if (!streamState?.queuedTurns?.length) {
+      return false;
+    }
+    streamState.queuedTurns = [];
+    renderComposerQueue(currentForm());
+    updateComposerControls(currentForm());
+    return true;
+  };
+
+  const requestStreamPreempt = (sessionID, turn) => {
+    const normalizedSessionID = normalizeSessionStreamID(sessionID);
+    const normalizedTurn = normalizeQueuedTurn(turn);
+    const state = getSessionStreamState(normalizedSessionID);
+    if (state && isSessionStreamActive(normalizedSessionID)) {
+      state.preemptTurn = normalizedTurn;
+      stopSessionStream(normalizedSessionID);
+      return true;
+    }
+    const form = currentForm();
+    if (form && isSessionVisible(normalizedSessionID)) {
+      void streamConsoleChat(form, normalizedTurn);
+      return true;
+    }
+    return false;
+  };
+
+  const preemptQueuedTurn = (sessionID, turnID) => {
+    const normalizedSessionID = normalizeSessionStreamID(sessionID);
+    const streamState = getSessionStreamState(normalizedSessionID);
+    if (!streamState?.queuedTurns?.length) {
+      return false;
+    }
+    const index = streamState.queuedTurns.findIndex((turn) => turn.id === turnID);
+    if (index < 0) {
+      return false;
+    }
+    const [turn] = streamState.queuedTurns.splice(index, 1);
+    renderComposerQueue(currentForm());
+    updateComposerControls(currentForm());
+    return requestStreamPreempt(normalizedSessionID, turn);
+  };
+
+  const preemptDraftTurn = (form) => {
+    if (!form) {
+      return false;
+    }
+    const payload = readDraftPayload(form);
+    if (!hasDraftPayload(payload)) {
+      updateComposerControls(form);
+      return false;
+    }
+    const sessionID = readClientSessionID(form);
+    clearComposerDraft(form);
+    return requestStreamPreempt(sessionID, payload);
+  };
+
   const updateComposerControls = (form = currentForm()) => {
     if (!form) {
       return;
     }
     const button = composerPrimaryButton(form);
+    const preemptButton = composerPreemptButton(form);
     const startGlyph = composerPrimaryStartGlyph(form);
     const stopGlyph = composerPrimaryStopGlyph(form);
-    const indicator = composerQueueIndicator(form);
     const shellButton = shellLaunchButton(form);
-    const streaming = isSessionStreamActive(readClientSessionID(form));
+    const sessionID = readClientSessionID(form);
+    const streaming = isSessionStreamActive(sessionID);
     const payload = readDraftPayload(form);
+    const hasDraft = hasDraftPayload(payload);
 
+    if (preemptButton instanceof HTMLButtonElement) {
+      preemptButton.hidden = !(streaming && hasDraft);
+      preemptButton.disabled = !hasDraft;
+    }
     if (button instanceof HTMLButtonElement) {
       if (streaming) {
         button.hidden = false;
@@ -2543,7 +2842,7 @@
         button.classList.add("is-stop");
         button.setAttribute("aria-label", t("终止当前回复", "Stop current reply"));
       } else {
-        const shouldShow = hasDraftPayload(payload);
+        const shouldShow = hasDraft;
         button.hidden = !shouldShow;
         button.disabled = !shouldShow || currentSelectedModel(form) === "";
         button.classList.remove("is-stop");
@@ -2556,13 +2855,7 @@
     if (stopGlyph instanceof HTMLElement) {
       stopGlyph.hidden = !streaming;
     }
-    if (indicator instanceof HTMLElement) {
-      const sessionID = readClientSessionID(form);
-      const streamState = getSessionStreamState(sessionID);
-      const queuedCount = streamState?.queuedTurns?.length || 0;
-      indicator.hidden = queuedCount === 0;
-      indicator.textContent = queuedCount > 0 ? t(`已排队 ${queuedCount} 条`, `Queued ${queuedCount}`) : "";
-    }
+    renderComposerQueue(form);
     if (shellButton instanceof HTMLButtonElement) {
       const hasShellSocket = shellSocketBaseURL(form) !== "";
       const showShellButton = hasShellSocket && isCloudAgentEnvironment(currentSelectedEnvironment(form));
@@ -3087,7 +3380,7 @@
     return card;
   };
 
-  const buildReasoningPanel = (bubble, reasoning, open = false) => {
+  const buildReasoningPanel = (article, bubble, reasoning, open = false) => {
     const details = document.createElement("details");
     details.className = "chat-reasoning";
 
@@ -3133,6 +3426,7 @@
     const setReasoning = (nextReasoning, keepOpen = details.open) => {
       const raw = String(nextReasoning || "");
       if (raw.trim() === "") {
+        article.classList.remove("is-reasoning-stream");
         details.hidden = true;
         copy.dataset.chatMarkdownSource = "";
         copy.innerHTML = "";
@@ -3141,7 +3435,9 @@
       }
       mount();
       details.hidden = false;
+      article.classList.add("is-reasoning-stream");
       renderMarkdownInto(copy, raw);
+      attachMarkdownCopyHandler(copy);
       details.open = keepOpen;
       syncLucideIcons();
     };
@@ -3161,7 +3457,7 @@
     const bubble = document.createElement("div");
     bubble.className = "chat-bubble";
 
-    const reasoningPanel = buildReasoningPanel(bubble, reasoning, false);
+    const reasoningPanel = buildReasoningPanel(article, bubble, reasoning, false);
 
     const copy = document.createElement("div");
     copy.className = "chat-message-copy";
@@ -3176,6 +3472,9 @@
       }
       copy.hidden = false;
       renderMarkdownInto(copy, raw);
+      if (roleClass === "is-assistant") {
+        attachMarkdownCopyHandler(copy);
+      }
     };
     setContent(content);
     bubble.appendChild(copy);
@@ -3201,6 +3500,27 @@
     actionBar.className = "chat-message-actions";
     actionBar.hidden = true;
     bubble.appendChild(actionBar);
+
+    if (roleClass === "is-assistant") {
+      const toolbar = document.createElement("div");
+      toolbar.className = "chat-message-toolbar";
+      const copyButton = document.createElement("button");
+      copyButton.type = "button";
+      copyButton.className = "chat-message-toolbar-button";
+      copyButton.dataset.chatAction = "copy-message-markdown";
+      copyButton.setAttribute("aria-label", t("复制 Markdown", "Copy markdown"));
+      copyButton.title = t("复制 Markdown", "Copy markdown");
+      const copyIcon = document.createElement("i");
+      copyIcon.className = "chat-control-icon";
+      copyIcon.dataset.lucide = "copy";
+      copyButton.appendChild(copyIcon);
+      const copyLabel = document.createElement("span");
+      copyLabel.className = "chat-message-toolbar-label";
+      copyLabel.textContent = t("复制", "Copy");
+      copyButton.appendChild(copyLabel);
+      toolbar.appendChild(copyButton);
+      bubble.appendChild(toolbar);
+    }
 
     const setStreamingStatus = (nextStatus, tone = "streaming") => {
       if (!(status instanceof HTMLElement)) {
@@ -3634,15 +3954,20 @@
     if (!(form instanceof HTMLFormElement) || !session) {
       return;
     }
-    if (isCloudAgentEnvironment(session.environment)) {
+    const environment = currentSelectedEnvironment(form);
+    if (isCloudAgentEnvironment(environment)) {
       try {
-        await ensureChatEnvironment(form, { suppressSuccessNotice: true });
-      } catch (_error) {
-        // Keep trying shell/stream restore in case the runtime is still active.
+        await ensureChatEnvironment(form, {
+          suppressSuccessNotice: true,
+          forceRuntime: true,
+          showToast: true,
+        });
+      } catch (error) {
+        showEnvironmentToast(String(error?.message || t("Claude Code 启动失败。", "Claude Code startup failed.")), "error");
       }
     }
     syncChatShellSession(form);
-    await attachSessionStream(form, session);
+    await attachSessionStream(form, { ...session, environment: currentSelectedEnvironment(form) });
   };
 
   const activateSession = (sessionID, broadcast = true) => {
@@ -3802,6 +4127,25 @@
     }, 180);
   };
 
+  const reconcileActiveSessionEnvironmentFromDOM = (store, active, form, routes) => {
+    if (!form || !active) {
+      return { store, active };
+    }
+    const domSessionID = readClientSessionID(form);
+    const domEnvironment = currentSelectedEnvironment(form);
+    if (domSessionID === "" || domSessionID !== active.id || !isCloudAgentEnvironment(domEnvironment)) {
+      return { store, active };
+    }
+    if (isCloudAgentEnvironment(active.environment)) {
+      return { store, active };
+    }
+    const nextActive = normalizeSession({ ...active, environment: domEnvironment }, form, routes, active);
+    const nextStore = upsertSession(store, nextActive);
+    nextStore.activeSessionId = nextActive.id;
+    saveStore(nextStore, false);
+    return { store: nextStore, active: nextActive };
+  };
+
   const hydrateWorkspace = (preferServerState) => {
     const root = currentRoot();
     const form = currentForm();
@@ -3825,7 +4169,8 @@
     if (!store.sessions.some((session) => session.id === store.activeSessionId)) {
       store.activeSessionId = store.sessions[0]?.id || "";
     }
-    const active = store.sessions.find((session) => session.id === store.activeSessionId) || store.sessions[0] || serverSession;
+    let active = store.sessions.find((session) => session.id === store.activeSessionId) || store.sessions[0] || serverSession;
+    ({ store, active } = reconcileActiveSessionEnvironmentFromDOM(store, active, form, routes));
     renderSessionList(root, store);
     applySession(root, active, routes);
   };
@@ -3846,7 +4191,8 @@
       store.activeSessionId = store.sessions[0].id;
     }
     renderSessionList(root, store);
-    const active = store.sessions.find((session) => session.id === store.activeSessionId) || store.sessions[0];
+    let active = store.sessions.find((session) => session.id === store.activeSessionId) || store.sessions[0];
+    ({ store, active } = reconcileActiveSessionEnvironmentFromDOM(store, active, form, routes));
     applySession(root, active, routes);
   };
 
@@ -3921,11 +4267,11 @@
       updateComposerControls(form);
       return false;
     }
-    streamState.queuedTurns.push({
+    streamState.queuedTurns.push(normalizeQueuedTurn({
       prompt: payload.prompt,
       userVisibleText: payload.userVisibleText,
       attachments: payload.attachments,
-    });
+    }));
     clearComposerDraft(form);
     const queuedCount = streamState.queuedTurns.length;
     setAttachmentStatus(
@@ -4090,6 +4436,7 @@
     const ensureURL = environmentEnsureURL(form);
     const ensureStreamURL = environmentEnsureStreamURL(form);
     const suppressSuccessNotice = Boolean(options && options.suppressSuccessNotice);
+    const showToast = options.showToast !== false;
     if (!root || !(field instanceof HTMLInputElement || field instanceof HTMLSelectElement) || ensureURL === "") {
       return null;
     }
@@ -4102,6 +4449,7 @@
       environment,
       currentSelectedModel(form),
       currentSelectedReasoningEffort(form),
+      options && options.forceRuntime ? "force-runtime" : "reuse",
     ].join("\u001f");
     if (environmentEnsureInFlight && environmentEnsureKey === requestKey) {
       return environmentEnsureInFlight;
@@ -4113,14 +4461,21 @@
     payload.set("chat_environment", environment);
     payload.set("chat_public_name", currentSelectedModel(form));
     payload.set("chat_reasoning_effort", currentSelectedReasoningEffort(form));
+    if (options && options.forceRuntime) {
+      payload.set("chat_environment_force_runtime", "1");
+    }
     const previousDisabled = field.disabled;
     field.disabled = true;
     setEnvironmentPickerBusy(form, true);
     dismissEnvironmentToast();
-    if (environment === "local") {
-      showEnvironmentToast(t("正在切回本地环境…", "Switching back to local chat…"), "info", { persistent: true });
-    } else {
-      showEnvironmentToast(t("正在连接 Claude Code…", "Connecting Claude Code…"), "info", { persistent: true });
+    if (showToast) {
+      if (environment === "local") {
+        showEnvironmentToast(t("正在切回本地环境…", "Switching back to local chat…"), "info", { persistent: true });
+      } else {
+        showEnvironmentToast(t("正在连接 Claude Code…", "Connecting Claude Code…"), "info", { persistent: true });
+      }
+    } else if (typeof options.onPhase === "function") {
+      options.onPhase("preparing", environmentStatusPhaseLabel("preparing"));
     }
     setAttachmentStatus(root, "", false);
     const ensureChatEnvironmentViaJSON = async () => {
@@ -4137,9 +4492,13 @@
       }
       const notice = String(jsonParsed.notice || "").trim();
       if (environment === "local") {
-        showEnvironmentToast(notice || t("已切回本地环境", "Switched back to local chat"), "info");
-      } else {
+        if (showToast) {
+          showEnvironmentToast(notice || t("已切回本地环境", "Switched back to local chat"), "info");
+        }
+      } else if (showToast) {
         showEnvironmentToast(notice || t("Claude Code 已连接并就绪", "Claude Code is connected and ready"), "success");
+      } else if (typeof options.onPhase === "function") {
+        options.onPhase("ready", notice || environmentStatusPhaseLabel("ready"));
       }
       return jsonParsed;
     };
@@ -4161,7 +4520,7 @@
       }
       let streamParsed = null;
       await decodeStreamEvents(response, (event) => {
-        const result = applyEnvironmentEnsureEvent(form, event);
+        const result = applyEnvironmentEnsureEvent(form, event, options);
         if (result) {
           streamParsed = result;
         }
@@ -4176,7 +4535,11 @@
           try {
             parsed = await ensureChatEnvironmentViaStream();
           } catch (_streamError) {
-            showEnvironmentToast(t("正在准备 Claude Code…", "Preparing Claude Code…"), "info", { persistent: true });
+            if (showToast) {
+              showEnvironmentToast(t("正在准备 Claude Code…", "Preparing Claude Code…"), "info", { persistent: true });
+            } else if (typeof options.onPhase === "function") {
+              options.onPhase("starting", environmentStatusPhaseLabel("starting"));
+            }
             parsed = await ensureChatEnvironmentViaJSON();
           }
         } else {
@@ -4193,10 +4556,12 @@
         }
         const notice = String(parsed.notice || "").trim();
         if (notice !== "" && environment !== "local" && suppressSuccessNotice) {
-          showEnvironmentToast(notice, "success");
+          if (showToast) {
+            showEnvironmentToast(notice, "success");
+          }
         } else if (notice === "") {
           setInlineFlash(root, "", false);
-        } else if (!suppressSuccessNotice) {
+        } else if (!suppressSuccessNotice && showToast) {
           setInlineFlash(root, notice, false);
         }
         queuePersist();
@@ -4204,10 +4569,12 @@
         return parsed;
       } catch (error) {
         const message = String(error?.message || t("环境准备失败。", "Failed to prepare the selected environment."));
-        if (environment !== "local") {
-          showEnvironmentToast(message, "error");
+        if (showToast) {
+          if (environment !== "local") {
+            showEnvironmentToast(message, "error");
+          }
+          setInlineFlash(root, message, true);
         }
-        setInlineFlash(root, message, true);
         throw error;
       } finally {
         if (environmentEnsureInFlight === ensurePromise) {
@@ -4301,11 +4668,55 @@
     }
   };
 
+  const shellQuote = (value) => `'${String(value || "").replace(/'/g, `'"'"'`)}'`;
+
+  const resolveNewTerminalWorkingDirectory = (form, options = {}) => {
+    const explicitCwd = normalizeShellWorkingDirectory(options.cwd || "");
+    if (explicitCwd !== "") {
+      return explicitCwd;
+    }
+    if (String(options.command || "").trim() !== "") {
+      return "";
+    }
+    const override = normalizeShellWorkingDirectory(form?.dataset?.chatWorkdirOverride || "");
+    if (override !== "") {
+      return override;
+    }
+    return "~";
+  };
+
+  const buildShellInitialCdCommand = (cwd) => {
+    const target = String(cwd || "").trim();
+    if (target === "") {
+      return "";
+    }
+    if (target === "~") {
+      return "cd ~";
+    }
+    return `cd -- ${shellQuote(target)}`;
+  };
+
+  const buildShellInitialInput = (form, options = {}) => {
+    const explicitCommand = ownProperty.call(options, "command") ? String(options.command || "").trim() : "";
+    let initialInput = String(options.initialInput || "").trim();
+    if (explicitCommand !== "") {
+      initialInput = initialInput === "" ? explicitCommand : `${explicitCommand}\n${initialInput}`;
+    } else {
+      const cdCommand = buildShellInitialCdCommand(resolveNewTerminalWorkingDirectory(form, options));
+      if (cdCommand !== "") {
+        initialInput = initialInput === "" ? cdCommand : `${cdCommand}\n${initialInput}`;
+      }
+    }
+    if (initialInput === "") {
+      return "";
+    }
+    return initialInput.endsWith("\n") ? initialInput : `${initialInput}\n`;
+  };
+
   const openChatShell = async (form, options = {}) => {
     const root = currentRoot();
     const baseSocketURL = shellSocketBaseURL(form);
-    const commandInput = ownProperty.call(options, "command") ? String(options.command || "").trim() : "";
-    const initialInput = commandInput !== "" ? `${commandInput}\n` : String(options.initialInput || "");
+    const initialInput = buildShellInitialInput(form, options);
     if (!root || baseSocketURL === "") {
       return;
     }
@@ -4349,6 +4760,10 @@
       if (nextSocketURL === "") {
         nextSocketURL = shellSocketURLForTerminal(form, sessionID, terminalID);
       }
+      const initialWorkingDirectory = resolveNewTerminalWorkingDirectory(form, options);
+      const trackedWorkingDirectory = initialWorkingDirectory === "~"
+        ? ""
+        : normalizeShellWorkingDirectory(initialWorkingDirectory);
       const instance = createShellInstance({
         terminalID: String(shellState?.terminalId || terminalID).trim() || terminalID,
         sessionID,
@@ -4356,6 +4771,7 @@
         containerName: shellState?.containerName || ensured?.containerName,
         workspacePath: shellState?.workspacePath || ensured?.workspacePath,
         socketURL: nextSocketURL,
+        currentWorkingDirectory: trackedWorkingDirectory || normalizeShellWorkingDirectory(shellState?.workspacePath || ensured?.workspacePath || ""),
       });
 
       shellInstances = [...shellInstances, instance];
@@ -4392,6 +4808,7 @@
       showProgress: detail.showProgress !== false,
       terminalID: detail.terminalID,
       command: detail.command,
+      cwd: detail.cwd,
       initialInput: detail.initialInput,
     });
   });
@@ -4692,8 +5109,10 @@
       }
     } finally {
       const stoppedByUser = state.stopRequested;
+      const preemptTurn = state.preemptTurn ? normalizeQueuedTurn(state.preemptTurn) : null;
       state.controller = null;
       state.stopRequested = false;
+      state.preemptTurn = null;
       state.active = false;
       if (state.streamOpened && !state.replaced && !state.streamCompleted && !state.streamErrored && !stoppedByUser && !state.allowReconnect) {
         finalizeInterruptedStream(t("连接中断，最后一段回复没有完整结束。", "The stream was interrupted before the answer finished."));
@@ -4707,9 +5126,18 @@
       if (root) {
         renderSessionList(root, normalizeStore(loadStore(), form, routeMap(form)));
       }
-      startQueuedTurnForSession(state.sessionID);
       if (state.streamCompleted || state.streamErrored || state.streamInterrupted) {
-        sessionStreamStates.delete(state.sessionID);
+        releaseSessionStreamRuntime(state);
+      }
+      if (preemptTurn && isSessionVisible(state.sessionID)) {
+        const nextForm = currentForm();
+        if (nextForm) {
+          void streamConsoleChat(nextForm, preemptTurn);
+        }
+      } else if (!stoppedByUser) {
+        startQueuedTurnForSession(state.sessionID);
+      } else {
+        updateComposerControls(currentForm());
       }
     }
   };
@@ -4743,16 +5171,6 @@
       attachments: [],
     };
 
-    if (currentSelectedEnvironment(form) !== "local") {
-      try {
-        await ensureChatEnvironment(form);
-      } catch (_error) {
-        return;
-      }
-    }
-
-    persistCurrentSession(false);
-
     const root = currentRoot();
     const thread = form.querySelector("[data-chat-scroll]");
     const streamURL = form.dataset.chatStreamUrl;
@@ -4763,16 +5181,12 @@
       return;
     }
 
-    const formData = new FormData(form);
-    formData.set("chat_draft", promptValue);
-    formData.set("chat_draft_attachments_json", JSON.stringify(attachments));
-    const shellContext = syncShellContextFields(form);
-    formData.set("chat_shell_active_terminal_id", shellContext.terminalID);
-    formData.set("chat_shell_current_working_directory", shellContext.currentWorkingDirectory);
+    persistCurrentSession(false);
 
     const state = ensureSessionStreamState(sessionID);
     state.active = true;
     state.stopRequested = false;
+    state.preemptTurn = null;
     state.streamCompleted = false;
     state.streamErrored = false;
     state.streamInterrupted = false;
@@ -4798,7 +5212,17 @@
       thread.replaceChildren();
     }
     const userMessage = buildMessageNode("user", roleLabel("user"), draftValue || t("已附带附件。", "Attachments included."), "", attachments);
-    const assistantMessage = buildMessageNode("assistant", roleLabel("assistant"), "", form.dataset.chatStreamingLabel || "Streaming", [], "");
+    const initialAssistantStatus = currentSelectedEnvironment(form) === "local"
+      ? (form.dataset.chatStreamingLabel || "Streaming")
+      : environmentStatusPhaseLabel("preparing");
+    const assistantMessage = buildMessageNode(
+      "assistant",
+      roleLabel("assistant"),
+      "",
+      initialAssistantStatus,
+      [],
+      "",
+    );
     thread.appendChild(userMessage.article);
     thread.appendChild(assistantMessage.article);
     scrollThread(thread);
@@ -4807,6 +5231,40 @@
     syncFormStreamingUI(form);
     syncStreamHistory(form, baseMessages, userHistoryMessage, assistantHistoryMessage);
     updateCurrentSessionMetadata({ status: "streaming", lastError: "" });
+
+    const updatePrepareStatus = (_phase, label) => {
+      assistantMessage.setStreamingStatus(label, "heartbeat");
+      scrollThread(thread);
+    };
+
+    if (currentSelectedEnvironment(form) !== "local") {
+      try {
+        await ensureChatEnvironment(form, {
+          showToast: false,
+          suppressSuccessNotice: true,
+          onPhase: updatePrepareStatus,
+        });
+      } catch (error) {
+        const message = String(error?.message || t("Claude Code 启动失败。", "Claude Code startup failed."));
+        assistantMessage.setStreamingStatus(message, "error");
+        state.active = false;
+        state.controller = null;
+        releaseSessionStreamRuntime(state);
+        syncFormStreamingUI(form);
+        updateCurrentSessionMetadata({ status: "failed", lastError: message });
+        return;
+      }
+      assistantMessage.setStreamingStatus(environmentStatusPhaseLabel("sending"), "heartbeat");
+    }
+
+    const formData = new FormData(form);
+    formData.set("chat_draft", promptValue);
+    formData.set("chat_draft_attachments_json", JSON.stringify(attachments));
+    const shellContext = syncShellContextFields(form);
+    formData.set("chat_shell_active_terminal_id", shellContext.terminalID);
+    formData.set("chat_shell_current_working_directory", shellContext.currentWorkingDirectory);
+
+    assistantMessage.setStreamingStatus(form.dataset.chatStreamingLabel || "Streaming", "streaming");
     await runSessionStreamFetchLoop(state, form, { formData });
   };
 
@@ -4911,6 +5369,33 @@
         } else {
           form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
         }
+        return;
+      }
+      case "composer-preempt": {
+        event.preventDefault();
+        preemptDraftTurn(form);
+        return;
+      }
+      case "clear-queue": {
+        event.preventDefault();
+        clearQueuedTurns(readClientSessionID(form));
+        return;
+      }
+      case "cancel-queue-item": {
+        event.preventDefault();
+        cancelQueuedTurn(readClientSessionID(form), String(actionTarget.dataset.chatQueueId || "").trim());
+        return;
+      }
+      case "preempt-queue-item": {
+        event.preventDefault();
+        preemptQueuedTurn(readClientSessionID(form), String(actionTarget.dataset.chatQueueId || "").trim());
+        return;
+      }
+      case "copy-message-markdown": {
+        event.preventDefault();
+        const messageNode = actionTarget.closest(".chat-message");
+        const bubbleNode = messageNode?.querySelector(".chat-bubble");
+        void copyAssistantMessageMarkdown(bubbleNode);
         return;
       }
       case "open-shell": {
@@ -5072,7 +5557,7 @@
     if (!(target instanceof HTMLTextAreaElement) || target.id !== "chat-draft") {
       return;
     }
-    if (event.defaultPrevented || event.isComposing || event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) {
+    if (event.defaultPrevented || event.isComposing || event.key !== "Enter" || event.shiftKey || event.altKey) {
       return;
     }
     const form = target.form;
@@ -5081,7 +5566,14 @@
     }
     event.preventDefault();
     if (isSessionStreamActive(readClientSessionID(form))) {
+      if (event.ctrlKey || event.metaKey) {
+        preemptDraftTurn(form);
+        return;
+      }
       queuePendingTurn(form);
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
       return;
     }
     if (typeof form.requestSubmit === "function") {

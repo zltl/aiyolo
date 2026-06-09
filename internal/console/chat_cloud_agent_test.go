@@ -1,10 +1,12 @@
 package console
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/zltl/aiyolo/internal/domain"
+	"github.com/zltl/aiyolo/internal/storage"
 )
 
 func TestConsoleCloudAgentCurrentPromptIsInteractive(t *testing.T) {
@@ -248,5 +250,30 @@ func TestConsoleCloudAgentWorkingDirectoryUsesActiveTerminalCWD(t *testing.T) {
 	}
 	if got := consoleCloudAgentWorkingDirectory(account, cloudSession, "term-one", "relative/path"); got != "/workspace/one" {
 		t.Fatalf("working directory = %q, want persisted terminal cwd fallback", got)
+	}
+}
+
+func TestConsoleCloudAgentRunExecutePassesPreviousResponseID(t *testing.T) {
+	const previousResponseID = "550e8400-e29b-41d4-a716-446655440000"
+	var capturedPreviousResponseID string
+	handler := NewHandler(Config{SecretKey: "test-secret"}, storage.NewMemoryStore())
+	handler.runCloudAgentChat = func(_ context.Context, _ domain.WorkerServer, _ domain.WorkerSSHKey, _ domain.CloudAgentAccount, _ domain.CloudAgentSession, request consoleCloudAgentChatRequest) (consoleChatExecution, error) {
+		capturedPreviousResponseID = request.PreviousResponseID
+		return consoleChatExecution{}, nil
+	}
+	run := &consoleCloudAgentRun{
+		handler:   handler,
+		registry:  handler.cloudAgentRuns,
+		key:       "test-run",
+		locale:    "zh-CN",
+		userID:    "user@test",
+		sessionID: "session-test",
+		request: consoleCloudAgentChatRequest{
+			PreviousResponseID: previousResponseID,
+		},
+	}
+	run.execute()
+	if capturedPreviousResponseID != previousResponseID {
+		t.Fatalf("PreviousResponseID = %q, want %q", capturedPreviousResponseID, previousResponseID)
 	}
 }

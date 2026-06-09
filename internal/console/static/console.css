@@ -7187,7 +7187,71 @@ textarea:focus-visible,
 }
 
 .chat-message.is-assistant .chat-bubble {
+  position: relative;
   border-color: transparent;
+}
+
+.chat-message-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  margin-top: 0.45rem;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.chat-message.is-assistant:hover .chat-message-toolbar,
+.chat-message.is-assistant:focus-within .chat-message-toolbar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-message-toolbar-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.28rem;
+  min-height: 1.55rem;
+  padding: 0 0.42rem;
+  border: 1px solid #3a3d41;
+  border-radius: 4px;
+  background: rgba(37, 37, 38, 0.96);
+  color: #cccccc;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.chat-message-toolbar-button:hover {
+  background: #2a2d2e;
+  color: #ffffff;
+}
+
+.chat-message-toolbar-button:focus-visible {
+  outline: 2px solid rgba(14, 99, 156, 0.85);
+  outline-offset: 1px;
+}
+
+.chat-message-toolbar-button .chat-control-icon {
+  width: 0.78rem;
+  height: 0.78rem;
+}
+
+.chat-message-toolbar-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.chat-message.is-pending .chat-message-toolbar {
+  margin-top: 0.2rem;
+}
+
+.chat-message-copy,
+.chat-reasoning-copy {
+  user-select: text;
 }
 
 .chat-message.is-pending .chat-bubble,
@@ -7201,6 +7265,18 @@ textarea:focus-visible,
   width: fit-content;
   max-width: min(100%, 18rem);
   padding: 0.28rem 0.5rem;
+}
+
+.chat-message.is-pending.is-reasoning-stream .chat-bubble,
+.chat-message.is-pending:has(.chat-reasoning:not([hidden])) .chat-bubble {
+  width: 100%;
+  max-width: min(100%, var(--chat-message-max, var(--chat-content-max, 62rem)));
+  padding: 0.5rem 0.65rem;
+}
+
+.chat-message.is-pending.is-reasoning-stream .chat-reasoning,
+.chat-message.is-pending:has(.chat-reasoning:not([hidden])) .chat-reasoning {
+  width: 100%;
 }
 
 .chat-message.is-pending .chat-streaming-status {
@@ -7459,6 +7535,115 @@ textarea:focus-visible,
 .chat-composer-primary {
   gap: 0.35rem;
   margin-left: 0.15rem;
+}
+
+.chat-composer-queue {
+  margin-top: 0.55rem;
+  border: 1px solid rgba(152, 162, 186, 0.14);
+  border-radius: 0.65rem;
+  background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+}
+
+.chat-composer-queue-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.65rem;
+  border-bottom: 1px solid rgba(152, 162, 186, 0.1);
+}
+
+.chat-queue-indicator {
+  font-size: 0.78rem;
+  color: #b8c2da;
+}
+
+.chat-queue-clear {
+  border: 0;
+  background: transparent;
+  color: #9aa7c7;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.chat-queue-clear:hover {
+  color: #dfe6fb;
+}
+
+.chat-composer-queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.chat-composer-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.65rem;
+}
+
+.chat-composer-queue-item + .chat-composer-queue-item {
+  border-top: 1px solid rgba(152, 162, 186, 0.08);
+}
+
+.chat-composer-queue-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.chat-composer-queue-copy strong {
+  font-size: 0.72rem;
+  color: #8f9bbd;
+  font-weight: 600;
+}
+
+.chat-composer-queue-copy span {
+  font-size: 0.82rem;
+  color: #e8edf8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-composer-queue-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+}
+
+.chat-composer-queue-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  border: 0;
+  border-radius: 0.45rem;
+  background: rgba(255, 255, 255, 0.05);
+  color: #dfe6fb;
+  cursor: pointer;
+}
+
+.chat-composer-queue-action:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.chat-composer-queue-action.is-danger {
+  color: #ff9a86;
+}
+
+.chat-preempt-button {
+  color: #ffd27a;
+}
+
+.chat-preempt-button:hover {
+  background: rgba(255, 210, 122, 0.08);
 }
 
 .chat-workspace-body .chat-send-button {

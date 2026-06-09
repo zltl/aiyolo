@@ -351,6 +351,30 @@ func TestJobStreamCapturesProcessOutput(t *testing.T) {
 	}
 }
 
+func TestJobStreamCapturesDelayedOutput(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root)
+
+	response := performRequest(server, http.MethodPost, "/v1/jobs", `{"id":"job-delayed","kind":"test","argv":["/bin/sh","-c","sleep 0.05; printf 'delayed\\n'; sleep 0.05; printf 'tail\\n' >&2"]}`)
+	if response.Code != http.StatusCreated && response.Code != http.StatusOK {
+		t.Fatalf("create job status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = performRequest(server, http.MethodGet, "/v1/jobs/job-delayed/stream", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("stream job status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "closed pipe") {
+		t.Fatalf("job stream should not report a closed pipe: %s", body)
+	}
+	for _, expected := range []string{"delayed", "tail", `"type":"done"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("job stream missing %q: %s", expected, body)
+		}
+	}
+}
+
 func newTestServer(t *testing.T, root string) *Server {
 	t.Helper()
 	execUser := "root"

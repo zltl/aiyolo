@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -111,6 +112,91 @@ func TestCloudAgentContainerEnvUsesConsoleBaseURLAndCustomModel(t *testing.T) {
 	}
 	if env["AIYOLO_ASS_HTTP_ADDR"] != "0.0.0.0:17811" {
 		t.Fatalf("unexpected aiyolo-ass http addr: %+v", env)
+	}
+}
+
+func TestParseCloudAgentRemoteResponse(t *testing.T) {
+	summary := `{"status":"running","worker_id":"worker-0","container_name":"aiyolo-cloud-agent-u1","workspace_path":"/workspace"}`
+	instance, err := parseCloudAgentRemoteResponse(summary)
+	if err != nil {
+		t.Fatalf("parse summary: %v", err)
+	}
+	if instance.Status != "running" || instance.WorkerID != "worker-0" {
+		t.Fatalf("instance=%+v", instance)
+	}
+
+	mixed := strings.Join([]string{
+		"AIYOLO_PROGRESS\t{\"type\":\"phase\",\"phase\":\"reuse_container\",\"message\":\"Reusing container\"}",
+		"AIYOLO_PROGRESS\t{\"type\":\"phase\",\"phase\":\"ready\",\"message\":\"Ready\"}",
+		summary,
+	}, "\n")
+	instance, err = parseCloudAgentRemoteResponse(mixed)
+	if err != nil {
+		t.Fatalf("parse mixed output: %v", err)
+	}
+	if instance.ContainerName != "aiyolo-cloud-agent-u1" {
+		t.Fatalf("instance=%+v", instance)
+	}
+
+	withLogs := strings.Join([]string{
+		"Step 1/5 : FROM ubuntu",
+		"Successfully built abc123",
+		summary,
+	}, "\n")
+	instance, err = parseCloudAgentRemoteResponse(withLogs)
+	if err != nil {
+		t.Fatalf("parse output with logs: %v", err)
+	}
+	if instance.WorkspacePath != "/workspace" {
+		t.Fatalf("instance=%+v", instance)
+	}
+}
+
+func TestCloudAgentSyncHostnamesCollectsConfiguredURLs(t *testing.T) {
+	hostnames := cloudAgentSyncHostnames(CloudAgentStartOptions{
+		APIBaseURL:           "https://aiyolo.quant67.com/v1",
+		ConsoleBaseURL:       "https://aiyolo.quant67.com",
+		OpenURL:              "https://aiyolo.quant67.com/console/chat?session=abc",
+		ASSDownloadURL:       "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass",
+		ASSSHA256URL:         "https://aiyolo.quant67.com/artifacts/linux-amd64/aiyolo-ass.sha256",
+		RootFSIndexURL:       "https://mirrors.aliyun.com/ubuntu-cdimage/ubuntu-base/releases/26.04/release",
+		ChromeDEBURL:         "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
+		UbuntuMirror:         "http://mirrors.aliyun.com/ubuntu",
+		DockerRegistryMirror: "https://registry.example.com",
+	})
+	expected := []string{
+		"aiyolo.quant67.com",
+		"dl.google.com",
+		"mirrors.aliyun.com",
+		"registry.example.com",
+	}
+	if !reflect.DeepEqual(hostnames, expected) {
+		t.Fatalf("SyncHostnames=%v, want %v", hostnames, expected)
+	}
+}
+
+func TestCloudAgentSyncHostnamesSkipsLoopbackAndIPs(t *testing.T) {
+	hostnames := cloudAgentSyncHostnames(CloudAgentStartOptions{
+		APIBaseURL:     "http://127.0.0.1:8080/v1",
+		ConsoleBaseURL: "http://localhost:8080",
+		OpenURL:        "https://172.22.113.82/console/chat",
+	})
+	if len(hostnames) != 0 {
+		t.Fatalf("SyncHostnames=%v, want empty", hostnames)
+	}
+}
+
+func TestBuildCloudAgentRemoteCommandSyncsWorkerHostsIntoContainer(t *testing.T) {
+	script := buildCloudAgentRemoteCommand(`{"container_name":"aiyolo-cloud-agent-user","sync_hostnames":["aiyolo.quant67.com"]}`)
+
+	if !strings.Contains(script, `def worker_sync_host_entries():`) || !strings.Contains(script, `def docker_add_host_args():`) {
+		t.Fatalf("remote script should resolve worker /etc/hosts entries for sync_hostnames: %s", script)
+	}
+	if !strings.Contains(script, `args.extend(docker_add_host_args())`) {
+		t.Fatalf("remote script should inject synced worker hosts into docker run: %s", script)
+	}
+	if !strings.Contains(script, `emit_progress("sync_hosts", "Applying worker /etc/hosts entries to cloud agent container", entries=host_entries)`) {
+		t.Fatalf("remote script should report synced worker hosts: %s", script)
 	}
 }
 
@@ -552,8 +638,14 @@ func TestBuildCloudAgentRemoteCommandSerializesContainerEnsure(t *testing.T) {
 	if !strings.Contains(script, `stop and remove it manually before starting a replacement`) {
 		t.Fatalf("remote script should ask for manual stop/rm on container identity mismatch: %s", script)
 	}
+	if !strings.Contains(script, `def container_ready_for_connect():`) {
+		t.Fatalf("remote script should probe a running container before acquiring the lock: %s", script)
+	}
+	if !strings.Contains(script, `summary = container_ready_for_connect()`) || !strings.Contains(script, `emit_progress("reuse_container", "Reusing existing cloud agent container")`) {
+		t.Fatalf("remote script should connect directly when the container is already ready: %s", script)
+	}
 	if !strings.Contains(script, `lock_handle = acquire_container_lock()`) {
-		t.Fatalf("remote script should hold the container lock around ensure_image and ensure_container: %s", script)
+		t.Fatalf("remote script should only acquire the container lock when startup or rebuild is required: %s", script)
 	}
 }
 

@@ -112,6 +112,7 @@ func (run *consoleCloudAgentRun) execute() {
 	execution, executionErr := run.handler.runCloudAgentChat(context.Background(), run.worker, run.sshKey, run.account, run.cloudSession, consoleCloudAgentChatRequest{
 		SessionID:                    run.sessionID,
 		PublicName:                   run.request.PublicName,
+		PreviousResponseID:           run.request.PreviousResponseID,
 		History:                      cloneConsoleChatMessages(run.request.History),
 		UserInput:                    run.request.UserInput,
 		Attachments:                  cloneConsoleChatAttachments(run.request.Attachments),
@@ -517,7 +518,7 @@ func (handler *Handler) streamConsoleCloudAgentASSJobResume(r *http.Request, str
 			return writeStreamEvent(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning})
 		},
 	}
-	streamErr := workerops.StreamCloudAgentASSJobLive(r.Context(), worker, key, account, cloudSession, sessionID, func(event workerops.CloudAgentASSJobStreamEvent) error {
+	streamErr := workerops.StreamCloudAgentASSJobWithRecovery(r.Context(), worker, key, account, cloudSession, sessionID, func(event workerops.CloudAgentASSJobStreamEvent) error {
 		switch event.Type {
 		case "sync", "delta":
 			if event.Delta == "" {

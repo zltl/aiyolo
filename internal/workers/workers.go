@@ -132,6 +132,14 @@ func RenderProxyEnv(profile domain.ProxyProfile) map[string]string {
 }
 
 func dialSSH(worker domain.WorkerServer, key domain.WorkerSSHKey) (*ssh.Client, error) {
+	return dialSSHClient(worker, key, false)
+}
+
+func dialSSHStreaming(worker domain.WorkerServer, key domain.WorkerSSHKey) (*ssh.Client, error) {
+	return dialSSHClient(worker, key, true)
+}
+
+func dialSSHClient(worker domain.WorkerServer, key domain.WorkerSSHKey, keepAlive bool) (*ssh.Client, error) {
 	signer, err := parsePrivateKey(key)
 	if err != nil {
 		return nil, err
@@ -143,11 +151,22 @@ func dialSSH(worker domain.WorkerServer, key domain.WorkerSSHKey) (*ssh.Client, 
 		Timeout:         10 * time.Second,
 	}
 	address := net.JoinHostPort(worker.SSHHost, strconv.Itoa(worker.SSHPort))
-	client, err := ssh.Dial("tcp", address, config)
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial ssh %s: %w", address, err)
 	}
-	return client, nil
+	if keepAlive {
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			_ = tcpConn.SetKeepAlive(true)
+			_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		}
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, address, config)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("dial ssh %s: %w", address, err)
+	}
+	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 
 func parsePrivateKey(key domain.WorkerSSHKey) (ssh.Signer, error) {

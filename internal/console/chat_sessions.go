@@ -510,6 +510,7 @@ func (handler *Handler) syncConsoleChatPageSession(ctx context.Context, r *http.
 		log.Printf("console chat session persist failed request_id=%s session_id=%s err=%v", requestID, strings.TrimSpace(state.Form.ClientSessionID), err)
 		return
 	}
+	state.LastResponseID = strings.TrimSpace(session.LastResponseID)
 	state.Form.ClientSessionID = session.ID
 	sessionStore, _, err := handler.loadConsoleChatSessionStore(ctx, r, session.ID)
 	if err != nil {

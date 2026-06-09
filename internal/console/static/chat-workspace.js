@@ -2767,10 +2767,10 @@
     if (!info) {
       return;
     }
-    const cwd = info.type === "directory" ? info.path : workspaceParentPath(info.path);
-    const command = cwd === "" ? "" : `cd -- ${shellQuote(cwd)}`;
+    const relativeCwd = info.type === "directory" ? info.path : workspaceParentPath(info.path);
+    const absoluteCwd = workspaceAbsolutePath(relativeCwd);
     window.dispatchEvent(new CustomEvent("aiyolo:chat-open-shell", {
-      detail: { cwd, command },
+      detail: { cwd: absoluteCwd },
     }));
     setWorkspaceTreeStatus(t("正在打开集成终端…", "Opening the integrated terminal..."), false);
     renderWorkspaceTree(form);
