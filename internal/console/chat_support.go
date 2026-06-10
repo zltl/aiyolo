@@ -105,6 +105,7 @@ type consoleChatRouteView struct {
 	UpstreamModel    string
 	Protocol         string
 	ReasoningEfforts []string
+	ImageGeneration  bool
 }
 
 type consoleChatFormView struct {
@@ -438,7 +439,7 @@ func normalizeConsoleChatAttachment(cfg artifacts.Config, attachment consoleChat
 		attachment.SizeBytes = 0
 	}
 	attachment.URL = cfg.PublicObjectURL(attachment.ObjectKey)
-	attachment.BrowserURL = firstNonEmpty(cfg.ProxyObjectURL(attachment.ObjectKey), attachment.URL)
+	attachment.BrowserURL = consoleChatAttachmentBrowserURL(cfg, attachment.ObjectKey)
 	if strings.TrimSpace(attachment.URL) == "" {
 		return consoleChatAttachmentView{}, false
 	}
@@ -462,6 +463,9 @@ func normalizeConsoleChatMessage(locale string, message consoleChatMessageView, 
 		attachments = append(attachments, normalized)
 	}
 	message.Attachments = attachments
+	if message.Content != "" {
+		message.Content = rewriteChatAssetMarkdownURLs(cfg, message.Content)
+	}
 	if message.Role == "" || (message.Content == "" && message.Reasoning == "" && len(message.Attachments) == 0) {
 		return consoleChatMessageView{}, false
 	}
@@ -499,6 +503,9 @@ func consoleChatAllowedModelSlot(raw string) (string, bool) {
 	}
 	if normalized == "chatgpt-image-2" || strings.HasSuffix(normalized, "/chatgpt-image-2") {
 		return "gpt-image-2", true
+	}
+	if strings.Contains(normalized, "flux") {
+		return "flux-image", true
 	}
 	return "", false
 }
@@ -564,6 +571,7 @@ func consoleChatRoutes(routes []domain.ModelRoute, providers []domain.Provider) 
 			UpstreamModel:    firstNonEmpty(route.UpstreamModel, route.PublicName),
 			Protocol:         protocol,
 			ReasoningEfforts: consoleChatRouteReasoningEfforts(route, provider),
+			ImageGeneration:  consoleChatIsImageGenerationModel(route),
 		})
 	}
 	sort.Slice(views, func(i, j int) bool {
@@ -600,36 +608,62 @@ func findConsoleChatRoute(routes []consoleChatRouteView, publicName string) (con
 	return consoleChatRouteView{}, false
 }
 
+func consoleChatModelBasename(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(model, "/"); idx >= 0 {
+		return strings.TrimSpace(model[idx+1:])
+	}
+	return model
+}
+
+func consoleChatAllowedModelMatchesCandidate(allowed, candidate string) bool {
+	allowed = strings.TrimSpace(allowed)
+	candidate = strings.TrimSpace(candidate)
+	if allowed == "" || candidate == "" {
+		return false
+	}
+	if allowed == candidate {
+		return true
+	}
+	for _, alias := range consoleChatAllowedModelAliases(allowed) {
+		if strings.TrimSpace(alias) == candidate {
+			return true
+		}
+	}
+	for _, alias := range consoleChatAllowedModelAliases(candidate) {
+		if strings.TrimSpace(alias) == allowed {
+			return true
+		}
+	}
+	if consoleChatModelBasename(allowed) == consoleChatModelBasename(candidate) {
+		return true
+	}
+	if allowedSlot, allowedOK := consoleChatAllowedModelSlot(allowed); allowedOK {
+		if candidateSlot, candidateOK := consoleChatAllowedModelSlot(candidate); candidateOK && allowedSlot == candidateSlot {
+			return true
+		}
+	}
+	return false
+}
+
 func consoleChatFilterRoutesByAllowedModels(routes []consoleChatRouteView, allowedModels []string) []consoleChatRouteView {
 	if len(allowedModels) == 0 {
-		return routes
+		return nil
 	}
-	expanded := consoleChatExpandAllowedModels(allowedModels)
-	allowedSet := make(map[string]struct{}, len(expanded))
-	for _, model := range expanded {
-		trimmed := strings.TrimSpace(model)
-		if trimmed == "" {
-			continue
-		}
-		allowedSet[trimmed] = struct{}{}
-	}
-	if len(allowedSet) == 0 {
+	expanded := consoleChatExpandUserAllowedModels(allowedModels)
+	if len(expanded) == 0 {
 		return nil
 	}
 	filtered := make([]consoleChatRouteView, 0, len(routes))
 	for _, route := range routes {
 		candidates := []string{strings.TrimSpace(route.PublicName), strings.TrimSpace(route.UpstreamModel)}
 		matched := false
-		for _, candidate := range candidates {
-			if candidate == "" {
-				continue
-			}
-			if _, ok := allowedSet[candidate]; ok {
-				matched = true
-				break
-			}
-			for _, alias := range consoleChatAllowedModelAliases(candidate) {
-				if _, ok := allowedSet[strings.TrimSpace(alias)]; ok {
+		for _, allowed := range expanded {
+			for _, candidate := range candidates {
+				if consoleChatAllowedModelMatchesCandidate(allowed, candidate) {
 					matched = true
 					break
 				}
@@ -645,15 +679,118 @@ func consoleChatFilterRoutesByAllowedModels(routes []consoleChatRouteView, allow
 	return filtered
 }
 
-func (handler *Handler) consoleChatEffectiveAllowedModels(ctx context.Context, userID string, environment string) ([]string, error) {
+type consoleChatAllowedModelsResolution struct {
+	Models       []string
+	Unrestricted bool
+}
+
+func consoleChatIsSeedAPIKey(key domain.APIKey) bool {
+	if strings.TrimSpace(key.ID) == "seed" {
+		return true
+	}
+	return strings.TrimSpace(key.Name) == "Seed API Key"
+}
+
+func consoleChatIsCloudAgentInfrastructureAPIKey(key domain.APIKey) bool {
+	if strings.HasPrefix(strings.TrimSpace(key.Name), "Cloud Agent ") {
+		return true
+	}
+	return consoleChatSameStringSet(key.AllowedProtocols, consoleChatCloudAgentAllowedProtocols())
+}
+
+func consoleChatAPIKeyOwnedByUser(key domain.APIKey, userID string) bool {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
-		return nil, nil
+		return false
+	}
+	keyUserID := strings.TrimSpace(key.UserID)
+	if keyUserID == userID {
+		return true
+	}
+	// Legacy console-created keys were stored under a shared owner id.
+	return keyUserID == "local" || keyUserID == "default"
+}
+
+func (handler *Handler) consoleChatAllowedModelsFromUserAPIKeys(ctx context.Context, userID string) (consoleChatAllowedModelsResolution, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return consoleChatAllowedModelsResolution{}, nil
+	}
+	keys, err := handler.store.ListAPIKeys(ctx)
+	if err != nil {
+		return consoleChatAllowedModelsResolution{}, err
+	}
+	now := time.Now().UTC()
+	union := make(map[string]struct{})
+	hasUnrestrictedUserKey := false
+	for _, key := range keys {
+		if !consoleChatAPIKeyOwnedByUser(key, userID) {
+			continue
+		}
+		if consoleChatIsCloudAgentInfrastructureAPIKey(key) && len(key.AllowedModels) == 0 {
+			continue
+		}
+		if !auth.APIKeyActive(key, now) {
+			continue
+		}
+		if consoleChatIsSeedAPIKey(key) {
+			if len(key.AllowedModels) == 0 {
+				continue
+			}
+			for _, model := range consoleChatExpandUserAllowedModels(key.AllowedModels) {
+				trimmed := strings.TrimSpace(model)
+				if trimmed == "" {
+					continue
+				}
+				union[trimmed] = struct{}{}
+			}
+			continue
+		}
+		if consoleChatIsCloudAgentInfrastructureAPIKey(key) {
+			for _, model := range consoleChatExpandUserAllowedModels(key.AllowedModels) {
+				trimmed := strings.TrimSpace(model)
+				if trimmed == "" {
+					continue
+				}
+				union[trimmed] = struct{}{}
+			}
+			continue
+		}
+		if len(key.AllowedModels) == 0 {
+			hasUnrestrictedUserKey = true
+			continue
+		}
+		for _, model := range consoleChatExpandUserAllowedModels(key.AllowedModels) {
+			trimmed := strings.TrimSpace(model)
+			if trimmed == "" {
+				continue
+			}
+			union[trimmed] = struct{}{}
+		}
+	}
+	if len(union) > 0 {
+		models := make([]string, 0, len(union))
+		for model := range union {
+			models = append(models, model)
+		}
+		sort.Strings(models)
+		return consoleChatAllowedModelsResolution{Models: models}, nil
+	}
+	if hasUnrestrictedUserKey {
+		return consoleChatAllowedModelsResolution{Unrestricted: true}, nil
+	}
+	return consoleChatAllowedModelsResolution{}, nil
+}
+
+func (handler *Handler) consoleChatAllowedModelsFromCloudAgentAccounts(ctx context.Context, userID, environment string) (consoleChatAllowedModelsResolution, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return consoleChatAllowedModelsResolution{}, nil
 	}
 	workerID := consoleChatEnvironmentWorkerID(environment)
 	accounts, err := handler.store.ListCloudAgentAccounts(ctx, userID, workerID)
 	if err != nil {
-		return nil, err
+		return consoleChatAllowedModelsResolution{}, err
 	}
 	now := time.Now().UTC()
 	for _, account := range accounts {
@@ -666,7 +803,7 @@ func (handler *Handler) consoleChatEffectiveAllowedModels(ctx context.Context, u
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return consoleChatAllowedModelsResolution{}, err
 		}
 		if !auth.APIKeyActive(key, now) {
 			continue
@@ -675,15 +812,45 @@ func (handler *Handler) consoleChatEffectiveAllowedModels(ctx context.Context, u
 		if !consoleChatSameStringSet(reconciledAllowedModels, key.AllowedModels) {
 			key.AllowedModels = reconciledAllowedModels
 			if err := handler.store.CreateAPIKey(ctx, key); err != nil {
-				return nil, err
+				return consoleChatAllowedModelsResolution{}, err
 			}
 		}
-		return reconciledAllowedModels, nil
+		return consoleChatAllowedModelsResolution{Models: reconciledAllowedModels}, nil
 	}
 	if strings.TrimSpace(workerID) != "" {
-		return handler.consoleChatEffectiveAllowedModels(ctx, userID, consoleChatEnvironmentLocal)
+		return handler.consoleChatAllowedModelsFromCloudAgentAccounts(ctx, userID, consoleChatEnvironmentLocal)
 	}
-	return nil, nil
+	return consoleChatAllowedModelsResolution{}, nil
+}
+
+func (handler *Handler) resolveConsoleChatAllowedModels(ctx context.Context, userID, environment string) (consoleChatAllowedModelsResolution, error) {
+	if resolution, err := handler.consoleChatAllowedModelsFromUserAPIKeys(ctx, userID); err != nil {
+		return consoleChatAllowedModelsResolution{}, err
+	} else if resolution.Unrestricted || len(resolution.Models) > 0 {
+		return resolution, nil
+	}
+	return consoleChatAllowedModelsResolution{}, nil
+}
+
+func (handler *Handler) consoleChatCloudAgentAllowedModels(ctx context.Context, userID string, state *consoleChatPageState) ([]string, error) {
+	if state == nil {
+		return nil, errors.New("chat state is required")
+	}
+	resolution, err := handler.resolveConsoleChatAllowedModels(ctx, userID, consoleChatEnvironmentLocal)
+	if err != nil {
+		return nil, err
+	}
+	if len(resolution.Models) > 0 {
+		return resolution.Models, nil
+	}
+	selected := strings.TrimSpace(state.Form.PublicName)
+	if selected == "" && len(state.Routes) > 0 {
+		selected = strings.TrimSpace(state.Routes[0].PublicName)
+	}
+	if selected == "" {
+		return nil, nil
+	}
+	return consoleChatExpandAllowedModels([]string{selected}), nil
 }
 
 func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (consoleChatPageState, error) {
@@ -740,10 +907,10 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 		state.Messages = cloneConsoleChatMessages(activeSession.Messages)
 	}
 	state.Form.Environment = normalizeConsoleChatEnvironmentValue(state.Form.Environment, state.EnvironmentOptions)
-	if allowedModels, err := handler.consoleChatEffectiveAllowedModels(ctx, userID, state.Form.Environment); err != nil {
+	if resolution, err := handler.resolveConsoleChatAllowedModels(ctx, userID, state.Form.Environment); err != nil {
 		return consoleChatPageState{}, err
-	} else {
-		state.Routes = consoleChatFilterRoutesByAllowedModels(state.Routes, allowedModels)
+	} else if !resolution.Unrestricted {
+		state.Routes = consoleChatFilterRoutesByAllowedModels(state.Routes, resolution.Models)
 	}
 	if state.Form.PublicName == "" && len(state.Routes) > 0 {
 		state.Form.PublicName = state.Routes[0].PublicName
@@ -849,7 +1016,7 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 		consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
 		started := time.Now()
 		executionProtocol := handler.consoleChatExecutionProtocol(target.Route, target.Provider, history, state.Form.Attachments)
-		execution, executionErr = handler.runConsoleChatTurn(r.Context(), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Form.ReasoningEffort, history, state.Form.Draft, state.Form.Attachments)
+		execution, executionErr = handler.runConsoleChatTurn(r.Context(), currentConsoleSessionSubject(r, handler.cfg.SecretKey), target.Provider, target.Route, target.Profile, state.Form.SystemPrompt, state.Form.ReasoningEffort, history, state.Form.Draft, state.Form.Attachments)
 		persistConsoleChatOutcome(context.WithoutCancel(r.Context()), handler.store, requestID, consoleUserID, executionProtocol, target.Route, target.Provider, target.PricingRule, started, execution)
 	}
 	state.Messages = append(history, userMessage)

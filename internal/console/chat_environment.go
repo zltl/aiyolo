@@ -219,7 +219,7 @@ func (handler *Handler) chatEnvironmentOptions(ctx context.Context, r *http.Requ
 	})
 	options := []consoleChatEnvironmentOption{{
 		Value: consoleChatEnvironmentLocal,
-		Label: handler.requestText(r, "本地", "Local"),
+		Label: handler.requestText(r, "聊天", "Chat"),
 	}}
 	for _, worker := range workers {
 		workerID := strings.TrimSpace(worker.ID)
@@ -307,10 +307,38 @@ func consoleChatRoutePublicNames(routes []consoleChatRouteView) []string {
 
 func consoleChatAllowedModelAliases(model string) []string {
 	aliases := []string{model}
-	if slot, ok := consoleChatAllowedModelSlot(model); ok && slot == "gpt-image-2" {
-		aliases = append(aliases, "gpt-image-2", "chatgpt-image-2", "openai/gpt-image-2")
+	if slot, ok := consoleChatAllowedModelSlot(model); ok {
+		switch slot {
+		case "gpt-image-2":
+			aliases = append(aliases, "gpt-image-2", "chatgpt-image-2", "openai/gpt-image-2")
+		case "flux-image":
+			aliases = append(aliases, "black-forest-labs/flux-1.1-pro-ultra", "flux-1.1-pro-ultra", "black-forest-labs/flux.2-pro", "black-forest-labs/flux.2-flex")
+		}
 	}
 	return aliases
+}
+
+func consoleChatExpandUserAllowedModels(models []string) []string {
+	seen := make(map[string]struct{}, len(models))
+	result := make([]string, 0, len(models))
+	for _, model := range models {
+		trimmed := strings.TrimSpace(model)
+		if trimmed == "" {
+			continue
+		}
+		for _, alias := range consoleChatAllowedModelAliases(trimmed) {
+			candidate := strings.TrimSpace(alias)
+			if candidate == "" {
+				continue
+			}
+			if _, ok := seen[candidate]; ok {
+				continue
+			}
+			seen[candidate] = struct{}{}
+			result = append(result, candidate)
+		}
+	}
+	return result
 }
 
 func consoleChatExpandAllowedModels(models []string) []string {
@@ -374,7 +402,15 @@ func (handler *Handler) ensureConsoleChatEnvironmentAPIKey(ctx context.Context, 
 		apiKey, err := handler.store.FindAPIKeyByHash(ctx, auth.HashAPIKey(credential))
 		switch {
 		case err == nil:
-			if auth.APIKeyActive(apiKey, now) && consoleChatSameStringSet(apiKey.AllowedProtocols, desiredProtocols) && consoleChatSameStringSet(apiKey.AllowedModels, allowedModels) {
+			reconciledAllowedModels := consoleChatExpandAllowedModels(allowedModels)
+			reconciledExistingModels := consoleChatExpandAllowedModels(apiKey.AllowedModels)
+			if auth.APIKeyActive(apiKey, now) && consoleChatSameStringSet(apiKey.AllowedProtocols, desiredProtocols) && consoleChatSameStringSet(reconciledExistingModels, reconciledAllowedModels) {
+				if !consoleChatSameStringSet(apiKey.AllowedModels, reconciledAllowedModels) {
+					apiKey.AllowedModels = reconciledAllowedModels
+					if err := handler.store.CreateAPIKey(ctx, apiKey); err != nil {
+						return domain.CloudAgentAccount{}, err
+					}
+				}
 				return account, nil
 			}
 			existingKey = apiKey
@@ -561,7 +597,7 @@ func (handler *Handler) ensureConsoleChatEnvironmentWithEvents(ctx context.Conte
 			Status:      "local",
 			SessionID:   strings.TrimSpace(state.Form.ClientSessionID),
 			Environment: consoleChatEnvironmentLocal,
-			Notice:      handler.requestText(r, "已切回本地环境", "Switched back to the local environment"),
+			Notice:      handler.requestText(r, "已切换到聊天", "Switched to chat"),
 		}
 		emit(consoleChatEnvironmentEnsureStreamEvent{
 			Type:        "local",
@@ -590,7 +626,10 @@ func (handler *Handler) ensureConsoleChatEnvironmentWithEvents(ctx context.Conte
 	if strings.TrimSpace(baseURL) == "" {
 		return consoleChatEnvironmentEnsureResponse{}, errors.New(handler.requestText(r, "无法解析当前 AIYolo 访问地址", "Unable to resolve the current AIYolo public URL"))
 	}
-	allowedModels := consoleChatExpandAllowedModels(consoleChatRoutePublicNames(state.Routes))
+	allowedModels, err := handler.consoleChatCloudAgentAllowedModels(ctx, userID, state)
+	if err != nil {
+		return consoleChatEnvironmentEnsureResponse{}, err
+	}
 	assDownloadURL, assSHA256URL := handler.consoleChatCloudAgentASSArtifactURLs(baseURL)
 	accountID := consoleChatCloudAgentAccountID(workerID)
 	now := time.Now().UTC()

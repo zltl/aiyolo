@@ -1786,17 +1786,17 @@
     if (rootCopy instanceof HTMLElement) {
       rootCopy.textContent = isCloudAgentEnvironment(environment)
         ? (workspaceRootPath || t("等待 Claude Code 工作区", "Waiting for the Claude Code workspace"))
-        : t("当前是本地环境", "The current environment is local");
+        : t("当前是聊天模式", "The current runtime is chat");
     }
     if (status instanceof HTMLElement) {
       const fallback = isCloudAgentEnvironment(environment)
         ? (workspaceRootPath === "" ? t("Claude Code 工作区准备好后，这里会显示目录树。", "The directory tree will appear here when the Claude Code workspace is ready.") : t("容器工作区已连接。", "Claude Code workspace connected."))
-        : t("切换到 Claude Code 环境后，可浏览容器里的目录与文件。", "Switch to a Claude Code environment to browse files inside the container.");
+        : t("切换到 Cloud Agent 后，可浏览容器里的目录与文件。", "Switch to Cloud Agent to browse files inside the container.");
       status.textContent = workspaceTreeStatusMessage || fallback;
       status.classList.toggle("is-error", workspaceTreeStatusError);
     }
     if (!isCloudAgentEnvironment(environment)) {
-      renderWorkspacePlaceholder(host, t("本地对话没有容器工作区。切换到 Claude Code 环境后，这里会显示目录树。", "Local chat does not expose a container workspace. Switch to a Claude Code environment to load the directory tree."));
+      renderWorkspacePlaceholder(host, t("聊天模式没有容器工作区。切换到 Cloud Agent 后，这里会显示目录树。", "Chat mode does not expose a container workspace. Switch to Cloud Agent to load the directory tree."));
       return;
     }
     if (sessionID === "") {
@@ -1813,7 +1813,7 @@
         empty.className = "chat-workspace-empty";
         empty.textContent = workspaceLoadingPaths.has("")
           ? t("正在加载工作区目录…", "Loading the workspace tree...")
-          : t("点击刷新或重新选择 Claude Code 环境后，将在这里加载目录树。", "Refresh or re-select the Claude Code environment to load the directory tree here.");
+          : t("点击刷新或重新选择 Cloud Agent 后，将在这里加载目录树。", "Refresh or re-select Cloud Agent to load the directory tree here.");
         fragment.appendChild(empty);
         host.replaceChildren(fragment);
         focusWorkspaceInlineInput(form);
@@ -1822,7 +1822,7 @@
       if (workspaceLoadingPaths.has("")) {
         renderWorkspacePlaceholder(host, t("正在加载工作区目录…", "Loading the workspace tree..."));
       } else {
-        renderWorkspacePlaceholder(host, t("点击刷新或重新选择 Claude Code 环境后，将在这里加载目录树。", "Refresh or re-select the Claude Code environment to load the directory tree here."));
+        renderWorkspacePlaceholder(host, t("点击刷新或重新选择 Cloud Agent 后，将在这里加载目录树。", "Refresh or re-select Cloud Agent to load the directory tree here."));
       }
       return;
     }
@@ -2000,9 +2000,9 @@
       setEditorMode("empty");
       setEditorChrome(
         t("尚未打开文件", "No file open"),
-        t("切换到 Claude Code 环境后，可在这里编辑文本或预览容器里的图片。", "Switch to a Claude Code environment to edit text or preview container images here.")
+        t("切换到 Cloud Agent 后，可在这里编辑文本或预览容器里的图片。", "Switch to Cloud Agent to edit text or preview container images here.")
       );
-      statusNode.textContent = t("切换到 Claude Code 环境后，可在这里编辑文本或预览容器里的图片。", "Switch to a Claude Code environment to edit text or preview container images here.");
+      statusNode.textContent = t("切换到 Cloud Agent 后，可在这里编辑文本或预览容器里的图片。", "Switch to Cloud Agent to edit text or preview container images here.");
       statusNode.classList.remove("is-error");
       syncWorkspaceEditorSurface(input, previewHost, previewImage, { mode: "text", value: "", disabled: true });
       if (saveButton instanceof HTMLButtonElement) {
@@ -2371,7 +2371,7 @@
 
   function workspaceMutationReady(form, endpoint) {
     if (!(form instanceof HTMLFormElement) || !isCloudAgentEnvironment(currentSelectedEnvironment(form))) {
-      setWorkspaceTreeStatus(t("先切换到 Claude Code 环境。", "Switch to a Claude Code environment first."), true);
+      setWorkspaceTreeStatus(t("先切换到 Cloud Agent。", "Switch to Cloud Agent first."), true);
       renderWorkspaceTree(form);
       return false;
     }

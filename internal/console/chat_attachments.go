@@ -208,6 +208,14 @@ func (handler *Handler) consoleChatAttachmentSubjectPrefix(r *http.Request) (str
 	return sanitizeConsoleChatAttachmentPart(subject), nil
 }
 
+func consoleChatAttachmentBrowserURL(cfg artifacts.Config, objectKey string) string {
+	objectKey = artifacts.NormalizeObjectKey(objectKey)
+	if objectKey == "" {
+		return ""
+	}
+	return firstNonEmpty(cfg.ProxyObjectURL(objectKey), cfg.PublicObjectURL(objectKey))
+}
+
 func consoleChatAttachmentVisibleKey(cfg artifacts.Config, objectKey string) string {
 	normalized := artifacts.NormalizeObjectKey(objectKey)
 	prefix := artifacts.NormalizeObjectKey(cfg.S3.Prefix)

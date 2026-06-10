@@ -270,6 +270,7 @@ func (handler *Handler) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	clear, key, err := newConsoleAPIKey(apiKeySpec{
 		Name:               formDefault(r, "name", "console key"),
 		Kind:               strings.TrimSpace(r.FormValue("kind")),
+		UserID:             currentConsoleSessionSubject(r, handler.cfg.SecretKey),
 		AllowedProtocols:   splitCSV(r.FormValue("allowed_protocols")),
 		AllowedModels:      splitCSV(r.FormValue("allowed_models")),
 		RPMLimit:           formInt(r, "rpm_limit", 0),

@@ -72,6 +72,31 @@ func TestBuildConsoleChatRequestBodyUsesLargerBudgetForDeepSeekV4Pro(t *testing.
 	}
 }
 
+func TestBuildConsoleChatRequestBodyUsesChatCompletionsForFluxImageModels(t *testing.T) {
+	body, err := buildConsoleChatRequestBody(domain.ProtocolOpenAI, domain.Provider{}, domain.ModelRoute{PublicName: "flux-1.1-pro-ultra", UpstreamModel: "black-forest-labs/flux-1.1-pro-ultra"}, "Keep it cinematic.", nil, "Generate a rainy cyberpunk alley.", nil, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["model"] != "black-forest-labs/flux-1.1-pro-ultra" {
+		t.Fatalf("model=%#v", payload["model"])
+	}
+	modalities, ok := payload["modalities"].([]any)
+	if !ok || len(modalities) != 1 || modalities[0] != "image" {
+		t.Fatalf("modalities=%#v", payload["modalities"])
+	}
+	messages, ok := payload["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("messages=%#v", payload["messages"])
+	}
+	if _, exists := payload["prompt"]; exists {
+		t.Fatalf("chat completion payload should not include prompt: %#v", payload)
+	}
+}
+
 func TestBuildConsoleChatRequestBodyUsesImagesAPIForGPTImage2(t *testing.T) {
 	body, err := buildConsoleChatRequestBody(domain.ProtocolOpenAI, domain.Provider{}, domain.ModelRoute{PublicName: "gpt-image-2", UpstreamModel: "openai/gpt-image-2"}, "Keep it cinematic.", nil, "Generate a rainy cyberpunk alley.", nil, true, "")
 	if err != nil {
@@ -382,6 +407,18 @@ func TestParseConsoleChatJSONResponseCapturesReasoning(t *testing.T) {
 	}
 }
 
+func TestParseConsoleChatJSONResponseBuildsChatCompletionImageMarkdownOutput(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl_flux","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"","images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,cG5n"}}]}}],"usage":{"prompt_tokens":12,"completion_tokens":0,"total_tokens":12}}`)
+
+	execution, err := parseConsoleChatJSONResponse(body, domain.ProtocolOpenAI, domain.ModelRoute{PublicName: "flux-1.1-pro-ultra", UpstreamModel: "black-forest-labs/flux-1.1-pro-ultra"}, domain.Provider{ID: "openrouter", Name: "OpenRouter"}, http.StatusOK, false, time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Result.Output != "![Generated image 1](data:image/png;base64,cG5n)" {
+		t.Fatalf("unexpected output: %q", execution.Result.Output)
+	}
+}
+
 func TestParseConsoleChatJSONResponseBuildsImageMarkdownOutput(t *testing.T) {
 	body := []byte(`{"id":"img_1","data":[{"url":"https://cdn.example.com/generated.png"}],"usage":{"input_tokens":12,"output_tokens":0,"total_tokens":12}}`)
 
@@ -446,6 +483,49 @@ func TestParseConsoleChatStreamResponseReturnsReasoningCallbackError(t *testing.
 	}
 	if execution.Result.Reasoning != "Inspect route weights." {
 		t.Fatalf("unexpected partial reasoning: %q", execution.Result.Reasoning)
+	}
+}
+
+func TestRunConsoleChatTurnWithFluxImageModelUsesChatCompletions(t *testing.T) {
+	var requests atomic.Int32
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		requests.Add(1)
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		modalities, ok := payload["modalities"].([]any)
+		if !ok || len(modalities) != 1 || modalities[0] != "image" {
+			t.Fatalf("modalities=%#v", payload["modalities"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_flux","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"","images":[{"type":"image_url","image_url":{"url":"https://cdn.example.com/generated.png"}}]}}],"usage":{"prompt_tokens":8,"completion_tokens":0,"total_tokens":8}}`))
+	}))
+	defer providerBackend.Close()
+
+	provider := domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat", Status: domain.StatusEnabled, TimeoutSeconds: 30}
+	route := domain.ModelRoute{PublicName: "flux-1.1-pro-ultra", ProviderID: "openrouter", UpstreamModel: "black-forest-labs/flux-1.1-pro-ultra", Protocol: domain.ProtocolOpenAI, Enabled: true}
+	var streamed strings.Builder
+
+	execution, err := runConsoleChatTurnWithContinuation(context.Background(), domain.ProtocolOpenAI, provider, route, domain.ProxyProfile{}, "", "", nil, "A rainy cyberpunk alley.", nil, true, func(delta string) error {
+		streamed.WriteString(delta)
+		return nil
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d", requests.Load())
+	}
+	if execution.Result.Output != "![Generated image 1](https://cdn.example.com/generated.png)" {
+		t.Fatalf("unexpected output: %q", execution.Result.Output)
+	}
+	if streamed.String() != execution.Result.Output {
+		t.Fatalf("unexpected streamed output: %q", streamed.String())
 	}
 }
 

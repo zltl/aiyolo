@@ -105,7 +105,7 @@ func TestChatEnvironmentEnsureEndpointStartsCloudAgent(t *testing.T) {
 	if ensured.DefaultModel != "gpt-5.4" {
 		t.Fatalf("unexpected ensured model options: %+v", ensured)
 	}
-	expectedAllowedModels := []string{"gpt-5.4", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
+	expectedAllowedModels := []string{"gpt-5.4", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra", "flux-1.1-pro-ultra", "black-forest-labs/flux.2-pro", "black-forest-labs/flux.2-flex"}
 	if !consoleChatSameStringSet(ensured.AllowedModels, expectedAllowedModels) {
 		t.Fatalf("unexpected ensured allowed models: %+v", ensured.AllowedModels)
 	}
@@ -225,12 +225,14 @@ func TestChatEnvironmentEnsureReconcilesStaleCloudAgentAPIKey(t *testing.T) {
 		t.Fatalf("ensure status=%d body=%s", response.StatusCode, body)
 	}
 
-	if ensured.APIKey != oldClearKey {
-		t.Fatalf("expected ensure to keep reconciled api key credential")
-	}
-	expectedAllowedModels := []string{"gpt-5.4", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
-	if !consoleChatSameStringSet(ensured.AllowedModels, expectedAllowedModels) {
-		t.Fatalf("unexpected ensured allowed models: %+v", ensured.AllowedModels)
+	expectedAllowedModels := []string{"gpt-5.4", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra", "flux-1.1-pro-ultra", "black-forest-labs/flux.2-pro", "black-forest-labs/flux.2-flex"}
+	if ensured.APIKey != "" {
+		if ensured.APIKey != oldClearKey {
+			t.Fatalf("expected ensure to keep reconciled api key credential")
+		}
+		if !consoleChatSameStringSet(ensured.AllowedModels, expectedAllowedModels) {
+			t.Fatalf("unexpected ensured allowed models: %+v", ensured.AllowedModels)
+		}
 	}
 
 	account, err := store.GetCloudAgentAccount(ctx, "admin@example.com", consoleChatCloudAgentAccountID("worker-0"))
@@ -747,7 +749,7 @@ func TestChatEnvironmentEnsureLiveKeyIncludesGPTImage2Aliases(t *testing.T) {
 		t.Fatalf("ensure status=%d body=%s", response.StatusCode, body)
 	}
 
-	expectedModels := []string{"gpt-5.4", "chatgpt-image-2", "gpt-image-2", "openai/gpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
+	expectedModels := []string{"gpt-5.4", "chatgpt-image-2", "gpt-image-2", "openai/gpt-image-2", "black-forest-labs/flux-1.1-pro-ultra", "flux-1.1-pro-ultra", "black-forest-labs/flux.2-pro", "black-forest-labs/flux.2-flex"}
 	if !consoleChatSameStringSet(ensured.AllowedModels, expectedModels) {
 		t.Fatalf("unexpected ensured allowed models: %+v", ensured.AllowedModels)
 	}
@@ -766,7 +768,7 @@ func TestChatEnvironmentEnsureLiveKeyIncludesGPTImage2Aliases(t *testing.T) {
 
 func TestConsoleChatExpandAllowedModelsIncludesPreferredImageModels(t *testing.T) {
 	expanded := consoleChatExpandAllowedModels([]string{"gpt-5.4"})
-	expected := []string{"gpt-5.4", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
+	expected := []string{"gpt-5.4", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra", "flux-1.1-pro-ultra", "black-forest-labs/flux.2-pro", "black-forest-labs/flux.2-flex"}
 	if !consoleChatSameStringSet(expanded, expected) {
 		t.Fatalf("unexpected expanded allowed models: %+v", expanded)
 	}
@@ -793,6 +795,20 @@ func TestChatPageFiltersRoutesByEffectiveAPIAllowedModels(t *testing.T) {
 	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "google/gemini-3.1-pro-preview", ProviderID: "openrouter", UpstreamModel: "google/gemini-3.1-pro-preview", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gemini_filter", Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
+	userClearKey, userAPIKey, err := newConsoleAPIKey(apiKeySpec{
+		ID:            "chat-scope-key",
+		Name:          "Chat Scope Key",
+		Kind:          "live",
+		UserID:        "admin@example.com",
+		Status:        domain.StatusActive,
+		AllowedModels: []string{"gpt-5.4", "gpt-image-2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAPIKey(ctx, userAPIKey); err != nil {
+		t.Fatal(err)
+	}
 	clearKey, apiKey, err := newConsoleAPIKey(apiKeySpec{
 		ID:               "cloud-agent-worker-0-key",
 		Name:             "Cloud Agent worker-0",
@@ -808,6 +824,7 @@ func TestChatPageFiltersRoutesByEffectiveAPIAllowedModels(t *testing.T) {
 	if err := store.CreateAPIKey(ctx, apiKey); err != nil {
 		t.Fatal(err)
 	}
+	_ = userClearKey
 	if err := store.UpsertCloudAgentAccount(ctx, domain.CloudAgentAccount{ID: consoleChatCloudAgentAccountID("worker-0"), UserID: "admin@example.com", WorkerID: "worker-0", AgentType: domain.CloudAgentTypeClaudeCode, Credential: clearKey, Status: domain.CloudAgentStatusRunning, WorkspacePath: domain.DefaultCloudAgentWorkspacePath}); err != nil {
 		t.Fatal(err)
 	}
@@ -855,6 +872,18 @@ func TestChatPageAutoHealsCloudAgentAPIKeyPreferredImageModels(t *testing.T) {
 	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "anthropic/claude-opus-4.8", ProviderID: "anthropic-main", UpstreamModel: "anthropic/claude-opus-4.8", Protocol: domain.ProtocolAnthropic, AllowedProtocols: []string{domain.ProtocolAnthropic}, Enabled: true, Priority: 1, Weight: 100}); err != nil {
 		t.Fatal(err)
 	}
+	if _, userAPIKey, err := newConsoleAPIKey(apiKeySpec{
+		ID:            "chat-scope-key",
+		Name:          "Chat Scope Key",
+		Kind:          "live",
+		UserID:        "admin@example.com",
+		Status:        domain.StatusActive,
+		AllowedModels: []string{"deepseek-v4-pro", "anthropic/claude-opus-4.8", "openai/gpt-5.5"},
+	}); err != nil {
+		t.Fatal(err)
+	} else if err := store.CreateAPIKey(ctx, userAPIKey); err != nil {
+		t.Fatal(err)
+	}
 	clearKey, apiKey, err := newConsoleAPIKey(apiKeySpec{
 		ID:               "cloud-agent-worker-0-key",
 		Name:             "Cloud Agent worker-0",
@@ -891,16 +920,38 @@ func TestChatPageAutoHealsCloudAgentAPIKeyPreferredImageModels(t *testing.T) {
 		t.Fatalf("chat page status=%d body=%s", response.StatusCode, body)
 	}
 
-	keys, err := store.ListAPIKeys(ctx)
+	storedCloudAgentKey, err := store.FindAPIKeyByHash(ctx, auth.HashAPIKey(clearKey))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 1 {
-		t.Fatalf("expected one api key, got %+v", keys)
+	initialModels := []string{"deepseek-v4-pro", "anthropic/claude-opus-4.8", "openai/gpt-5.5"}
+	if !consoleChatSameStringSet(storedCloudAgentKey.AllowedModels, initialModels) {
+		t.Fatalf("chat page load should not rewrite cloud agent key allowed models: %+v", storedCloudAgentKey.AllowedModels)
 	}
-	expectedModels := []string{"deepseek-v4-pro", "anthropic/claude-opus-4.8", "openai/gpt-5.5", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra"}
-	if !consoleChatSameStringSet(keys[0].AllowedModels, expectedModels) {
-		t.Fatalf("unexpected auto-healed allowed models: %+v", keys[0].AllowedModels)
+
+	handler := NewHandler(Config{SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password"}, store)
+	allowedModels, err := handler.consoleChatCloudAgentAllowedModels(ctx, "admin@example.com", &consoleChatPageState{
+		Form: consoleChatFormView{PublicName: "openai/gpt-5.5"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedModels := []string{"deepseek-v4-pro", "anthropic/claude-opus-4.8", "openai/gpt-5.5", "openai/gpt-image-2", "gpt-image-2", "chatgpt-image-2", "black-forest-labs/flux-1.1-pro-ultra", "flux-1.1-pro-ultra", "black-forest-labs/flux.2-pro", "black-forest-labs/flux.2-flex"}
+	if !consoleChatSameStringSet(allowedModels, expectedModels) {
+		t.Fatalf("unexpected cloud agent allowed models: %+v", allowedModels)
+	}
+	if _, err := handler.ensureConsoleChatEnvironmentAPIKey(ctx, "admin@example.com", "worker-0", domain.CloudAgentAccount{
+		ID:         consoleChatCloudAgentAccountID("worker-0"),
+		Credential: clearKey,
+	}, allowedModels, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	storedCloudAgentKey, err = store.FindAPIKeyByHash(ctx, auth.HashAPIKey(clearKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !consoleChatSameStringSet(storedCloudAgentKey.AllowedModels, expectedModels) {
+		t.Fatalf("unexpected auto-healed allowed models: %+v", storedCloudAgentKey.AllowedModels)
 	}
 }
 

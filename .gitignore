@@ -9,3 +9,4 @@ coverage/
 *.tsbuildinfo
 *.yaml
 /bin
+/.cursor/

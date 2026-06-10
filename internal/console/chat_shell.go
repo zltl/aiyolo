@@ -340,11 +340,12 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 	if strings.TrimSpace(baseURL) == "" {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "无法解析当前 AIYolo 访问地址", "Unable to resolve the current AIYolo public URL"))
 	}
-	allowedModels, err := handler.consoleChatAllowedModelPublicNames(ctx)
+	allowedModels, err := handler.consoleChatCloudAgentAllowedModels(ctx, userID, &consoleChatPageState{
+		Form: consoleChatFormView{PublicName: strings.TrimSpace(account.ModelPublicName)},
+	})
 	if err != nil {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
-	allowedModels = consoleChatExpandAllowedModels(allowedModels)
 	assDownloadURL, assSHA256URL := handler.consoleChatCloudAgentASSArtifactURLs(baseURL)
 	now := time.Now().UTC()
 	account, err = handler.ensureConsoleChatEnvironmentAPIKey(ctx, userID, worker.ID, account, allowedModels, now)

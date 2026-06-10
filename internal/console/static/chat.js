@@ -914,7 +914,7 @@
         return label;
       }
     }
-    return next === "local" ? t("本地", "Local") : next;
+    return next === "local" ? t("聊天", "Chat") : next;
   };
   const refreshEnvironmentOptionStates = (form) => {
     const selected = currentSelectedEnvironment(form);
@@ -1110,7 +1110,7 @@
       return null;
     }
     if (type === "local") {
-      const message = String(event.message || event.notice || t("已切回本地环境", "Switched back to local chat"));
+      const message = String(event.message || event.notice || t("已切换到聊天", "Switched to chat"));
       if (showToast) {
         showEnvironmentToast(message, "info");
       }
@@ -1232,6 +1232,18 @@
     return String(input.value || "").trim().toLowerCase();
   };
 
+  const isImageGenerationRoute = (route) => Boolean(route?.imageGeneration);
+
+  const syncComposerDraftPlaceholder = (form, route) => {
+    const draftField = form?.querySelector("#chat-draft");
+    if (!(draftField instanceof HTMLTextAreaElement)) {
+      return;
+    }
+    draftField.placeholder = isImageGenerationRoute(route)
+      ? t("描述你想生成的图片，例如：雨夜赛博朋克小巷", "Describe the image you want, e.g. a rainy cyberpunk alley")
+      : t("输入消息", "Type a message");
+  };
+
   const syncReasoningEffortControl = (form, route, preferredValue) => {
     const control = reasoningEffortControl(form);
     const input = reasoningEffortInput(form);
@@ -1239,6 +1251,20 @@
     const menu = reasoningEffortPickerMenu(form);
     const copy = reasoningEffortPickerCopy(form);
     if (!(input instanceof HTMLInputElement) || !(menu instanceof HTMLElement)) {
+      return;
+    }
+
+    if (isImageGenerationRoute(route)) {
+      if (control instanceof HTMLElement) {
+        control.hidden = true;
+      }
+      if (picker instanceof HTMLDetailsElement) {
+        picker.open = false;
+      }
+      input.disabled = true;
+      input.value = "";
+      setSelectedReasoningEffort(form, "");
+      syncComposerDraftPlaceholder(form, route);
       return;
     }
 
@@ -1291,6 +1317,7 @@
     if (copy instanceof HTMLElement) {
       copy.textContent = reasoningEffortSummaryLabel(input.value);
     }
+    syncComposerDraftPlaceholder(form, route);
   };
 
   const defaultSystemPrompt = (form) => {
@@ -2872,7 +2899,7 @@
         ? t("正在打开 Claude Code…", "Opening the Claude Code…")
         : canOpenShell
         ? t("打开 Claude Code 终端", "Open the Claude Code terminal")
-        : t("切换到 Claude Code 环境后即可打开 Claude Code 终端", "Switch to a Claude Code environment to open the Claude Code terminal");
+        : t("切换到 Cloud Agent 后即可打开 Claude Code 终端", "Switch to Cloud Agent to open the Claude Code terminal");
       shellButton.setAttribute("aria-label", hiddenShellReady
         ? t("显示 Claude Code 终端", "Show the Claude Code terminal")
         : t("打开 Claude Code 终端", "Open the Claude Code terminal"));
@@ -2915,6 +2942,7 @@
         providerName: option?.dataset.chatProviderName?.trim() || detailParts[0]?.trim() || "",
         upstreamModel: option?.dataset.chatUpstreamModel?.trim() || detailParts.slice(1).join("·").trim() || publicName,
         reasoningEfforts: parseReasoningEfforts(option?.dataset.chatReasoningEfforts),
+        imageGeneration: option?.dataset.chatImageGeneration === "true",
       });
     });
     return routes;
@@ -4470,9 +4498,9 @@
     dismissEnvironmentToast();
     if (showToast) {
       if (environment === "local") {
-        showEnvironmentToast(t("正在切回本地环境…", "Switching back to local chat…"), "info", { persistent: true });
+        showEnvironmentToast(t("正在切换到聊天…", "Switching to chat…"), "info", { persistent: true });
       } else {
-        showEnvironmentToast(t("正在连接 Claude Code…", "Connecting Claude Code…"), "info", { persistent: true });
+        showEnvironmentToast(t("正在连接 Cloud Agent…", "Connecting Cloud Agent…"), "info", { persistent: true });
       }
     } else if (typeof options.onPhase === "function") {
       options.onPhase("preparing", environmentStatusPhaseLabel("preparing"));
@@ -4493,10 +4521,10 @@
       const notice = String(jsonParsed.notice || "").trim();
       if (environment === "local") {
         if (showToast) {
-          showEnvironmentToast(notice || t("已切回本地环境", "Switched back to local chat"), "info");
+          showEnvironmentToast(notice || t("已切换到聊天", "Switched to chat"), "info");
         }
       } else if (showToast) {
-        showEnvironmentToast(notice || t("Claude Code 已连接并就绪", "Claude Code is connected and ready"), "success");
+        showEnvironmentToast(notice || t("Cloud Agent 已就绪", "Cloud Agent is ready"), "success");
       } else if (typeof options.onPhase === "function") {
         options.onPhase("ready", notice || environmentStatusPhaseLabel("ready"));
       }
@@ -4554,15 +4582,10 @@
         if (typeof parsed.sessionId === "string" && parsed.sessionId.trim() !== "") {
           writeClientSessionID(form, parsed.sessionId.trim());
         }
+        setInlineFlash(root, "", false);
         const notice = String(parsed.notice || "").trim();
-        if (notice !== "" && environment !== "local" && suppressSuccessNotice) {
-          if (showToast) {
-            showEnvironmentToast(notice, "success");
-          }
-        } else if (notice === "") {
-          setInlineFlash(root, "", false);
-        } else if (!suppressSuccessNotice && showToast) {
-          setInlineFlash(root, notice, false);
+        if (notice !== "" && environment !== "local" && suppressSuccessNotice && showToast) {
+          showEnvironmentToast(notice, "success");
         }
         queuePersist();
         emitChatState({ source: "ensure-environment", ensured: parsed });
@@ -4570,10 +4593,8 @@
       } catch (error) {
         const message = String(error?.message || t("环境准备失败。", "Failed to prepare the selected environment."));
         if (showToast) {
-          if (environment !== "local") {
-            showEnvironmentToast(message, "error");
-          }
-          setInlineFlash(root, message, true);
+          showEnvironmentToast(message, "error");
+          setInlineFlash(root, "", false);
         }
         throw error;
       } finally {
@@ -4722,7 +4743,7 @@
     }
     const showProgress = options.showProgress !== false;
     if (currentSelectedEnvironment(form) === "local") {
-      setInlineFlash(root, t("先选择 Claude Code 环境，再打开 Claude Code 终端。", "Select a Claude Code environment before opening the Claude Code terminal."), true);
+      setInlineFlash(root, t("先切换到 Cloud Agent，再打开 Claude Code 终端。", "Switch to Cloud Agent before opening the Claude Code terminal."), true);
       return;
     }
     if (currentSelectedModel(form) === "") {

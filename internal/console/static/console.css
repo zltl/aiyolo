@@ -2105,6 +2105,18 @@ textarea:focus-visible,
   margin-top: 0.34rem;
 }
 
+.chat-message-copy img,
+.chat-editor-markdown img {
+  display: block;
+  max-width: min(100%, 42rem);
+  width: auto;
+  height: auto;
+  margin: 0.75rem 0 0;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(77, 102, 255, 0.16);
+  background: rgba(244, 247, 255, 0.72);
+}
+
 .chat-message-copy a,
 .chat-reasoning-copy a {
   font-weight: 700;

@@ -8,20 +8,12 @@ import (
 	"github.com/zltl/aiyolo/internal/domain"
 )
 
-func (handler *Handler) runConsoleChatTurn(ctx context.Context, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) (consoleChatExecution, error) {
-	protocol := handler.consoleChatExecutionProtocol(route, provider, history, attachments)
-	if protocol == "" {
-		return consoleChatExecution{StatusCode: 400, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: 400}}, &consoleUpstreamError{StatusCode: 400, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
-	}
-	preparedHistory, preparedAttachments, err := handler.prepareConsoleChatAttachmentsForProvider(ctx, protocol, provider, history, attachments)
-	if err != nil {
-		return consoleChatExecution{StatusCode: 502, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: 502}}, err
-	}
-	return runConsoleChatTurnWithContinuation(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, preparedHistory, userInput, preparedAttachments, false, nil, nil)
+func (handler *Handler) runConsoleChatTurn(ctx context.Context, subject string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) (consoleChatExecution, error) {
+	return handler.runConsoleChatTurnWithContinuation(ctx, subject, "", provider, route, profile, systemPrompt, reasoningEffort, history, userInput, attachments, false, nil, nil)
 }
 
-func (handler *Handler) runConsoleChatTurnWithContinuation(ctx context.Context, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
-	protocol = handler.consoleChatExecutionProtocol(route, provider, history, attachments)
+func (handler *Handler) runConsoleChatTurnWithContinuation(ctx context.Context, subject string, protocol string, provider domain.Provider, route domain.ModelRoute, profile domain.ProxyProfile, systemPrompt string, reasoningEffort string, history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView, stream bool, onDelta func(string) error, onReasoning func(string) error) (consoleChatExecution, error) {
+	protocol = firstNonEmpty(protocol, handler.consoleChatExecutionProtocol(route, provider, history, attachments))
 	if protocol == "" {
 		return consoleChatExecution{StatusCode: 400, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: 400, Stream: stream}}, &consoleUpstreamError{StatusCode: 400, Code: "unsupported_protocol", Message: "unsupported chat protocol"}
 	}
@@ -29,7 +21,13 @@ func (handler *Handler) runConsoleChatTurnWithContinuation(ctx context.Context, 
 	if err != nil {
 		return consoleChatExecution{StatusCode: 502, Usage: domain.UsageRecord{Currency: domain.DefaultBillingCurrency, StatusCode: 502, Stream: stream}}, err
 	}
-	return runConsoleChatTurnWithContinuation(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, preparedHistory, userInput, preparedAttachments, stream, onDelta, onReasoning)
+	wrappedDelta, streamedOutput := handler.applyGeneratedChatImagePersistence(ctx, route, subject, stream, onDelta)
+	execution, err := runConsoleChatTurnWithContinuation(ctx, protocol, provider, route, profile, systemPrompt, reasoningEffort, preparedHistory, userInput, preparedAttachments, stream, wrappedDelta, onReasoning)
+	if err != nil {
+		return execution, err
+	}
+	handler.finalizeGeneratedChatImageOutput(ctx, route, subject, &execution, streamedOutput)
+	return execution, nil
 }
 
 func (handler *Handler) consoleChatExecutionProtocol(route domain.ModelRoute, provider domain.Provider, history []consoleChatMessageView, attachments []consoleChatAttachmentView) string {

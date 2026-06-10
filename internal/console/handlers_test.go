@@ -90,6 +90,9 @@ func TestConsoleLoginAndCreateAPIKey(t *testing.T) {
 	if len(keys) != 1 || keys[0].Name != "dev key" || keys[0].KeyHash == "" {
 		t.Fatalf("unexpected keys: %+v", keys)
 	}
+	if keys[0].UserID != "admin@example.com" {
+		t.Fatalf("expected created api key to belong to console user, got %+v", keys[0])
+	}
 }
 
 func TestConsoleLoginSessionCookieExpiresInThreeMonths(t *testing.T) {
@@ -647,13 +650,13 @@ func TestConsoleUpdateAPIKey(t *testing.T) {
 	target := keys[0]
 
 	updateForm := url.Values{
-		"name":               {"edited key"},
-		"allowed_protocols":  {"openai,anthropic"},
-		"allowed_models":     {"gpt-5.4,gpt-image-2"},
-		"rpm_limit":          {"120"},
-		"tpm_limit":          {"34000"},
-		"concurrent_limit":   {"5"},
-		"daily_budget_cents": {"8000"},
+		"name":                 {"edited key"},
+		"allowed_protocols":    {"openai,anthropic"},
+		"allowed_models":       {"gpt-5.4,gpt-image-2"},
+		"rpm_limit":            {"120"},
+		"tpm_limit":            {"34000"},
+		"concurrent_limit":     {"5"},
+		"daily_budget_cents":   {"8000"},
 		"monthly_budget_cents": {"120000"},
 	}
 	updateRequest, err := http.NewRequest(http.MethodPost, server.URL+"/console/api-keys/"+target.ID+"/update", strings.NewReader(updateForm.Encode()))
@@ -1511,6 +1514,21 @@ func TestConsoleChatPageIsPrimaryEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "legacy-ops-chat", ProviderID: "openrouter", UpstreamModel: "openai/gpt-4.1-mini", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 2, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	clearKey := "aiyolo_live_chat_primary_key_1234567890"
+	if err := store.CreateAPIKey(ctx, domain.APIKey{
+		ID:            "chat-primary-key",
+		Name:          "Chat Primary Key",
+		KeyHash:       auth.HashAPIKey(clearKey),
+		Prefix:        auth.Prefix(clearKey),
+		UserID:        "admin@example.com",
+		OrganizationID: "default",
+		ProjectID:     "default",
+		Status:        domain.StatusActive,
+		AllowedModels: []string{"gpt-5.4"},
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
@@ -2895,7 +2913,279 @@ func TestConsoleChatStreamEndpointEmitsErrorEventWithPartialOutput(t *testing.T)
 	}
 }
 
-func TestConsoleChatPageShowsAllCompatibleEnabledRoutesWithoutAPIKeyFilter(t *testing.T) {
+func TestStreamChatGeneratesFluxImage(t *testing.T) {
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		modalities, ok := payload["modalities"].([]any)
+		if !ok || len(modalities) != 1 || modalities[0] != "image" {
+			t.Fatalf("modalities=%#v", payload["modalities"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_flux","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"","images":[{"type":"image_url","image_url":{"url":"https://cdn.example.com/generated.png"}}]}}],"usage":{"prompt_tokens":8,"completion_tokens":0,"total_tokens":8}}`))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_flux_stream", ModelAlias: "flux-1.1-pro-ultra", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "flux-1.1-pro-ultra", ProviderID: "openrouter", UpstreamModel: "black-forest-labs/flux-1.1-pro-ultra", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_flux_stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"chat_public_name": {"flux-1.1-pro-ultra"}, "chat_draft": {"A rainy cyberpunk alley."}}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/x-ndjson")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat stream status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	events := decodeConsoleChatStreamEvents(t, body)
+	var deltaText strings.Builder
+	var doneResult *consoleChatStreamTestResult
+	var replaceHTML string
+	for _, event := range events {
+		if event.Type == "delta" {
+			deltaText.WriteString(event.Delta)
+		}
+		if event.Type == "done" {
+			doneResult = event.Result
+		}
+		if event.Type == "replace" {
+			replaceHTML = event.HTML
+		}
+	}
+	expected := "![Generated image 1](https://cdn.example.com/generated.png)"
+	if deltaText.String() != expected {
+		t.Fatalf("unexpected streamed delta text: %q", deltaText.String())
+	}
+	if doneResult == nil || doneResult.Output != expected {
+		t.Fatalf("unexpected done event: %+v", doneResult)
+	}
+	if !strings.Contains(replaceHTML, "https://cdn.example.com/generated.png") {
+		t.Fatalf("stream replacement html missing generated image: %s", replaceHTML)
+	}
+}
+
+func TestStreamChatGeneratesGPTImage2(t *testing.T) {
+	providerBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/generations" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if payload["response_format"] != "url" {
+			t.Fatalf("response_format=%#v", payload["response_format"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"img_1","data":[{"url":"https://cdn.example.com/gpt-image-2.png"}],"usage":{"input_tokens":12,"output_tokens":0,"total_tokens":12}}`))
+	}))
+	defer providerBackend.Close()
+
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: providerBackend.URL + "/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-stream", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertPricingRule(ctx, domain.PricingRule{ID: "price_gpt_image2_stream", ModelAlias: "chatgpt-image-2", ProviderID: "openrouter", Currency: "USD", InputPricePerMillionTokens: 1000000, OutputPricePerMillionTokens: 2000000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "chatgpt-image-2", ProviderID: "openrouter", UpstreamModel: "openai/gpt-image-2", Protocol: domain.ProtocolOpenAI, PriceRuleID: "price_gpt_image2_stream", Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"chat_public_name": {"chatgpt-image-2"}, "chat_draft": {"A rainy cyberpunk alley."}}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/stream", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/x-ndjson")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("chat stream status=%d body=%s", response.StatusCode, body)
+	}
+	body, _ := io.ReadAll(response.Body)
+	events := decodeConsoleChatStreamEvents(t, body)
+	var deltaText strings.Builder
+	var doneResult *consoleChatStreamTestResult
+	for _, event := range events {
+		if event.Type == "delta" {
+			deltaText.WriteString(event.Delta)
+		}
+		if event.Type == "done" {
+			doneResult = event.Result
+		}
+	}
+	expected := "![Generated image 1](https://cdn.example.com/gpt-image-2.png)"
+	if deltaText.String() != expected {
+		t.Fatalf("unexpected streamed delta text: %q", deltaText.String())
+	}
+	if doneResult == nil || doneResult.Output != expected {
+		t.Fatalf("unexpected done event: %+v", doneResult)
+	}
+}
+
+func TestConsoleChatPageFiltersByLegacyLocalUserIDAPIKey(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.example/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-openrouter", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gemini-3.1-pro-preview", ProviderID: "openrouter", UpstreamModel: "google/gemini-3.1-pro-preview", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAPIKey(ctx, domain.APIKey{
+		ID:            "legacy-local-live-key",
+		Name:          "Legacy Local Live Key",
+		KeyHash:       auth.HashAPIKey("aiyolo_live_legacy_scope_key_1234567890"),
+		Prefix:        auth.Prefix("aiyolo_live_legacy_scope_key_1234567890"),
+		UserID:        "local",
+		OrganizationID: "default",
+		ProjectID:     "default",
+		Status:        domain.StatusActive,
+		AllowedModels: []string{"gpt-5.4"},
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageResponse, err := client.Get(server.URL + "/console/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pageResponse.Body.Close()
+	pageHTML, _ := io.ReadAll(pageResponse.Body)
+	if !strings.Contains(string(pageHTML), `value="gpt-5.4"`) {
+		t.Fatalf("expected legacy local live key to allow gpt-5.4: %s", pageHTML)
+	}
+	if strings.Contains(string(pageHTML), `value="gemini-3.1-pro-preview"`) {
+		t.Fatalf("expected legacy local live key to hide other routes: %s", pageHTML)
+	}
+}
+
+func TestConsoleChatPageHidesRoutesOutsideUserAPIKeyAllowedModels(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.example/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-openrouter", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gemini-3.1-pro-preview", ProviderID: "openrouter", UpstreamModel: "google/gemini-3.1-pro-preview", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	clearKey := "aiyolo_live_chat_scope_key_1234567890"
+	if err := store.CreateAPIKey(ctx, domain.APIKey{
+		ID:            "chat-scope-key",
+		Name:          "Chat Scope Key",
+		KeyHash:       auth.HashAPIKey(clearKey),
+		Prefix:        auth.Prefix(clearKey),
+		UserID:        "admin@example.com",
+		OrganizationID: "default",
+		ProjectID:     "default",
+		Status:        domain.StatusActive,
+		AllowedModels: []string{"gpt-5.4"},
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageResponse, err := client.Get(server.URL + "/console/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pageResponse.Body.Close()
+	pageBody, _ := io.ReadAll(pageResponse.Body)
+	pageHTML := string(pageBody)
+	if !strings.Contains(pageHTML, `value="gpt-5.4"`) {
+		t.Fatalf("expected allowed route in chat page: %s", pageHTML)
+	}
+	if strings.Contains(pageHTML, `value="gemini-3.1-pro-preview"`) {
+		t.Fatalf("expected disallowed route hidden from chat page: %s", pageHTML)
+	}
+}
+
+func TestConsoleChatPageShowsAllowedRoutesFromUserAPIKey(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
 		t.Fatal(err)
@@ -2928,6 +3218,21 @@ func TestConsoleChatPageShowsAllCompatibleEnabledRoutesWithoutAPIKeyFilter(t *te
 			t.Fatal(err)
 		}
 	}
+	clearKey := "aiyolo_live_chat_ui_key_1234567890"
+	if err := store.CreateAPIKey(ctx, domain.APIKey{
+		ID:            "chat-ui-key",
+		Name:          "Chat UI Key",
+		KeyHash:       auth.HashAPIKey(clearKey),
+		Prefix:        auth.Prefix(clearKey),
+		UserID:        "admin@example.com",
+		OrganizationID: "default",
+		ProjectID:     "default",
+		Status:        domain.StatusActive,
+		AllowedModels: []string{"claude-sonnet", "claude-opus-4.7", "claude-sonnet-4.6", "deepseek-v4-flash", "deepseek-v4-pro", "gpt-5.4", "gpt-5.5", "gpt-5.5-pro", "gemini-3-flash", "gemini-3.1-pro-preview", "chatgpt-image-2", "gpt-4.1-mini"},
+		CreatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
 	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
@@ -2947,11 +3252,11 @@ func TestConsoleChatPageShowsAllCompatibleEnabledRoutesWithoutAPIKeyFilter(t *te
 	pageHTML := string(pageBody)
 	for _, expected := range []string{"claude-sonnet", "claude-opus-4.7", "claude-sonnet-4.6", "deepseek-v4-flash", "deepseek-v4-pro", "gpt-5.4", "gpt-5.5", "gpt-5.5-pro", "gemini-3-flash", "gemini-3.1-pro-preview", "chatgpt-image-2", "gpt-4.1-mini"} {
 		if !strings.Contains(pageHTML, expected) {
-			t.Fatalf("expected compatible route %q in chat page: %s", expected, pageHTML)
+			t.Fatalf("expected allowed route %q in chat page: %s", expected, pageHTML)
 		}
 	}
 	if !strings.Contains(pageHTML, `value="chatgpt-image-2" checked`) {
-		t.Fatalf("expected chatgpt-image-2 to be the default selected route: %s", pageHTML)
+		t.Fatalf("expected first allowed route to be selected by default: %s", pageHTML)
 	}
 	if strings.Contains(pageHTML, "帮我总结当前 public model 对应的上游路由和潜在故障点") {
 		t.Fatalf("starter prompt cards should be removed from chat page: %s", pageHTML)

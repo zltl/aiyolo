@@ -236,13 +236,13 @@
               <input type="hidden" name="chat_environment" value="{{.ChatForm.Environment}}" data-chat-environment-input>
               <div class="chat-composer-toolbar-group chat-composer-toolbar-group-environment">
                 <details class="chat-model-picker chat-environment-picker" data-chat-environment-picker>
-                  <summary class="chat-model-picker-trigger chat-environment-picker-trigger" aria-label="{{msg .Locale "选择环境" "Choose environment"}}">
+                  <summary class="chat-model-picker-trigger chat-environment-picker-trigger" aria-label="{{msg .Locale "选择运行方式" "Choose runtime"}}">
                     <span class="chat-model-picker-value chat-environment-picker-value" data-chat-environment-picker-copy>{{chatEnvironmentLabel .ChatForm.Environment .ChatEnvironmentOptions}}</span>
                     <span class="chat-model-picker-icon chat-environment-picker-icon" aria-hidden="true">
                       <i class="chat-control-icon" data-lucide="chevron-down"></i>
                     </span>
                   </summary>
-                  <div class="chat-model-picker-menu chat-environment-picker-menu" role="radiogroup" aria-label="{{msg .Locale "环境" "Environment"}}">
+                  <div class="chat-model-picker-menu chat-environment-picker-menu" role="radiogroup" aria-label="{{msg .Locale "运行方式" "Runtime"}}">
                     {{range .ChatEnvironmentOptions}}
                     <label class="chat-model-picker-option chat-environment-picker-option {{if eq $.ChatForm.Environment .Value}}is-active{{end}}">
                       <input class="chat-route-control chat-environment-option-control" type="radio" name="chat_environment_choice" value="{{.Value}}" data-chat-environment-option data-chat-environment-label="{{.Label}}" {{if eq $.ChatForm.Environment .Value}}checked{{end}}>
@@ -290,7 +290,7 @@
                   </summary>
                   <div class="chat-model-picker-menu" role="radiogroup" aria-label="{{msg .Locale "对话模型" "Conversation model"}}">
                     {{range .ChatRoutes}}
-                    <label class="chat-model-picker-option {{if eq $.ChatForm.PublicName .PublicName}}is-active{{end}}" data-chat-provider-name="{{.ProviderName}}" data-chat-upstream-model="{{.UpstreamModel}}" data-chat-reasoning-efforts="{{join .ReasoningEfforts ","}}">
+                    <label class="chat-model-picker-option {{if eq $.ChatForm.PublicName .PublicName}}is-active{{end}}" data-chat-provider-name="{{.ProviderName}}" data-chat-upstream-model="{{.UpstreamModel}}" data-chat-reasoning-efforts="{{join .ReasoningEfforts ","}}" {{if .ImageGeneration}}data-chat-image-generation="true"{{end}}>
                       <input class="chat-route-control" type="radio" name="chat_public_name" value="{{.PublicName}}" {{if eq $.ChatForm.PublicName .PublicName}}checked{{end}}>
                       <span class="chat-model-name">{{.PublicName}}</span>
                       <span class="chat-model-detail">{{.ProviderName}} · {{.UpstreamModel}}</span>
@@ -362,7 +362,7 @@
   <script src="/console/static/vendor/xterm.js?v=vendor-20260606a"></script>
   <script src="/console/static/vendor/addon-fit.js?v=vendor-20260606a"></script>
   <script src="/console/static/chat-shell.js?v=chat-shell-20260604a"></script>
-  <script src="/console/static/chat.js?v=chat-copy-footer-20260609d"></script>
-  <script src="/console/static/chat-workspace.js?v=chat-workspace-cwd-20260609c"></script>
+  <script src="/console/static/chat.js?v=chat-runtime-labels-20260610b"></script>
+  <script src="/console/static/chat-workspace.js?v=chat-runtime-labels-20260610b"></script>
 </div>
 {{end}}
