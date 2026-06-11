@@ -75,18 +75,11 @@ func StreamCloudAgentASSJobLive(ctx context.Context, worker domain.WorkerServer,
 	if err != nil {
 		return err
 	}
-	sshClient, err := dialSSHStreaming(target.worker, target.key)
+	transport, cleanup, err := newCloudAgentASSTransport(target)
 	if err != nil {
 		return err
 	}
-	defer sshClient.Close()
-	transport := &http.Transport{
-		DisableKeepAlives: true,
-		DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
-			return dialCloudAgentASS(ctx, sshClient, target)
-		},
-	}
-	defer transport.CloseIdleConnections()
+	defer cleanup()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://aiyolo-ass/v1/jobs/"+jobID+"/stream", nil)
 	if err != nil {
 		return err

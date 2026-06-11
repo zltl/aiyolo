@@ -156,11 +156,6 @@ func VerifyBootstrap(_ context.Context, worker domain.WorkerServer, key domain.W
 	if err != nil {
 		return BootstrapHealth{}, err
 	}
-	client, err := dialSSH(worker, key)
-	if err != nil {
-		return BootstrapHealth{}, err
-	}
-	defer client.Close()
 	command := fmt.Sprintf(`python3 - <<'PY'
 import json
 import urllib.request
@@ -174,7 +169,17 @@ if payload.get("worker_id") != %q:
     raise SystemExit(json.dumps(payload, sort_keys=True))
 print(json.dumps(payload, sort_keys=True))
 PY`, workerdHealthURL(), worker.ID)
-	output, err := runSSHCommand(client, bashCommand(command))
+	var output string
+	if WorkerIsLocal(worker) {
+		output, err = runLocalCommand(bashCommand(command))
+	} else {
+		client, dialErr := dialSSH(worker, key)
+		if dialErr != nil {
+			return BootstrapHealth{}, dialErr
+		}
+		defer client.Close()
+		output, err = runSSHCommand(client, bashCommand(command))
+	}
 	if err != nil {
 		return BootstrapHealth{}, fmt.Errorf("verify bootstrap health: %w", err)
 	}

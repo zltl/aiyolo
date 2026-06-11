@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 
+	"github.com/creack/pty"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/zltl/aiyolo/internal/domain"
@@ -36,6 +39,12 @@ type synchronizedPipeWriter struct {
 	writer *io.PipeWriter
 }
 
+type interactiveLocalCloudAgentShell struct {
+	cmd       *exec.Cmd
+	ptmx      *os.File
+	closeOnce sync.Once
+}
+
 func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, account domain.CloudAgentAccount, cloudSession domain.CloudAgentSession, cols, rows int) (InteractiveShell, error) {
 	select {
 	case <-ctx.Done():
@@ -47,6 +56,11 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		return nil, err
 	}
 	cols, rows = normalizeCloudAgentShellSize(cols, rows)
+	shellSessionID := domain.CloudAgentSessionID(account.UserID, firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(cloudSession.ID)))
+	script := buildCloudAgentShellScript(target.containerName, target.workspacePath, shellSessionID, account.ModelPublicName, target.account.Credential)
+	if WorkerIsLocal(target.worker) {
+		return openLocalCloudAgentShell(ctx, script, cols, rows)
+	}
 
 	client, err := dialSSH(target.worker, target.key)
 	if err != nil {
@@ -67,8 +81,6 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		client.Close()
 		return nil, fmt.Errorf("request pty: %w", err)
 	}
-	shellSessionID := domain.CloudAgentSessionID(account.UserID, firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(cloudSession.ID)))
-
 	stdoutReader, stdoutWriter := io.Pipe()
 	stdoutSink := &synchronizedPipeWriter{writer: stdoutWriter}
 	session.Stdout = stdoutSink
@@ -81,7 +93,7 @@ func OpenCloudAgentShell(ctx context.Context, worker domain.WorkerServer, key do
 		client.Close()
 		return nil, fmt.Errorf("open stdin pipe: %w", err)
 	}
-	if err := session.Start(buildCloudAgentShellCommand(target.containerName, target.workspacePath, shellSessionID, account.ModelPublicName, target.account.Credential)); err != nil {
+	if err := session.Start(bashCommand(script)); err != nil {
 		stdin.Close()
 		stdoutReader.Close()
 		stdoutWriter.Close()
@@ -124,6 +136,12 @@ func normalizeCloudAgentShellSize(cols, rows int) (int, int) {
 }
 
 func buildCloudAgentShellCommand(containerName, workspacePath, shellSessionID, model string, apiKey string) string {
+	return bashCommand(buildCloudAgentShellScript(containerName, workspacePath, shellSessionID, model, apiKey))
+}
+
+func buildCloudAgentShellScript(containerName, workspacePath, shellSessionID, model string, apiKey string) string {
+	_ = shellSessionID
+	_ = model
 	innerScript := `set -euo pipefail
 
 export TERM="${TERM:-xterm-256color}"
@@ -228,7 +246,65 @@ exec docker exec -it \
   "$container_name" \
 	bash -lc %s
 `, shellQuote(containerName), shellQuote(workspacePath), shellQuote(strings.TrimSpace(apiKey)), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(innerScript))
-	return bashCommand(script)
+	return script
+}
+
+func openLocalCloudAgentShell(ctx context.Context, script string, cols, rows int) (InteractiveShell, error) {
+	cmd := exec.Command("bash", "-lc", script)
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("start local cloud agent shell: %w", err)
+	}
+	if err := pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
+		_ = ptmx.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return nil, fmt.Errorf("resize local cloud agent shell: %w", err)
+	}
+	shell := &interactiveLocalCloudAgentShell{cmd: cmd, ptmx: ptmx}
+	if done := ctx.Done(); done != nil {
+		go func() {
+			<-done
+			_ = shell.Close()
+		}()
+	}
+	return shell, nil
+}
+
+func (shell *interactiveLocalCloudAgentShell) Read(payload []byte) (int, error) {
+	return shell.ptmx.Read(payload)
+}
+
+func (shell *interactiveLocalCloudAgentShell) Write(payload []byte) (int, error) {
+	return shell.ptmx.Write(payload)
+}
+
+func (shell *interactiveLocalCloudAgentShell) Resize(cols, rows int) error {
+	cols, rows = normalizeCloudAgentShellSize(cols, rows)
+	return pty.Setsize(shell.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+}
+
+func (shell *interactiveLocalCloudAgentShell) Close() error {
+	var closeErr error
+	shell.closeOnce.Do(func() {
+		if shell.ptmx != nil {
+			if err := shell.ptmx.Close(); err != nil && closeErr == nil {
+				closeErr = err
+			}
+		}
+		if shell.cmd != nil && shell.cmd.Process != nil {
+			if err := shell.cmd.Process.Kill(); err != nil && closeErr == nil {
+				closeErr = err
+			}
+		}
+		if shell.cmd != nil {
+			if err := shell.cmd.Wait(); err != nil && closeErr == nil {
+				closeErr = err
+			}
+		}
+	})
+	return closeErr
 }
 
 func (writer *synchronizedPipeWriter) Write(payload []byte) (int, error) {

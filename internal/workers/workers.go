@@ -37,44 +37,64 @@ func Probe(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKe
 	if err != nil {
 		return ProbeResult{}, err
 	}
+	if WorkerIsLocal(worker) {
+		return probeLocalWorker(worker, proxy)
+	}
 	client, err := dialSSH(worker, key)
 	if err != nil {
 		return ProbeResult{}, err
 	}
 	defer client.Close()
 
+	return probeRemoteWorker(client, worker, proxy)
+}
+
+func probeRemoteWorker(client *ssh.Client, worker domain.WorkerServer, proxy domain.ProxyProfile) (ProbeResult, error) {
 	result := ProbeResult{CheckedAt: time.Now().UTC(), ProxyReachable: true}
 	osRelease, err := runSSHCommand(client, "cat /etc/os-release")
 	if err != nil {
 		return result, fmt.Errorf("read /etc/os-release: %w", err)
 	}
+	return finishProbeResult(result, worker, proxy, osRelease, client)
+}
+
+func probeLocalWorker(worker domain.WorkerServer, proxy domain.ProxyProfile) (ProbeResult, error) {
+	result := ProbeResult{CheckedAt: time.Now().UTC(), ProxyReachable: true}
+	osRelease, err := runLocalCommand("cat /etc/os-release")
+	if err != nil {
+		return result, fmt.Errorf("read /etc/os-release: %w", err)
+	}
+	return finishProbeResult(result, worker, proxy, osRelease, nil)
+}
+
+func finishProbeResult(result ProbeResult, worker domain.WorkerServer, proxy domain.ProxyProfile, osRelease string, client *ssh.Client) (ProbeResult, error) {
 	osValues := parseOSRelease(osRelease)
 	result.OSName = firstNonEmpty(osValues["PRETTY_NAME"], osValues["NAME"])
 	result.UbuntuVersion = strings.TrimSpace(osValues["VERSION_ID"])
 
-	lsblkJSON, err := runSSHCommand(client, "lsblk -J -o NAME,KNAME,PATH,SIZE,FSTYPE,MOUNTPOINT,TYPE,RO,RM")
+	lsblkJSON, err := runWorkerCommand(client, "lsblk -J -o NAME,KNAME,PATH,SIZE,FSTYPE,MOUNTPOINT,TYPE,RO,RM")
 	if err != nil {
 		return result, fmt.Errorf("run lsblk probe: %w", err)
 	}
 	result.LSBLKJSON = strings.TrimSpace(lsblkJSON)
 
-	mountsJSON, err := runSSHCommand(client, "findmnt -J")
+	mountsJSON, err := runWorkerCommand(client, "findmnt -J")
 	if err != nil {
-		mountsJSON, err = runSSHCommand(client, "cat /proc/mounts")
+		mountsJSON, err = runWorkerCommand(client, "cat /proc/mounts")
 		if err != nil {
 			return result, fmt.Errorf("read mount table: %w", err)
 		}
 	}
 	result.MountsJSON = strings.TrimSpace(mountsJSON)
 
-	dockerVersion, err := runSSHCommand(client, `bash -lc 'if command -v docker >/dev/null 2>&1; then docker version --format "{{.Server.Version}}"; fi'`)
+	dockerVersion, err := runWorkerCommand(client, `bash -lc 'if command -v docker >/dev/null 2>&1; then docker version --format "{{.Server.Version}}"; fi'`)
 	if err != nil {
 		return result, fmt.Errorf("probe docker: %w", err)
 	}
 	result.DockerVersion = strings.TrimSpace(dockerVersion)
 	result.DockerInstalled = result.DockerVersion != ""
 
-	writable, err := runSSHCommand(client, bashCommand(fmt.Sprintf("probe_path=%s; if [ -e \"$probe_path\" ]; then target=\"$probe_path\"; else target=$(dirname \"$probe_path\"); fi; if [ -w \"$target\" ]; then printf true; else printf false; fi", shellQuote(worker.DataRoot))))
+	writable, err := runWorkerCommand(client, bashCommand(fmt.Sprintf("probe_path=%s; if [ -e \"$probe_path\" ]; then target=\"$probe_path\"; else target=$(dirname \"$probe_path\"); fi; if [ -w \"$target\" ]; then printf true; else printf false; fi", shellQuote(worker.DataRoot))))
 	if err != nil {
 		return result, fmt.Errorf("probe data root writability: %w", err)
 	}
@@ -90,6 +110,13 @@ func Probe(_ context.Context, worker domain.WorkerServer, key domain.WorkerSSHKe
 	}
 
 	return result, nil
+}
+
+func runWorkerCommand(client *ssh.Client, command string) (string, error) {
+	if client == nil {
+		return runLocalCommand(command)
+	}
+	return runSSHCommand(client, command)
 }
 
 func RenderProxyEnv(profile domain.ProxyProfile) map[string]string {
@@ -227,7 +254,8 @@ func probeProxyReachability(client *ssh.Client, profile domain.ProxyProfile) (bo
 	if err != nil {
 		return false, err
 	}
-	result, err := runSSHCommand(client, bashCommand(fmt.Sprintf("timeout 5 bash -lc 'exec 3<>/dev/tcp/%s/%d' >/dev/null 2>&1 && printf true || printf false", host, port)))
+	command := bashCommand(fmt.Sprintf("timeout 5 bash -lc 'exec 3<>/dev/tcp/%s/%d' >/dev/null 2>&1 && printf true || printf false", host, port))
+	result, err := runWorkerCommand(client, command)
 	if err != nil {
 		return false, err
 	}

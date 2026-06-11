@@ -359,18 +359,11 @@ func runCloudAgentASSJSON(ctx context.Context, worker domain.WorkerServer, key d
 			return err
 		}
 	}
-	sshClient, err := dialSSH(target.worker, target.key)
+	transport, cleanup, err := newCloudAgentASSTransport(target)
 	if err != nil {
 		return err
 	}
-	defer sshClient.Close()
-	transport := &http.Transport{
-		DisableKeepAlives: true,
-		DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
-			return dialCloudAgentASS(ctx, sshClient, target)
-		},
-	}
-	defer transport.CloseIdleConnections()
+	defer cleanup()
 	var bodyReader io.Reader
 	if body != nil {
 		bodyReader = bytes.NewReader(requestBody)
@@ -429,6 +422,34 @@ func decodeCloudAgentASSResponse(method string, endpointPath string, statusCode 
 		return fmt.Errorf("decode aiyolo-ass data: %w", err)
 	}
 	return nil
+}
+
+func newCloudAgentASSTransport(target cloudAgentTarget) (*http.Transport, func(), error) {
+	if WorkerIsLocal(target.worker) {
+		address := cloudAgentASSWorkerAddress(target)
+		transport := &http.Transport{
+			DisableKeepAlives: true,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var dialer net.Dialer
+				return dialer.DialContext(ctx, "tcp", address)
+			},
+		}
+		return transport, func() { transport.CloseIdleConnections() }, nil
+	}
+	sshClient, err := dialSSHStreaming(target.worker, target.key)
+	if err != nil {
+		return nil, nil, err
+	}
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialCloudAgentASS(ctx, sshClient, target)
+		},
+	}
+	return transport, func() {
+		transport.CloseIdleConnections()
+		sshClient.Close()
+	}, nil
 }
 
 func dialCloudAgentASS(ctx context.Context, client sshDialer, target cloudAgentTarget) (net.Conn, error) {

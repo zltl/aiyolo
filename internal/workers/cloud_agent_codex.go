@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +88,10 @@ func RunCloudAgentCodex(ctx context.Context, worker domain.WorkerServer, key dom
 		if jobOutput, jobErr := runCloudAgentCodexASSJob(ctx, worker, key, account, cloudSession, workingDirectory, target.account.Credential, options, onOutput); jobErr == nil || !cloudAgentASSJobUnavailable(jobErr) {
 			return jobOutput, jobErr
 		}
+	}
+
+	if WorkerIsLocal(target.worker) {
+		return runLocalCloudAgentCodex(ctx, target, workingDirectory, options, onOutput)
 	}
 
 	client, err := dialSSH(target.worker, target.key)
@@ -184,6 +189,42 @@ func runCloudAgentCodexASSJob(ctx context.Context, worker domain.WorkerServer, k
 		return "", streamErr
 	}
 	return output.String(), nil
+}
+
+func runLocalCloudAgentCodex(ctx context.Context, target cloudAgentTarget, workingDirectory string, options CloudAgentCodexOptions, onOutput func([]byte) error) (string, error) {
+	cmd := exec.CommandContext(ctx, "bash", "-s", "--")
+	cmd.Stdin = strings.NewReader(buildCloudAgentCodexRemoteScript(target.containerName, workingDirectory, target.account.Credential, options))
+	stdoutWriter := &cloudAgentChunkWriter{onChunk: onOutput}
+	var stderr bytes.Buffer
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start cloud agent codex: %w", err)
+	}
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}()
+	waitErr := cmd.Wait()
+	if cloudAgentPipeInfrastructureError(waitErr) && ctx.Err() != nil {
+		waitErr = ctx.Err()
+	}
+	if writeErr := stdoutWriter.Err(); writeErr != nil && waitErr == nil {
+		waitErr = writeErr
+	}
+	if waitErr != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdoutWriter.String())
+		}
+		if detail == "" {
+			return stdoutWriter.String(), fmt.Errorf("run cloud agent codex: %w", waitErr)
+		}
+		return stdoutWriter.String(), fmt.Errorf("run cloud agent codex: %w: %s", waitErr, detail)
+	}
+	return stdoutWriter.String(), nil
 }
 
 func normalizeCloudAgentWorkingDirectory(value string) string {

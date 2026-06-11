@@ -94,7 +94,16 @@ func runSSHCommandWithProgress(ctx context.Context, client *ssh.Client, command 
 	if err := session.Start(command); err != nil {
 		return "", err
 	}
+	wait := func() error {
+		return session.Wait()
+	}
+	onCancel := func() {
+		_ = session.Close()
+	}
+	return consumeCommandProgress(ctx, stdout, stderr, wait, onEvent, onCancel)
+}
 
+func consumeCommandProgress(ctx context.Context, stdout io.Reader, stderr io.Reader, wait func() error, onEvent func(CloudAgentEnsureEvent) error, onCancel ...func()) (string, error) {
 	var (
 		mu          sync.Mutex
 		outputLines []string
@@ -147,12 +156,14 @@ func runSSHCommandWithProgress(ctx context.Context, client *ssh.Client, command 
 	done := make(chan error, 1)
 	go func() {
 		wg.Wait()
-		done <- session.Wait()
+		done <- wait()
 	}()
 
 	select {
 	case <-ctx.Done():
-		_ = session.Close()
+		if len(onCancel) > 0 && onCancel[0] != nil {
+			onCancel[0]()
+		}
 		return "", ctx.Err()
 	case waitErr = <-done:
 	}

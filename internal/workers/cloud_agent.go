@@ -180,7 +180,12 @@ func ensureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	if err != nil {
 		return CloudAgentInstance{}, err
 	}
-	emitPhase("connect", fmt.Sprintf("Connecting to worker %s over SSH", worker.ID))
+	localWorker := WorkerIsLocal(worker)
+	if localWorker {
+		emitPhase("connect", fmt.Sprintf("Ensuring cloud agent locally on worker %s", worker.ID))
+	} else {
+		emitPhase("connect", fmt.Sprintf("Connecting to worker %s over SSH", worker.ID))
+	}
 	proxyEnv := RenderProxyEnv(proxy)
 	containerEnv := cloudAgentContainerEnv(options)
 	for key, value := range proxyEnv {
@@ -240,14 +245,19 @@ func ensureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	if err != nil {
 		return CloudAgentInstance{}, err
 	}
-	client, err := dialSSH(worker, key)
-	if err != nil {
-		return CloudAgentInstance{}, err
-	}
-	defer client.Close()
 	command := buildCloudAgentRemoteCommand(string(payload))
 	emitPhase("ensure_remote", "Ensuring cloud agent container on worker")
-	output, err := runSSHCommandWithProgress(ctx, client, command, onEvent)
+	var output string
+	if localWorker {
+		output, err = runLocalCommandWithProgress(ctx, command, onEvent)
+	} else {
+		client, dialErr := dialSSH(worker, key)
+		if dialErr != nil {
+			return CloudAgentInstance{}, dialErr
+		}
+		defer client.Close()
+		output, err = runSSHCommandWithProgress(ctx, client, command, onEvent)
+	}
 	if err != nil {
 		return CloudAgentInstance{}, fmt.Errorf("ensure cloud agent on %s: %w", worker.ID, err)
 	}
