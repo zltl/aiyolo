@@ -2237,14 +2237,14 @@ textarea:focus-visible,
 
 .chat-operations {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
   box-sizing: border-box;
   margin: 0 0 2px;
   padding: 10px 12px;
-  border: 1px solid rgba(34, 160, 120, 0.18);
+  border: 1px solid rgba(77, 102, 255, 0.14);
   border-radius: 14px;
-  background: rgba(240, 252, 247, 0.94);
+  background: rgba(242, 246, 255, 0.92);
 }
 
 .chat-operations[hidden] {
@@ -2261,7 +2261,7 @@ textarea:focus-visible,
   font-size: 13px;
   font-weight: 800;
   letter-spacing: 0.04em;
-  color: #2f6654;
+  color: #485777;
   list-style: none;
 }
 
@@ -2278,7 +2278,8 @@ textarea:focus-visible,
 .chat-operations-summary-icon .chat-control-icon {
   width: 0.95rem;
   height: 0.95rem;
-  color: #3f8a72;
+  color: #60719a;
+  transition: transform 0.18s ease;
 }
 
 .chat-operations[open] .chat-operations-summary-icon .chat-control-icon {
@@ -2300,13 +2301,13 @@ textarea:focus-visible,
   align-items: start;
   padding: 8px 10px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(34, 160, 120, 0.12);
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid rgba(77, 102, 255, 0.12);
 }
 
 .chat-operation-item.is-browser {
-  border-color: rgba(77, 102, 255, 0.22);
-  background: rgba(245, 247, 255, 0.88);
+  border-color: rgba(77, 102, 255, 0.18);
+  background: rgba(245, 247, 255, 0.72);
 }
 
 .chat-operation-icon {
@@ -2316,13 +2317,13 @@ textarea:focus-visible,
   width: 1.5rem;
   height: 1.5rem;
   border-radius: 999px;
-  background: rgba(34, 160, 120, 0.12);
-  color: #2f6654;
+  background: rgba(77, 102, 255, 0.12);
+  color: #4d58a8;
 }
 
 .chat-operation-item.is-browser .chat-operation-icon {
-  background: rgba(77, 102, 255, 0.12);
-  color: #4d58a8;
+  background: rgba(77, 102, 255, 0.16);
+  color: #5f6fd8;
 }
 
 .chat-operation-icon .chat-control-icon {
@@ -2339,17 +2340,17 @@ textarea:focus-visible,
 .chat-operation-name {
   font-size: 13px;
   font-weight: 700;
-  color: #274f42;
+  color: #3f4f8f;
 }
 
 .chat-operation-item.is-browser .chat-operation-name {
-  color: #3f4f8f;
+  color: #4d58a8;
 }
 
 .chat-operation-detail {
   font-size: 12px;
   line-height: 1.45;
-  color: #567068;
+  color: #5f6980;
   word-break: break-word;
 }
 
@@ -2380,7 +2381,7 @@ textarea:focus-visible,
 
 .chat-operation-status.is-completed {
   color: #2f6654;
-  background: rgba(34, 160, 120, 0.14);
+  background: rgba(95, 200, 131, 0.16);
 }
 
 .chat-operation-status.is-failed {
@@ -3691,6 +3692,68 @@ textarea:focus-visible,
 
 .chat-reasoning-copy {
   color: #d3dbf0;
+}
+
+.chat-operations {
+  border-color: rgba(126, 146, 255, 0.18);
+  background: rgba(17, 20, 30, 0.74);
+}
+
+.chat-operations-summary {
+  color: #c9d3ea;
+}
+
+.chat-operations-summary-icon .chat-control-icon {
+  color: #9fb3ff;
+}
+
+.chat-operation-item {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(126, 146, 255, 0.14);
+}
+
+.chat-operation-item.is-browser {
+  background: rgba(118, 138, 255, 0.08);
+  border-color: rgba(126, 146, 255, 0.2);
+}
+
+.chat-operation-icon {
+  background: rgba(118, 138, 255, 0.16);
+  color: #b8c7ff;
+}
+
+.chat-operation-item.is-browser .chat-operation-icon {
+  background: rgba(118, 138, 255, 0.22);
+  color: #c8d4ff;
+}
+
+.chat-operation-name,
+.chat-operation-item.is-browser .chat-operation-name {
+  color: #d3dbf0;
+}
+
+.chat-operation-detail {
+  color: #9aa8c7;
+}
+
+.chat-operation-screenshot {
+  border-color: rgba(126, 146, 255, 0.22);
+  background: #111111;
+}
+
+.chat-operation-status.is-started {
+  color: #e4d7a5;
+  background: rgba(240, 185, 94, 0.14);
+}
+
+.chat-operation-status.is-completed {
+  color: #9fd4a8;
+  background: rgba(95, 200, 131, 0.14);
+}
+
+.chat-operation-status.is-failed {
+  color: #f0b3af;
+  background: rgba(224, 111, 102, 0.14);
 }
 
 .chat-markdown-table th,
@@ -7622,6 +7685,18 @@ textarea:focus-visible,
 
 .chat-message.is-pending.is-reasoning-stream .chat-reasoning,
 .chat-message.is-pending:has(.chat-reasoning:not([hidden])) .chat-reasoning {
+  width: 100%;
+}
+
+.chat-message.is-pending.is-operations-stream .chat-bubble,
+.chat-message.is-pending:has(.chat-operations:not([hidden])) .chat-bubble {
+  width: 100%;
+  max-width: min(100%, var(--chat-message-max, var(--chat-content-max, 62rem)));
+  padding: 0.5rem 0.65rem;
+}
+
+.chat-message.is-pending.is-operations-stream .chat-operations,
+.chat-message.is-pending:has(.chat-operations:not([hidden])) .chat-operations {
   width: 100%;
 }
 

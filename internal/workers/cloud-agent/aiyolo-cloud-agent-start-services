@@ -13,7 +13,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   as_root=(sudo -n)
 fi
 
-/usr/local/bin/aiyolo-cloud-agent-write-codex-config
+/usr/local/bin/aiyolo-cloud-agent-write-claude-config
 
 /usr/local/bin/aiyolo-ass >/tmp/aiyolo-ass.log 2>&1 &
 pids+=("$!")

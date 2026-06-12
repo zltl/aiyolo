@@ -213,6 +213,7 @@ func ensureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	}
 	proxyEnv := RenderCloudAgentBuildProxyEnv(proxy)
 	containerEnv := cloudAgentContainerEnv(options)
+	applyCloudAgentContainerNetworkEnv(containerEnv, proxy, options)
 	emitPhase("resolve_ass", "Resolving published aiyolo-ass checksum")
 	resolveCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -643,6 +644,71 @@ func cloudAgentContainerEnv(options CloudAgentStartOptions) map[string]string {
 	return env
 }
 
+func applyCloudAgentContainerNetworkEnv(env map[string]string, proxy domain.ProxyProfile, options CloudAgentStartOptions) {
+	if env == nil {
+		return
+	}
+	for key, value := range RenderCloudAgentContainerProxyEnv(proxy) {
+		env[key] = value
+	}
+	noProxy := cloudAgentContainerNoProxy(options)
+	if noProxy == "" {
+		return
+	}
+	env["NO_PROXY"] = noProxy
+	env["no_proxy"] = noProxy
+}
+
+// RenderCloudAgentContainerProxyEnv builds HTTP(S)_PROXY for cloud-agent container
+// runtime tools such as Claude Code WebFetch. Loopback worker proxy endpoints are
+// rewritten to host.docker.internal.
+func RenderCloudAgentContainerProxyEnv(profile domain.ProxyProfile) map[string]string {
+	return RenderCloudAgentBuildProxyEnv(profile)
+}
+
+func cloudAgentContainerNoProxy(options CloudAgentStartOptions) string {
+	seen := make(map[string]struct{}, 8)
+	hosts := make([]string, 0, 8)
+	addHost := func(value string) {
+		value = strings.TrimSpace(strings.ToLower(value))
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		hosts = append(hosts, value)
+	}
+	for _, value := range []string{
+		"localhost",
+		"127.0.0.1",
+		"::1",
+		"host.docker.internal",
+	} {
+		addHost(value)
+	}
+	for _, raw := range []string{options.ConsoleBaseURL, options.APIBaseURL, options.ASSDownloadURL, options.ASSSHA256URL} {
+		addHost(hostFromHTTPURL(raw))
+	}
+	for _, hostname := range cloudAgentSyncHostnames(options) {
+		addHost(hostname)
+	}
+	return strings.Join(hosts, ",")
+}
+
+func hostFromHTTPURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(parsed.Hostname())
+}
+
 func requiresAnthropicCustomModelOption(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if model == "" {
@@ -686,7 +752,7 @@ var cloudAgentBuildContextFiles = map[string]string{
 	"aiyolo-cloud-agent-open-chrome":        cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-open-chrome"),
 	"aiyolo-cloud-agent-start-docker":       cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-docker"),
 	"aiyolo-cloud-agent-start-services":     cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-start-services"),
-	"aiyolo-cloud-agent-write-codex-config": cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-write-codex-config"),
+	"aiyolo-cloud-agent-write-claude-config": cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-write-claude-config"),
 }
 
 func cloudAgentBuildRevision(options CloudAgentStartOptions, files map[string]string, assSHA256 string) string {

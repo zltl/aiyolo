@@ -8,7 +8,9 @@ ARG CHROME_DEB_URL=https://dl.google.com/linux/direct/google-chrome-stable_curre
 ARG AIYOLO_ASS_SHA256=
 ARG AIYOLO_CLOUD_AGENT_BUILD_REVISION=dev
 ARG NODE_VERSION=20.20.2
-ARG CODEX_VERSION=latest
+ARG CLAUDE_CODE_VERSION=latest
+ARG HTTP_PROXY=
+ARG HTTPS_PROXY=
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
@@ -18,7 +20,7 @@ ENV XDG_RUNTIME_DIR=/tmp/runtime-aiyolo
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
 ENV AIYOLO_AGENT_USER=aiyolo
 ENV AIYOLO_AGENT_HOME=/workspace
-ENV CODEX_HOME=/workspace/.codex
+ENV CLAUDE_CONFIG_DIR=/workspace/.claude
 ENV HOME=/workspace
 ENV USER=aiyolo
 
@@ -52,12 +54,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && groupadd --gid 1000 "${AIYOLO_AGENT_USER}" \
  && useradd --uid 1000 --gid 1000 --create-home --home-dir "${AIYOLO_AGENT_HOME}" --shell /bin/bash "${AIYOLO_AGENT_USER}" \
  && usermod -aG sudo,docker "${AIYOLO_AGENT_USER}" \
- && install -d -o "${AIYOLO_AGENT_USER}" -g "${AIYOLO_AGENT_USER}" -m 0755 /workspace "${CODEX_HOME}" "${XDG_RUNTIME_DIR}" /run/aiyolo \
+ && install -d -o "${AIYOLO_AGENT_USER}" -g "${AIYOLO_AGENT_USER}" -m 0755 /workspace "${CLAUDE_CONFIG_DIR}" "${XDG_RUNTIME_DIR}" /run/aiyolo \
  && install -d -m 0755 /etc/aiyolo /etc/sudoers.d /usr/local/bin /opt \
  && printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${AIYOLO_AGENT_USER}" >/etc/sudoers.d/aiyolo \
  && chmod 0440 /etc/sudoers.d/aiyolo \
- && if [ -x /usr/bin/fdfind ]; then ln -sf /usr/bin/fdfind /usr/local/bin/fd; fi \
- && wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
+ && if [ -x /usr/bin/fdfind ]; then ln -sf /usr/bin/fdfind /usr/local/bin/fd; fi
+
+RUN HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" \
+    http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" \
+    wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
  && apt-get install -y /tmp/google-chrome.deb \
  && rm -f /tmp/google-chrome.deb \
  && curl -fsSL --retry 5 --connect-timeout 30 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" -o /tmp/node.tar.gz \
@@ -65,10 +70,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/node" /usr/local/bin/node \
  && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npm" /usr/local/bin/npm \
  && ln -sf "/opt/node-v${NODE_VERSION}-linux-x64/bin/npx" /usr/local/bin/npx \
- && npm install -g --prefix /usr/local "@openai/codex@${CODEX_VERSION}" --cache /tmp/.npm-cache --fund=false --audit=false \
+ && npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" --cache /tmp/.npm-cache --fund=false --audit=false \
  && node --version \
  && npm --version \
- && codex --version \
+ && claude --version \
  && rm -f /tmp/node.tar.gz \
  && rm -rf /tmp/.npm-cache \
  && rm -rf /var/lib/apt/lists/*
@@ -81,7 +86,7 @@ COPY aiyolo-cloud-agent-start-display /usr/local/bin/aiyolo-cloud-agent-start-di
 COPY aiyolo-cloud-agent-open-chrome /usr/local/bin/aiyolo-cloud-agent-open-chrome
 COPY aiyolo-cloud-agent-start-docker /usr/local/bin/aiyolo-cloud-agent-start-docker
 COPY aiyolo-cloud-agent-start-services /usr/local/bin/aiyolo-cloud-agent-start-services
-COPY aiyolo-cloud-agent-write-codex-config /usr/local/bin/aiyolo-cloud-agent-write-codex-config
+COPY aiyolo-cloud-agent-write-claude-config /usr/local/bin/aiyolo-cloud-agent-write-claude-config
 
 RUN chmod 0755 \
   /usr/local/bin/aiyolo-ass \
@@ -91,7 +96,7 @@ RUN chmod 0755 \
     /usr/local/bin/aiyolo-cloud-agent-open-chrome \
     /usr/local/bin/aiyolo-cloud-agent-start-docker \
     /usr/local/bin/aiyolo-cloud-agent-start-services \
-    /usr/local/bin/aiyolo-cloud-agent-write-codex-config
+    /usr/local/bin/aiyolo-cloud-agent-write-claude-config
 
 WORKDIR /workspace
 

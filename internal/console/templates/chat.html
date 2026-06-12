@@ -7,7 +7,7 @@
   <title>{{.DisplayTitle}} - AIYolo 对话</title>
   <link rel="stylesheet" href="/console/static/vendor/file-icons-style.css?v=vendor-20260606a">
   <link rel="stylesheet" href="/console/static/vendor/github-dark.min.css?v=vendor-20260606a">
-  <link rel="stylesheet" href="/console/static/console.css?v=console-browser-mcp-20260612c">
+  <link rel="stylesheet" href="/console/static/console.css?v=console-operations-20260613a">
   <link rel="stylesheet" href="/console/static/vendor/xterm.css?v=vendor-20260606a">
 </head>
 <body class="chat-workspace-body">
@@ -261,6 +261,10 @@
                     {{end}}
                   </div>
                 </details>
+                <button class="chat-shell-launch chat-build-log-launch" type="button" data-chat-action="open-build-log" hidden aria-label="{{msg .Locale "查看构建日志" "View build log"}}" title="{{msg .Locale "查看构建日志" "View build log"}}">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 6h13"></path><path d="M8 12h13"></path><path d="M8 18h13"></path><path d="M3 6h.01"></path><path d="M3 12h.01"></path><path d="M3 18h.01"></path></svg>
+                  <span class="chat-visually-hidden">{{msg .Locale "查看构建日志" "View build log"}}</span>
+                </button>
                 <button class="chat-shell-launch" type="button" data-chat-action="open-shell" {{if eq .ChatForm.Environment "local"}}hidden disabled{{end}} aria-label="{{msg .Locale "打开容器终端" "Open container terminal"}}" title="{{msg .Locale "打开容器终端" "Open container terminal"}}">
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4.75 6.25A1.25 1.25 0 0 1 6 5h12a1.25 1.25 0 0 1 1.25 1.25v11.5A1.25 1.25 0 0 1 18 19H6a1.25 1.25 0 0 1-1.25-1.25z"></path><path d="m8.5 9.5 2.75 2.5-2.75 2.5"></path><path d="M13.5 14.5h2.75"></path></svg>
                   <span class="chat-visually-hidden">{{msg .Locale "打开容器终端" "Open container terminal"}}</span>
@@ -379,9 +383,9 @@
   <script src="/console/static/vendor/highlight.min.js?v=vendor-20260606a"></script>
   <script src="/console/static/vendor/xterm.js?v=vendor-20260606a"></script>
   <script src="/console/static/vendor/addon-fit.js?v=vendor-20260606a"></script>
-  <script src="/console/static/chat-shell.js?v=chat-shell-20260604a"></script>
+  <script src="/console/static/chat-shell.js?v=chat-shell-20260613a"></script>
   <script src="/console/static/chat-browser.js?v=chat-browser-mcp-20260612d"></script>
-  <script src="/console/static/chat.js?v=chat-browser-mcp-20260612d"></script>
+  <script src="/console/static/chat.js?v=chat-build-log-terminal-20260613b"></script>
   <script src="/console/static/chat-workspace.js?v=chat-runtime-labels-20260610b"></script>
 </div>
 {{end}}

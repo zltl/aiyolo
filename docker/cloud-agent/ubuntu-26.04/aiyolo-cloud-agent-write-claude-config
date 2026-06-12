@@ -12,6 +12,24 @@ fi
 
 "${as_root[@]}" install -d -o "$agent_user" -g "$agent_user" -m 0755 "$claude_config_dir"
 
+settings_path="${claude_config_dir}/settings.json"
+cat > "$settings_path" <<'AIYOLO_CLAUDE_SETTINGS_JSON'
+{
+  "skipWebFetchPreflight": true
+}
+AIYOLO_CLAUDE_SETTINGS_JSON
+"${as_root[@]}" chown "$agent_user:$agent_user" "$settings_path"
+"${as_root[@]}" chmod 0644 "$settings_path"
+
+settings_local_path="${claude_config_dir}/settings.local.json"
+cat > "$settings_local_path" <<'AIYOLO_CLAUDE_SETTINGS_LOCAL_JSON'
+{
+  "skipWebFetchPreflight": true
+}
+AIYOLO_CLAUDE_SETTINGS_LOCAL_JSON
+"${as_root[@]}" chown "$agent_user:$agent_user" "$settings_local_path"
+"${as_root[@]}" chmod 0644 "$settings_local_path"
+
 mcp_url="${AIYOLO_BROWSER_MCP_URL:-}"
 mcp_token="${AIYOLO_BROWSER_MCP_TOKEN:-}"
 if [[ -n "$mcp_url" && -n "$mcp_token" ]]; then

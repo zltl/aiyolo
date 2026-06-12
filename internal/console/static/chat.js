@@ -1127,14 +1127,117 @@
     }
   };
 
+  const environmentBuildLogLabel = () => t("镜像构建", "Image build");
+
+  const shellInstanceByBuildLog = () => shellInstances.find((instance) => instance?.isBuildLog === true) || null;
+
+  const appendEnvironmentBuildLog = (line) => {
+    const text = String(line || "").trimEnd();
+    if (text === "") {
+      return;
+    }
+    const instance = shellInstanceByID(environmentBuildLogInstanceID) || shellInstanceByBuildLog();
+    instance?.controller?.writeln?.(text);
+  };
+
+  const hasEnvironmentBuildLog = () => Boolean(shellInstanceByBuildLog());
+
+  const ensureEnvironmentBuildLogBackend = (form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return null;
+    }
+    const existing = shellInstanceByBuildLog();
+    if (existing) {
+      environmentBuildLogInstanceID = existing.id;
+      return existing;
+    }
+    if (!window.AIYoloChatShell || typeof window.AIYoloChatShell.createLogController !== "function") {
+      return null;
+    }
+    const workerID = cloudAgentEnvironmentWorkerID(currentSelectedEnvironment(form));
+    const instance = createShellInstance({
+      terminalID: environmentBuildLogTerminalID,
+      label: environmentBuildLogLabel(),
+      sessionID: readClientSessionID(form),
+      workerID,
+    });
+    instance.isBuildLog = true;
+    instance.logOnly = true;
+    shellInstances.push(instance);
+    environmentBuildLogInstanceID = instance.id;
+    renderShellDockContents(form);
+    const pane = ensureShellPane(form, instance);
+    if (!(pane instanceof HTMLElement) || !(instance.terminalHost instanceof HTMLElement)) {
+      closeShellInstance(form, instance.id, { forget: true, terminate: false });
+      environmentBuildLogInstanceID = "";
+      return null;
+    }
+    instance.controller = window.AIYoloChatShell.createLogController({
+      terminalHost: instance.terminalHost,
+    });
+    instance.controller?.writeln?.(t("Cloud Agent 环境准备日志", "Cloud Agent environment setup log"));
+    instance.controller?.writeln?.(t("等待 Worker 事件…", "Waiting for worker events…"));
+    updateComposerControls(form);
+    return instance;
+  };
+
+  const showEnvironmentBuildLogTerminal = (form) => {
+    const instance = shellInstanceByID(environmentBuildLogInstanceID) || shellInstanceByBuildLog();
+    if (!(form instanceof HTMLFormElement) || !instance) {
+      return false;
+    }
+    environmentBuildLogInstanceID = instance.id;
+    activeShellInstanceID = instance.id;
+    renderShellDockContents(form);
+    setShellDockVisible(form, true);
+    scheduleActiveShellLayout();
+    updateComposerControls(form);
+    return true;
+  };
+
+  const closeEnvironmentBuildLogTerminal = (form, options = {}) => {
+    const instance = shellInstanceByID(environmentBuildLogInstanceID) || shellInstanceByBuildLog();
+    environmentBuildLogInstanceID = "";
+    if (!instance) {
+      return;
+    }
+    if (options.silent !== true && shellInstances.filter((item) => !item?.isBuildLog).length === 0) {
+      setShellDockVisible(form, false);
+    }
+    closeShellInstance(form, instance.id, { forget: true, terminate: false });
+    updateComposerControls(form);
+  };
+
+  const openEnvironmentBuildLogTerminal = (form) => {
+    if (!(form instanceof HTMLFormElement)) {
+      return null;
+    }
+    ensureEnvironmentBuildLogBackend(form);
+    showEnvironmentBuildLogTerminal(form);
+    return shellInstanceByBuildLog();
+  };
+
   const applyEnvironmentEnsureEvent = (form, event, options = {}) => {
     const showToast = options.showToast !== false;
+    const useBuildLogTerminal = options.useBuildLogTerminal === true;
+    const appendLog = (line) => {
+      if (useBuildLogTerminal) {
+        appendEnvironmentBuildLog(line);
+        return;
+      }
+      if (typeof options.appendLog === "function") {
+        options.appendLog(line);
+      }
+    };
     const notifyPhase = (phase, fallback = "") => {
       const label = environmentStatusPhaseLabel(phase, fallback);
+      if (useBuildLogTerminal) {
+        appendLog(`[${label}]`);
+      }
       if (typeof options.onPhase === "function") {
         options.onPhase(phase, label);
       }
-      if (showToast) {
+      if (showToast && !useBuildLogTerminal) {
         showEnvironmentToast(label, "info", { persistent: true });
       }
       return label;
@@ -1144,16 +1247,20 @@
     }
     const type = String(event.type || "").trim().toLowerCase();
     if (type === "log") {
-      const phase = String(event.phase || "").trim().toLowerCase();
-      if (phase === "build_image") {
-        const message = String(event.message || "").trim();
-        if (message) {
-          const label = `${t("镜像构建中：", "Image build: ")}${message}`;
-          if (typeof options.onPhase === "function") {
-            options.onPhase(phase, label);
-          }
-          if (showToast) {
-            showEnvironmentToast(label, "info", { persistent: true });
+      const message = String(event.message || "").trim();
+      if (message) {
+        if (useBuildLogTerminal) {
+          appendLog(message);
+        } else {
+          const phase = String(event.phase || "").trim().toLowerCase();
+          if (phase === "build_image") {
+            const label = `${t("镜像构建中：", "Image build: ")}${message}`;
+            if (typeof options.onPhase === "function") {
+              options.onPhase(phase, label);
+            }
+            if (showToast) {
+              showEnvironmentToast(label, "info", { persistent: true });
+            }
           }
         }
       }
@@ -1178,6 +1285,9 @@
     }
     if (type === "ready") {
       const notice = String(event.notice || event.message || environmentStatusPhaseLabel("ready")).trim();
+      if (useBuildLogTerminal) {
+        appendLog(`[${notice}]`);
+      }
       if (typeof options.onPhase === "function") {
         options.onPhase("ready", notice);
       }
@@ -1196,6 +1306,9 @@
     }
     if (type === "error") {
       const message = String(event.error || event.message || t("环境准备失败。", "Failed to prepare the selected environment."));
+      if (useBuildLogTerminal) {
+        appendLog(`[${t("错误", "Error")}] ${message}`);
+      }
       if (showToast) {
         showEnvironmentToast(message, "error");
       }
@@ -1412,6 +1525,8 @@
   let shellOpenInFlight = false;
   let environmentEnsureInFlight = null;
   let environmentEnsureKey = "";
+  let environmentBuildLogInstanceID = "";
+  const environmentBuildLogTerminalID = "build-log";
   let shellStatePersistTimer = null;
 
   const syncDraftFieldHeight = (field) => {
@@ -1533,7 +1648,7 @@
   const currentShellStateSnapshot = (form = currentForm()) => {
     const sessionID = readClientSessionID(form);
     const instances = shellInstances
-      .filter((instance) => instance && String(instance.sessionID || "").trim() === sessionID)
+      .filter((instance) => instance && !instance.isBuildLog && String(instance.sessionID || "").trim() === sessionID)
       .map((instance) => ({
         terminalID: String(instance.terminalID || instance.id || "").trim(),
         label: String(instance.label || "").trim(),
@@ -2473,6 +2588,9 @@
     if (!(form instanceof HTMLFormElement) || !instance || typeof instance !== "object") {
       return null;
     }
+    if (instance.logOnly === true) {
+      return instance.controller || null;
+    }
     const pane = ensureShellPane(form, instance);
     if (!(pane instanceof HTMLElement) || !(instance.terminalHost instanceof HTMLElement)) {
       return null;
@@ -2537,6 +2655,9 @@
     if (index < 0) {
       return;
     }
+    if (environmentBuildLogInstanceID === instanceID) {
+      environmentBuildLogInstanceID = "";
+    }
     const [instance] = shellInstances.splice(index, 1);
     disposeShellController(instance, { terminate: options.terminate !== false });
     if (activeShellInstanceID === instanceID) {
@@ -2551,6 +2672,7 @@
   };
 
   const closeAllChatShells = (form, options = {}) => {
+    environmentBuildLogInstanceID = "";
     disposeAllShellControllers({ terminate: options.terminate === true });
     renderShellDockContents(form);
     setShellDockVisible(form, false);
@@ -2908,6 +3030,7 @@
     const startGlyph = composerPrimaryStartGlyph(form);
     const stopGlyph = composerPrimaryStopGlyph(form);
     const shellButton = shellLaunchButton(form);
+    const buildLogButton = form.querySelector("[data-chat-action=\"open-build-log\"]");
     const sessionID = readClientSessionID(form);
     const streaming = isSessionStreamActive(sessionID);
     const payload = readDraftPayload(form);
@@ -2959,10 +3082,22 @@
         ? t("显示 Claude Code 终端", "Show the Claude Code terminal")
         : t("打开 Claude Code 终端", "Open the Claude Code terminal"));
     }
+    if (buildLogButton instanceof HTMLButtonElement) {
+      const showBuildLogButton = isCloudAgentEnvironment(currentSelectedEnvironment(form))
+        && (hasEnvironmentBuildLog() || environmentEnsureInFlight !== null);
+      buildLogButton.hidden = !showBuildLogButton;
+      buildLogButton.disabled = !showBuildLogButton;
+      buildLogButton.title = environmentEnsureInFlight !== null
+        ? t("查看构建日志（进行中）", "View build log (in progress)")
+        : t("查看构建日志", "View build log");
+      buildLogButton.setAttribute("aria-label", buildLogButton.title);
+      buildLogButton.classList.toggle("is-active", showBuildLogButton && !isShellDockHidden(form) && shellInstanceByBuildLog()?.id === activeShellInstanceID);
+    }
     const activitybarTerminalButton = form.querySelector(".chat-activitybar-terminal-toggle");
     if (activitybarTerminalButton instanceof HTMLButtonElement) {
       const hasShellSocket = shellSocketBaseURL(form) !== "";
-      const showTerminalToggle = hasShellSocket && isCloudAgentEnvironment(currentSelectedEnvironment(form));
+      const showTerminalToggle = isCloudAgentEnvironment(currentSelectedEnvironment(form))
+        && (hasShellSocket || hasEnvironmentBuildLog());
       activitybarTerminalButton.hidden = !showTerminalToggle;
       const dockVisible = !isShellDockHidden(form);
       activitybarTerminalButton.classList.toggle("is-active", dockVisible);
@@ -3186,6 +3321,14 @@
     && (sessionHasMessages(session) || sessionHasDraft(session));
 
   const isCloudAgentEnvironment = (value) => String(value || "").trim().startsWith("cloud-agent:");
+
+  const cloudAgentEnvironmentWorkerID = (value) => {
+    const normalized = String(value || "").trim();
+    if (!isCloudAgentEnvironment(normalized)) {
+      return "";
+    }
+    return normalized.slice("cloud-agent:".length);
+  };
 
   const sessionIsStreaming = (session) => String(session?.status || "").trim() === "streaming";
 
@@ -4760,10 +4903,14 @@
     field.disabled = true;
     setEnvironmentPickerBusy(form, true);
     dismissEnvironmentToast();
+    const useBuildLogStream = environment !== "local" && ensureStreamURL !== "";
+    if (useBuildLogStream) {
+      ensureEnvironmentBuildLogBackend(form);
+    }
     if (showToast) {
       if (environment === "local") {
         showEnvironmentToast(t("正在切换到聊天…", "Switching to chat…"), "info", { persistent: true });
-      } else {
+      } else if (!useBuildLogStream) {
         showEnvironmentToast(t("正在连接 Cloud Agent…", "Connecting Cloud Agent…"), "info", { persistent: true });
       }
     } else if (typeof options.onPhase === "function") {
@@ -4812,7 +4959,11 @@
       }
       let streamParsed = null;
       await decodeStreamEvents(response, (event) => {
-        const result = applyEnvironmentEnsureEvent(form, event, options);
+        const result = applyEnvironmentEnsureEvent(form, event, {
+          ...options,
+          useBuildLogTerminal: true,
+          showToast: options.showToast !== false,
+        });
         if (result) {
           streamParsed = result;
         }
@@ -4853,6 +5004,7 @@
         }
         queuePersist();
         emitChatState({ source: "ensure-environment", ensured: parsed });
+        updateComposerControls(form);
         return parsed;
       } catch (error) {
         const message = String(error?.message || t("环境准备失败。", "Failed to prepare the selected environment."));
@@ -5731,6 +5883,11 @@
         void copyAssistantMessageMarkdown(bubbleNode);
         return;
       }
+      case "open-build-log": {
+        event.preventDefault();
+        openEnvironmentBuildLogTerminal(form);
+        return;
+      }
       case "open-shell": {
         event.preventDefault();
         if (isShellDockHidden(form)) {
@@ -5746,6 +5903,11 @@
         event.preventDefault();
         if (!isShellDockHidden(form)) {
           hideShellDock(form);
+          return;
+        }
+        if (hasEnvironmentBuildLog() && shellInstances.filter((item) => !item?.isBuildLog).length === 0) {
+          showEnvironmentBuildLogTerminal(form);
+          writeShellState(form);
           return;
         }
         if (shellInstances.length > 0) {

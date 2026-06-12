@@ -9,42 +9,25 @@
     return nextURL.toString();
   };
 
-  const createController = (options = {}) => {
-    const terminalHost = options.terminalHost;
-    const statusNode = options.statusNode;
-    const getSocketPath = typeof options.getSocketPath === "function"
-      ? options.getSocketPath
-      : () => String(options.socketPath || "").trim();
-
-    const setStatus = (message, isError = false) => {
-      if (statusNode instanceof HTMLElement) {
-        statusNode.textContent = String(message || "").trim();
-        statusNode.classList.toggle("is-error", Boolean(isError));
-      }
-      if (typeof options.onStatusChange === "function") {
-        options.onStatusChange({ message: String(message || "").trim(), isError: Boolean(isError) });
-      }
-    };
-
+  const createTerminal = (terminalHost, options = {}) => {
     if (!(terminalHost instanceof HTMLElement)) {
-      setStatus(t("Shell 容器不存在。", "Shell host is missing."), true);
       return null;
     }
     if (typeof window.Terminal !== "function") {
-      setStatus(t("Shell 依赖加载失败。", "Shell dependencies failed to load."), true);
       return null;
     }
 
     const term = new window.Terminal({
       allowTransparency: true,
       convertEol: true,
-      cursorBlink: true,
+      cursorBlink: options.cursorBlink !== false,
+      disableStdin: options.readOnly === true,
       drawBoldTextInBrightColors: true,
       fontFamily: '"IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", "PingFang SC", "Microsoft YaHei", "Noto Sans Mono CJK SC", monospace',
       fontSize: 14,
       lineHeight: 1.35,
       minimumContrastRatio: 4.5,
-      scrollback: 12000,
+      scrollback: Number.isFinite(options.scrollback) ? options.scrollback : 12000,
       tabStopWidth: 4,
       theme: {
         background: "#0d131b",
@@ -79,6 +62,194 @@
       term.loadAddon(fitAddon);
     }
     term.open(terminalHost);
+    return { term, fitAddon };
+  };
+
+  const createLogController = (options = {}) => {
+    const terminalHost = options.terminalHost;
+    const statusNode = options.statusNode;
+    const setStatus = (message, isError = false) => {
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = String(message || "").trim();
+        statusNode.classList.toggle("is-error", Boolean(isError));
+      }
+      if (typeof options.onStatusChange === "function") {
+        options.onStatusChange({ message: String(message || "").trim(), isError: Boolean(isError) });
+      }
+    };
+
+    const terminal = createTerminal(terminalHost, {
+      readOnly: true,
+      cursorBlink: false,
+      scrollback: options.scrollback,
+    });
+    if (!terminal) {
+      setStatus(t("终端依赖加载失败。", "Terminal dependencies failed to load."), true);
+      return null;
+    }
+    const { term, fitAddon } = terminal;
+
+    let disposed = false;
+    let resizeObserver = null;
+    let windowResizeHandler = null;
+    let pendingLayoutFrame = 0;
+    let pendingLayoutTimeout = 0;
+
+    const cancelPendingLayout = () => {
+      if (pendingLayoutFrame) {
+        window.cancelAnimationFrame(pendingLayoutFrame);
+        pendingLayoutFrame = 0;
+      }
+      if (pendingLayoutTimeout) {
+        window.clearTimeout(pendingLayoutTimeout);
+        pendingLayoutTimeout = 0;
+      }
+    };
+
+    const terminalHostReady = () => terminalHost.clientWidth > 0 && terminalHost.clientHeight > 0;
+
+    const fitTerminal = () => {
+      if (disposed || !terminalHostReady()) {
+        return false;
+      }
+      if (fitAddon) {
+        try {
+          fitAddon.fit();
+        } catch (_error) {
+          const cols = Math.max(80, Math.floor(terminalHost.clientWidth / 9));
+          const rows = Math.max(16, Math.floor(terminalHost.clientHeight / 21));
+          term.resize(cols, rows);
+        }
+      } else {
+        const cols = Math.max(80, Math.floor(terminalHost.clientWidth / 9));
+        const rows = Math.max(16, Math.floor(terminalHost.clientHeight / 21));
+        term.resize(cols, rows);
+      }
+      if (typeof term.refresh === "function") {
+        term.refresh(0, Math.max(0, term.rows - 1));
+      }
+      return true;
+    };
+
+    const scheduleTerminalLayout = (layoutOptions = {}) => {
+      if (disposed) {
+        return;
+      }
+      cancelPendingLayout();
+      const maxAttempts = Number.isFinite(layoutOptions.maxAttempts) ? Math.max(1, layoutOptions.maxAttempts) : 6;
+      let attempts = 0;
+      const run = () => {
+        if (disposed) {
+          return;
+        }
+        attempts += 1;
+        if (fitTerminal()) {
+          cancelPendingLayout();
+          return;
+        }
+        if (attempts >= maxAttempts) {
+          return;
+        }
+        pendingLayoutFrame = window.requestAnimationFrame(run);
+      };
+      pendingLayoutFrame = window.requestAnimationFrame(() => {
+        pendingLayoutFrame = window.requestAnimationFrame(run);
+      });
+      pendingLayoutTimeout = window.setTimeout(run, 48);
+    };
+
+    const write = (data) => {
+      if (disposed) {
+        return;
+      }
+      const value = String(data || "");
+      if (value === "") {
+        return;
+      }
+      term.write(value);
+    };
+
+    const writeln = (line) => {
+      write(`${String(line || "")}\r\n`);
+    };
+
+    const clear = () => {
+      if (disposed) {
+        return;
+      }
+      term.clear();
+    };
+
+    const refresh = () => {
+      scheduleTerminalLayout();
+    };
+
+    const dispose = () => {
+      if (disposed) {
+        return;
+      }
+      cancelPendingLayout();
+      disposed = true;
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+        resizeObserver = null;
+      }
+      if (windowResizeHandler) {
+        window.removeEventListener("resize", windowResizeHandler);
+        windowResizeHandler = null;
+      }
+      term.dispose();
+    };
+
+    if (typeof ResizeObserver === "function") {
+      resizeObserver = new ResizeObserver(() => {
+        scheduleTerminalLayout();
+      });
+      resizeObserver.observe(terminalHost);
+    }
+    windowResizeHandler = () => {
+      scheduleTerminalLayout();
+    };
+    window.addEventListener("resize", windowResizeHandler);
+    scheduleTerminalLayout();
+
+    return {
+      write,
+      writeln,
+      clear,
+      dispose,
+      refresh,
+      focus: () => term.focus(),
+    };
+  };
+
+  const createController = (options = {}) => {
+    const terminalHost = options.terminalHost;
+    const statusNode = options.statusNode;
+    const getSocketPath = typeof options.getSocketPath === "function"
+      ? options.getSocketPath
+      : () => String(options.socketPath || "").trim();
+
+    const setStatus = (message, isError = false) => {
+      if (statusNode instanceof HTMLElement) {
+        statusNode.textContent = String(message || "").trim();
+        statusNode.classList.toggle("is-error", Boolean(isError));
+      }
+      if (typeof options.onStatusChange === "function") {
+        options.onStatusChange({ message: String(message || "").trim(), isError: Boolean(isError) });
+      }
+    };
+
+    if (!(terminalHost instanceof HTMLElement)) {
+      setStatus(t("Shell 容器不存在。", "Shell host is missing."), true);
+      return null;
+    }
+    const terminal = createTerminal(terminalHost, { readOnly: false, cursorBlink: true });
+    if (!terminal) {
+      setStatus(t("Shell 依赖加载失败。", "Shell dependencies failed to load."), true);
+      return null;
+    }
+    const { term, fitAddon } = terminal;
 
     let socket = null;
     let manualClose = false;
@@ -435,6 +606,7 @@
 
   window.AIYoloChatShell = {
     createController,
+    createLogController,
   };
 
   const page = document.querySelector("[data-chat-shell-page]");

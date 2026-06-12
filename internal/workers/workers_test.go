@@ -54,6 +54,51 @@ func TestRenderCloudAgentBuildProxyEnvRewritesLoopbackForDockerBuild(t *testing.
 	}
 }
 
+func TestRenderCloudAgentContainerProxyEnvMatchesBuildProxyEnv(t *testing.T) {
+	profile := domain.ProxyProfile{
+		ID:       "worker-0-local",
+		Type:     domain.ProxyTypeHTTP,
+		Endpoint: "http://127.0.0.1:10809",
+	}
+	buildEnv := RenderCloudAgentBuildProxyEnv(profile)
+	containerEnv := RenderCloudAgentContainerProxyEnv(profile)
+	if len(buildEnv) != len(containerEnv) {
+		t.Fatalf("container proxy env length = %d, want %d", len(containerEnv), len(buildEnv))
+	}
+	for key, value := range buildEnv {
+		if containerEnv[key] != value {
+			t.Fatalf("container proxy env[%q] = %q, want %q", key, containerEnv[key], value)
+		}
+	}
+}
+
+func TestApplyCloudAgentContainerNetworkEnvSetsProxyAndNoProxy(t *testing.T) {
+	env := cloudAgentContainerEnv(CloudAgentStartOptions{
+		UserID:         "user-1",
+		AgentType:      domain.CloudAgentTypeClaudeCode,
+		WorkspacePath:  domain.DefaultCloudAgentWorkspacePath,
+		APIBaseURL:     "https://aiyolo.quant67.com/v1",
+		ConsoleBaseURL: "https://aiyolo.quant67.com",
+		APIKey:         "test-key",
+	})
+	applyCloudAgentContainerNetworkEnv(env, domain.ProxyProfile{
+		ID:       "worker-0-local",
+		Type:     domain.ProxyTypeHTTP,
+		Endpoint: "http://127.0.0.1:10809",
+	}, CloudAgentStartOptions{
+		ConsoleBaseURL: "https://aiyolo.quant67.com",
+		APIBaseURL:     "https://aiyolo.quant67.com/v1",
+	})
+	if env["HTTP_PROXY"] != "http://host.docker.internal:10809" {
+		t.Fatalf("unexpected container http proxy env: %q", env["HTTP_PROXY"])
+	}
+	for _, host := range []string{"localhost", "127.0.0.1", "host.docker.internal", "aiyolo.quant67.com"} {
+		if !strings.Contains(env["NO_PROXY"], host) {
+			t.Fatalf("NO_PROXY missing %q: %q", host, env["NO_PROXY"])
+		}
+	}
+}
+
 func TestBuildBootstrapPlanMentionsSelectedDisks(t *testing.T) {
 	plan := BuildBootstrapPlan(
 		domain.WorkerServer{ID: "worker-1", SSHHost: "10.0.0.5", SSHUsername: "ubuntu", SSHKeyID: "key-1"},
@@ -246,6 +291,9 @@ func TestCloudAgentDockerfileInstallsASS(t *testing.T) {
 	}
 	if !strings.Contains(dockerfile, `@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`) || !strings.Contains(dockerfile, "claude --version") {
 		t.Fatalf("cloud-agent Dockerfile should install Claude Code CLI: %s", dockerfile)
+	}
+	if strings.Contains(dockerfile, "@openai/codex") || strings.Contains(dockerfile, "CODEX_VERSION") {
+		t.Fatalf("cloud-agent Dockerfile should not install Codex CLI: %s", dockerfile)
 	}
 	if !strings.Contains(dockerfile, cloudAgentImageASSSHA256Label) || !strings.Contains(dockerfile, cloudAgentImageBuildRevisionLabel) {
 		t.Fatalf("cloud-agent Dockerfile should label aiyolo-ass builds: %s", dockerfile)
@@ -611,6 +659,19 @@ func TestBuildCloudAgentBrowserMCPConfigShellWritesMCPJSON(t *testing.T) {
 	}
 	if BuildCloudAgentBrowserMCPConfigShell(CloudAgentBrowserMCPConfig{}) != "" {
 		t.Fatal("expected empty shell when MCP config is incomplete")
+	}
+}
+
+func TestCloudAgentWriteClaudeConfigSkipsWebFetchPreflight(t *testing.T) {
+	script := cloudAgentAssetString("cloud-agent/aiyolo-cloud-agent-write-claude-config")
+	if !strings.Contains(script, `skipWebFetchPreflight`) || !strings.Contains(script, `"skipWebFetchPreflight": true`) {
+		t.Fatalf("cloud-agent claude config should skip WebFetch preflight for gateway deployments: %s", script)
+	}
+	if !strings.Contains(script, `${claude_config_dir}/settings.json`) {
+		t.Fatalf("cloud-agent claude config should write settings.json under CLAUDE_CONFIG_DIR: %s", script)
+	}
+	if !strings.Contains(script, `${claude_config_dir}/settings.local.json`) {
+		t.Fatalf("cloud-agent claude config should write settings.local.json under CLAUDE_CONFIG_DIR: %s", script)
 	}
 }
 

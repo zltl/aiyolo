@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+agent_user="${AIYOLO_AGENT_USER:-${AIYOLO_CLAUDE_USER:-aiyolo}}"
+agent_home="${AIYOLO_AGENT_HOME:-${AIYOLO_CLAUDE_HOME:-/workspace}}"
+claude_config_dir="${CLAUDE_CONFIG_DIR:-${agent_home}/.claude}"
+
+as_root=()
+if [[ "${EUID}" -ne 0 ]]; then
+  as_root=(sudo -n)
+fi
+
+"${as_root[@]}" install -d -o "$agent_user" -g "$agent_user" -m 0755 "$claude_config_dir"
+
+settings_path="${claude_config_dir}/settings.json"
+cat > "$settings_path" <<'AIYOLO_CLAUDE_SETTINGS_JSON'
+{
+  "skipWebFetchPreflight": true
+}
+AIYOLO_CLAUDE_SETTINGS_JSON
+"${as_root[@]}" chown "$agent_user:$agent_user" "$settings_path"
+"${as_root[@]}" chmod 0644 "$settings_path"
+
+settings_local_path="${claude_config_dir}/settings.local.json"
+cat > "$settings_local_path" <<'AIYOLO_CLAUDE_SETTINGS_LOCAL_JSON'
+{
+  "skipWebFetchPreflight": true
+}
+AIYOLO_CLAUDE_SETTINGS_LOCAL_JSON
+"${as_root[@]}" chown "$agent_user:$agent_user" "$settings_local_path"
+"${as_root[@]}" chmod 0644 "$settings_local_path"
+
+mcp_url="${AIYOLO_BROWSER_MCP_URL:-}"
+mcp_token="${AIYOLO_BROWSER_MCP_TOKEN:-}"
+if [[ -n "$mcp_url" && -n "$mcp_token" ]]; then
+  mcp_path="${AIYOLO_BROWSER_MCP_CONFIG_PATH:-${agent_home}/.mcp.json}"
+  cat > "$mcp_path" <<AIYOLO_MCP_JSON
+{
+  "mcpServers": {
+    "aiyolo-browser": {
+      "type": "http",
+      "url": "${mcp_url}",
+      "headers": {
+        "Authorization": "Bearer ${mcp_token}"
+      }
+    }
+  }
+}
+AIYOLO_MCP_JSON
+  chown "$agent_user:$agent_user" "$mcp_path"
+  chmod 0644 "$mcp_path"
+fi
