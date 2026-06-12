@@ -721,6 +721,7 @@
     return {
       sidebarCollapsed: sidebarPreference == null ? true : sidebarPreference,
       editorOpen: ownProperty.call(parsed, "editorOpen") ? parsed.editorOpen === true : false,
+      browserOpen: parsed.browserOpen === true,
       chatOpen: !ownProperty.call(parsed, "chatOpen") || parsed.chatOpen !== false,
       sidebarView: parsed.sidebarView === "sessions" ? "sessions" : "files",
       sidebarWidth: normalizeSidebarWidth(parsed.sidebarWidth),
@@ -794,7 +795,16 @@
   }
 
   function workspaceEditorVisible() {
-    return layoutState.editorOpen && workspaceActiveFilePath !== "";
+    return layoutState.editorOpen && (layoutState.browserOpen || workspaceActiveFilePath !== "");
+  }
+
+  function setBrowserOpen(form, open) {
+    layoutState.browserOpen = Boolean(open);
+    if (layoutState.browserOpen) {
+      layoutState.editorOpen = true;
+    }
+    applyLayout(form, true);
+    renderWorkspaceEditor(form);
   }
 
   function ensureVisiblePane() {
@@ -1467,6 +1477,100 @@
     });
   }
 
+  const workspaceDirectoryExpandConfig = {
+    openPaths: workspaceOpenPaths,
+    treeCache: workspaceTreeCache,
+    loadTree: (form, path, force) => loadWorkspaceTree(form, path, force),
+    writeState: writeWorkspaceOpenState,
+    renderTree: renderWorkspaceTree,
+  };
+
+  const attachmentDirectoryExpandConfig = {
+    openPaths: attachmentOpenPaths,
+    treeCache: attachmentTreeCache,
+    loadTree: (form, path, force) => loadAttachmentTree(form, path, force),
+    writeState: null,
+    renderTree: renderAttachmentTree,
+  };
+
+  function singleChildDirectoryPath(entries) {
+    if (!Array.isArray(entries) || entries.length !== 1) {
+      return null;
+    }
+    const entry = entries[0];
+    if (!entry || entry.type !== "directory") {
+      return null;
+    }
+    const path = String(entry.path || "").trim();
+    return path === "" ? null : path;
+  }
+
+  async function expandSingleChildDirectoryChain(form, startPath, config) {
+    if (!(form instanceof HTMLFormElement) || !config) {
+      return;
+    }
+    const { openPaths, treeCache, loadTree, writeState, renderTree } = config;
+    if (!(openPaths instanceof Set) || !(treeCache instanceof Map) || typeof loadTree !== "function" || typeof renderTree !== "function") {
+      return;
+    }
+    let currentPath = String(startPath || "").trim();
+    for (let depth = 0; depth < 64; depth += 1) {
+      if (!openPaths.has(currentPath)) {
+        break;
+      }
+      const entries = treeCache.get(currentPath);
+      if (!Array.isArray(entries)) {
+        break;
+      }
+      const childPath = singleChildDirectoryPath(entries);
+      if (!childPath) {
+        break;
+      }
+      if (!openPaths.has(childPath)) {
+        openPaths.add(childPath);
+        if (typeof writeState === "function") {
+          writeState(form);
+        }
+      }
+      renderTree(form);
+      if (!treeCache.has(childPath)) {
+        const loaded = await loadTree(form, childPath, false);
+        if (!Array.isArray(loaded)) {
+          break;
+        }
+      }
+      currentPath = childPath;
+    }
+  }
+
+  function expandWorkspaceDirectory(form, path) {
+    const normalizedPath = String(path || "").trim();
+    if (!(form instanceof HTMLFormElement) || normalizedPath === "") {
+      return;
+    }
+    if (!workspaceTreeCache.has(normalizedPath)) {
+      void loadWorkspaceTree(form, normalizedPath, false).then(() => {
+        void expandSingleChildDirectoryChain(form, normalizedPath, workspaceDirectoryExpandConfig);
+      });
+      return;
+    }
+    void expandSingleChildDirectoryChain(form, normalizedPath, workspaceDirectoryExpandConfig);
+  }
+
+  function expandAttachmentDirectory(form, path) {
+    const normalizedPath = String(path || "").trim();
+    if (!(form instanceof HTMLFormElement) || normalizedPath === "") {
+      return;
+    }
+    if (!attachmentTreeCache.has(normalizedPath)) {
+      void loadAttachmentTree(form, normalizedPath, false).then(() => {
+        void expandSingleChildDirectoryChain(form, normalizedPath, attachmentDirectoryExpandConfig);
+      });
+      return;
+    }
+    void expandSingleChildDirectoryChain(form, normalizedPath, attachmentDirectoryExpandConfig);
+  }
+
   function renderWorkspacePlaceholder(host, message) {
     if (!(host instanceof HTMLElement)) {
       return;
@@ -1996,6 +2100,17 @@
     };
     const environment = currentSelectedEnvironment(form);
     const imagePreviewActive = workspaceEditorIsImage() && workspaceEditorPreviewURL !== "";
+    if (layoutState.browserOpen) {
+      setEditorMode("browser");
+      setEditorChrome(t("容器浏览器", "Container browser"), "", false);
+      statusNode.textContent = "";
+      statusNode.classList.remove("is-error");
+      syncWorkspaceEditorSurface(input, previewHost, previewImage, { mode: "text", value: "", disabled: true });
+      if (saveButton instanceof HTMLButtonElement) {
+        saveButton.disabled = true;
+      }
+      return;
+    }
     if (!isCloudAgentEnvironment(environment) && !imagePreviewActive) {
       setEditorMode("empty");
       setEditorChrome(
@@ -3282,8 +3397,8 @@
       } else {
         workspaceOpenPaths.add(info.path);
         writeWorkspaceOpenState(form);
-        void loadWorkspaceTree(form, info.path, false);
         renderWorkspaceTree(form);
+        expandWorkspaceDirectory(form, info.path);
       }
     }, { shortcut: "Ctrl+Enter" });
     addWorkspaceContextMenuButton(menu, t("打开方式...", "Open With..."), () => void openWorkspaceExternal(form, info), { disabled: info.type !== "file" });
@@ -3545,9 +3660,7 @@
         }
         attachmentOpenPaths.add(path);
         renderAttachmentTree(form);
-        if (!attachmentTreeCache.has(path)) {
-          void loadAttachmentTree(form, path, false);
-        }
+        expandAttachmentDirectory(form, path);
         return;
       }
       case "open-attachment-file": {
@@ -3568,9 +3681,7 @@
         workspaceOpenPaths.add(path);
         writeWorkspaceOpenState(form);
         renderWorkspaceTree(form);
-        if (!workspaceTreeCache.has(path)) {
-          void loadWorkspaceTree(form, path, false);
-        }
+        expandWorkspaceDirectory(form, path);
         return;
       }
       case "open-workspace-file": {
@@ -3816,8 +3927,8 @@
         } else {
           workspaceOpenPaths.add(info.path);
           writeWorkspaceOpenState(form);
-          void loadWorkspaceTree(form, info.path, false);
           renderWorkspaceTree(form);
+          expandWorkspaceDirectory(form, info.path);
         }
         return;
       }
@@ -3975,7 +4086,27 @@
 
   window.addEventListener("aiyolo:chat-state", () => {
     syncWorkspaceSurface(currentForm());
+    restoreBrowserFromLayout(currentForm());
   });
 
+  function restoreBrowserFromLayout(form) {
+    if (!(form instanceof HTMLFormElement) || !layoutState.browserOpen) {
+      return;
+    }
+    if (typeof window.AIYoloChatBrowser?.open !== "function") {
+      return;
+    }
+    if (window.AIYoloChatBrowser.isOpen?.()) {
+      return;
+    }
+    void window.AIYoloChatBrowser.open(form);
+  }
+
+  window.AIYoloChatWorkspace = {
+    setBrowserOpen,
+    isBrowserOpen: () => layoutState.browserOpen,
+  };
+
   syncWorkspaceSurface(currentForm(), { force: true });
+  restoreBrowserFromLayout(currentForm());
 })();

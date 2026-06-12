@@ -248,7 +248,7 @@ func normalizeJobID(value string) string {
 	return builder.String()
 }
 
-func buildCloudAgentCodexASSJobEnv(apiKey string) map[string]string {
+func buildCloudAgentCodexASSJobEnv(apiKey string, options CloudAgentCodexOptions) map[string]string {
 	env := map[string]string{
 		"HOME":              defaultCloudAgentHome,
 		"USER":              defaultCloudAgentUser,
@@ -265,16 +265,27 @@ func buildCloudAgentCodexASSJobEnv(apiKey string) map[string]string {
 		env["OPENAI_API_KEY"] = apiKey
 		env["ANTHROPIC_API_KEY"] = apiKey
 	}
+	if url := strings.TrimSpace(options.BrowserMCPURL); url != "" {
+		env["AIYOLO_BROWSER_MCP_URL"] = url
+	}
+	if token := strings.TrimSpace(options.BrowserMCPToken); token != "" {
+		env["AIYOLO_BROWSER_MCP_TOKEN"] = token
+	}
 	return env
 }
 
 func buildCloudAgentCodexASSScript(options CloudAgentCodexOptions) string {
+	mcpConfigShell := buildCloudAgentBrowserMCPConfigShell(CloudAgentBrowserMCPConfig{
+		URL:   options.BrowserMCPURL,
+		Token: options.BrowserMCPToken,
+	})
 	return fmt.Sprintf(`set -euo pipefail
 thread_id=%s
 prompt=%s
 initial_prompt=%s
 model=%s
 mkdir -p "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+%s
 prompt_to_send="$initial_prompt"
 cmd=(claude -p --output-format stream-json --verbose --dangerously-skip-permissions)
 if [[ -n "$model" ]]; then
@@ -289,5 +300,5 @@ if [[ -n "$thread_id" ]]; then
 else
 	"${cmd[@]}" "$prompt_to_send"
 fi
-`, shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model))
+`, shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model), mcpConfigShell)
 }

@@ -818,14 +818,69 @@
     }
   };
 
+  const selectionNodeWithin = (element, node) => {
+    if (!(element instanceof HTMLElement) || !node) {
+      return false;
+    }
+    let current = node;
+    while (current) {
+      if (current === element) {
+        return true;
+      }
+      current = current.parentNode;
+    }
+    return false;
+  };
+
+  const selectionRangeIntersectsElement = (element, range) => {
+    if (!(element instanceof HTMLElement) || !range) {
+      return false;
+    }
+    const elementRange = document.createRange();
+    elementRange.selectNodeContents(element);
+    return range.compareBoundaryPoints(Range.END_TO_START, elementRange) < 0
+      && range.compareBoundaryPoints(Range.START_TO_END, elementRange) > 0;
+  };
+
+  const getSelectedPlainTextWithin = (element) => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      return "";
+    }
+    const range = selection.getRangeAt(0);
+    const intersects = selectionRangeIntersectsElement(element, range)
+      || selectionNodeWithin(element, selection.anchorNode)
+      || selectionNodeWithin(element, selection.focusNode);
+    if (!intersects) {
+      return "";
+    }
+    const selected = String(selection.toString() || "");
+    if (selected.length > 0) {
+      return selected;
+    }
+    const fragment = range.cloneContents();
+    const sandbox = document.createElement("div");
+    sandbox.appendChild(fragment);
+    return String(sandbox.textContent || "");
+  };
+
   const attachMarkdownCopyHandler = (element) => {
     if (!(element instanceof HTMLElement) || element.dataset.chatMarkdownCopyBound === "true") {
       return;
     }
     element.dataset.chatMarkdownCopyBound = "true";
     element.addEventListener("copy", (event) => {
+      if (!(event.clipboardData instanceof DataTransfer)) {
+        return;
+      }
+      const selectedText = getSelectedPlainTextWithin(element);
+      if (selectedText.length > 0) {
+        event.preventDefault();
+        event.clipboardData.setData("text/plain", selectedText);
+        return;
+      }
       const markdown = readMarkdownSource(element);
-      if (markdown === "" || !(event.clipboardData instanceof DataTransfer)) {
+      if (markdown === "") {
         return;
       }
       event.preventDefault();
@@ -2912,6 +2967,12 @@
       const dockVisible = !isShellDockHidden(form);
       activitybarTerminalButton.classList.toggle("is-active", dockVisible);
     }
+    if (typeof window.AIYoloChatBrowser?.sync === "function") {
+      window.AIYoloChatBrowser.sync(form);
+    }
+    if (typeof window.AIYoloChatBrowser?.syncMCP === "function") {
+      window.AIYoloChatBrowser.syncMCP(form);
+    }
     const workdirGroupNode = workdirGroup(form);
     if (workdirGroupNode instanceof HTMLElement) {
       const showWorkdir = isCloudAgentEnvironment(currentSelectedEnvironment(form));
@@ -3010,9 +3071,12 @@
     const attachments = Array.isArray(message.attachments)
       ? message.attachments.map(normalizeAttachment).filter(Boolean)
       : [];
+    const operations = Array.isArray(message.operations)
+      ? message.operations.map(normalizeOperation).filter(Boolean)
+      : [];
     const content = String(message.content || "").trim();
     const reasoning = String(message.reasoning || "").trim();
-    if (!content && !reasoning && attachments.length === 0) {
+    if (!content && !reasoning && attachments.length === 0 && operations.length === 0) {
       return null;
     }
     return {
@@ -3021,7 +3085,28 @@
       label: String(message.label || "").trim() || roleLabel(role),
       content,
       reasoning,
+      operations,
       attachments,
+    };
+  };
+
+  const normalizeOperation = (operation) => {
+    if (!operation || typeof operation !== "object") {
+      return null;
+    }
+    const id = String(operation.id || "").trim();
+    const name = String(operation.name || "").trim();
+    if (id === "" && name === "") {
+      return null;
+    }
+    return {
+      id: id || `${name}-${makeID("op")}`,
+      name: name || "tool",
+      status: String(operation.status || "started").trim().toLowerCase(),
+      detail: String(operation.detail || "").trim(),
+      category: String(operation.category || "tool").trim().toLowerCase(),
+      url: String(operation.url || "").trim(),
+      screenshotUrl: String(operation.screenshotUrl || "").trim(),
     };
   };
 
@@ -3408,7 +3493,7 @@
     return card;
   };
 
-  const buildReasoningPanel = (article, bubble, reasoning, open = false) => {
+  const buildReasoningPanel = (article, bubble, reasoning, open = false, anchor = null) => {
     const details = document.createElement("details");
     details.className = "chat-reasoning";
 
@@ -3439,7 +3524,7 @@
       if (mounted || !(bubble instanceof HTMLElement)) {
         return;
       }
-      bubble.insertBefore(details, bubble.firstChild || null);
+      bubble.insertBefore(details, anchor instanceof Node ? anchor : bubble.firstChild);
       mounted = true;
     };
 
@@ -3474,7 +3559,182 @@
     return { details, copy, setReasoning };
   };
 
-  const buildMessageNode = (role, label, content, streamingLabel, attachments = [], reasoning = "") => {
+  const operationCategoryIcon = (category) => {
+    switch (String(category || "").trim().toLowerCase()) {
+      case "browser":
+        return "globe";
+      case "shell":
+        return "terminal";
+      case "file":
+        return "file-text";
+      case "search":
+        return "search";
+      default:
+        return "wrench";
+    }
+  };
+
+  const operationStatusLabel = (status) => {
+    switch (String(status || "").trim().toLowerCase()) {
+      case "started":
+        return t("运行中", "Running");
+      case "completed":
+        return t("完成", "Done");
+      case "failed":
+        return t("失败", "Failed");
+      default:
+        return String(status || "").trim();
+    }
+  };
+
+  const buildOperationsPanel = (article, bubble, anchor = null) => {
+    const details = document.createElement("details");
+    details.className = "chat-operations";
+
+    const summary = document.createElement("summary");
+    summary.className = "chat-operations-summary";
+    const summaryLabel = document.createElement("span");
+    summaryLabel.className = "chat-operations-summary-label";
+    summaryLabel.textContent = t("实时操作", "Live operations");
+    const summaryIcon = document.createElement("span");
+    summaryIcon.className = "chat-operations-summary-icon";
+    summaryIcon.setAttribute("aria-hidden", "true");
+    const summaryIconGlyph = document.createElement("i");
+    summaryIconGlyph.className = "chat-control-icon";
+    summaryIconGlyph.dataset.lucide = "chevron-down";
+    summaryIcon.appendChild(summaryIconGlyph);
+    summary.appendChild(summaryLabel);
+    summary.appendChild(summaryIcon);
+
+    const list = document.createElement("div");
+    list.className = "chat-operations-list";
+    details.appendChild(summary);
+    details.appendChild(list);
+
+    let mounted = false;
+    const operationNodes = new Map();
+
+    const mount = () => {
+      if (mounted || !(bubble instanceof HTMLElement)) {
+        return;
+      }
+      bubble.insertBefore(details, anchor instanceof Node ? anchor : bubble.firstChild);
+      mounted = true;
+    };
+
+    const unmount = () => {
+      if (!mounted) {
+        return;
+      }
+      details.remove();
+      mounted = false;
+      operationNodes.clear();
+    };
+
+    const renderOperationNode = (operation) => {
+      const id = String(operation?.id || "").trim() || `${String(operation?.name || "tool")}-${operationNodes.size}`;
+      let item = operationNodes.get(id);
+      if (!(item instanceof HTMLElement)) {
+        item = document.createElement("article");
+        item.className = "chat-operation-item";
+        item.dataset.chatOperationId = id;
+        const iconWrap = document.createElement("span");
+        iconWrap.className = "chat-operation-icon";
+        const icon = document.createElement("i");
+        icon.className = "chat-control-icon";
+        iconWrap.appendChild(icon);
+        const body = document.createElement("div");
+        body.className = "chat-operation-body";
+        const name = document.createElement("div");
+        name.className = "chat-operation-name";
+        const detail = document.createElement("div");
+        detail.className = "chat-operation-detail";
+        body.appendChild(name);
+        body.appendChild(detail);
+        const status = document.createElement("span");
+        status.className = "chat-operation-status";
+        item.append(iconWrap, body, status);
+        operationNodes.set(id, item);
+      }
+
+      const category = String(operation?.category || "tool").trim().toLowerCase();
+      item.classList.toggle("is-browser", category === "browser");
+      const icon = item.querySelector(".chat-operation-icon .chat-control-icon");
+      if (icon instanceof HTMLElement) {
+        icon.dataset.lucide = operationCategoryIcon(category);
+      }
+      const name = item.querySelector(".chat-operation-name");
+      if (name instanceof HTMLElement) {
+        name.textContent = String(operation?.name || "tool");
+      }
+      const detail = item.querySelector(".chat-operation-detail");
+      if (detail instanceof HTMLElement) {
+        const detailText = String(operation?.detail || operation?.url || "").trim();
+        detail.hidden = detailText === "";
+        detail.textContent = detailText;
+      }
+      let screenshot = item.querySelector(".chat-operation-screenshot");
+      const screenshotURL = String(operation?.screenshotUrl || "").trim();
+      if (screenshotURL !== "") {
+        if (!(screenshot instanceof HTMLImageElement)) {
+          screenshot = document.createElement("img");
+          screenshot.className = "chat-operation-screenshot";
+          screenshot.loading = "lazy";
+          screenshot.alt = t("浏览器截图", "Browser screenshot");
+          item.querySelector(".chat-operation-body")?.appendChild(screenshot);
+        }
+        screenshot.src = screenshotURL;
+        screenshot.hidden = false;
+      } else if (screenshot instanceof HTMLImageElement) {
+        screenshot.hidden = true;
+        screenshot.removeAttribute("src");
+      }
+      const status = item.querySelector(".chat-operation-status");
+      if (status instanceof HTMLElement) {
+        const statusValue = String(operation?.status || "started").trim().toLowerCase();
+        status.className = `chat-operation-status is-${statusValue}`;
+        status.textContent = operationStatusLabel(statusValue);
+      }
+      return item;
+    };
+
+    const setOperations = (nextOperations = [], keepOpen = details.open) => {
+      const operations = Array.isArray(nextOperations) ? nextOperations.filter(Boolean) : [];
+      if (operations.length === 0) {
+        article.classList.remove("is-operations-stream");
+        details.hidden = true;
+        list.replaceChildren();
+        unmount();
+        return;
+      }
+      mount();
+      details.hidden = false;
+      article.classList.add("is-operations-stream");
+      const seen = new Set();
+      operations.forEach((operation) => {
+        const node = renderOperationNode(operation);
+        seen.add(node.dataset.chatOperationId || "");
+        if (!node.isConnected) {
+          list.appendChild(node);
+        }
+      });
+      list.querySelectorAll("[data-chat-operation-id]").forEach((node) => {
+        if (!(node instanceof HTMLElement)) {
+          return;
+        }
+        if (!seen.has(node.dataset.chatOperationId || "")) {
+          node.remove();
+          operationNodes.delete(node.dataset.chatOperationId || "");
+        }
+      });
+      details.open = keepOpen || operations.some((operation) => String(operation?.status || "").trim().toLowerCase() === "started");
+      syncLucideIcons();
+    };
+
+    return { details, list, setOperations };
+  };
+
+  const buildMessageNode = (role, label, content, streamingLabel, attachments = [], reasoning = "", operations = []) => {
     const article = document.createElement("article");
     const roleClass = role === "user" ? "is-user" : role === "system" ? "is-system" : "is-assistant";
     article.className = `chat-message ${roleClass}`;
@@ -3484,8 +3744,6 @@
 
     const bubble = document.createElement("div");
     bubble.className = "chat-bubble";
-
-    const reasoningPanel = buildReasoningPanel(article, bubble, reasoning, false);
 
     const copy = document.createElement("div");
     copy.className = "chat-message-copy";
@@ -3504,6 +3762,9 @@
         attachMarkdownCopyHandler(copy);
       }
     };
+
+    const operationsPanel = buildOperationsPanel(article, bubble, copy);
+    const reasoningPanel = buildReasoningPanel(article, bubble, reasoning, false, copy);
     setContent(content);
     bubble.appendChild(copy);
 
@@ -3585,12 +3846,14 @@
     };
 
     article.appendChild(bubble);
+    operationsPanel.setOperations(operations, operations.some((operation) => String(operation?.status || "").trim().toLowerCase() === "started"));
     return {
       article,
       copy,
       reasoningCopy: reasoningPanel.copy,
       setContent,
       setReasoning: reasoningPanel.setReasoning,
+      setOperations: operationsPanel.setOperations,
       setStreamingStatus,
       setActions,
     };
@@ -3638,7 +3901,7 @@
       return;
     }
     messages.forEach((message) => {
-      const node = buildMessageNode(message.role, message.label || roleLabel(message.role), message.content, "", message.attachments || [], message.reasoning || "");
+      const node = buildMessageNode(message.role, message.label || roleLabel(message.role), message.content, "", message.attachments || [], message.reasoning || "", message.operations || []);
       thread.appendChild(node.article);
     });
     syncLucideIcons();
@@ -3948,6 +4211,7 @@
         label: roleLabel("assistant"),
         content: "",
         reasoning: "",
+        operations: [],
         attachments: [],
       };
     }
@@ -4938,6 +5202,12 @@
           assistantMessage.setReasoning(assistantHistoryMessage.reasoning, true);
         });
       }
+      if (Array.isArray(message.operations) && message.operations.length > 0) {
+        assistantHistoryMessage.operations = message.operations.map(normalizeOperation).filter(Boolean);
+        updateStreamAssistantUI(state, (assistantMessage) => {
+          assistantMessage.setOperations(assistantHistoryMessage.operations, true);
+        });
+      }
     };
 
     const hasStreamProgress = () => Boolean(
@@ -4984,6 +5254,47 @@
           assistantMessage.setStreamingStatus(t("正在思考", "Reasoning"), "reasoning");
           assistantMessage.setActions([]);
         });
+        syncCurrentHistory();
+        return;
+      }
+      if (event.type === "operation") {
+        const operation = event.operation && typeof event.operation === "object" ? event.operation : null;
+        if (!operation) {
+          return;
+        }
+        if (!Array.isArray(assistantHistoryMessage.operations)) {
+          assistantHistoryMessage.operations = [];
+        }
+        const operationID = String(operation.id || "").trim();
+        const status = String(operation.status || "started").trim().toLowerCase();
+        const existingIndex = assistantHistoryMessage.operations.findIndex((item) => String(item?.id || "").trim() === operationID);
+        const normalizedOperation = normalizeOperation(operation);
+        if (!normalizedOperation) {
+          return;
+        }
+        if (existingIndex >= 0) {
+          assistantHistoryMessage.operations[existingIndex] = {
+            ...assistantHistoryMessage.operations[existingIndex],
+            ...normalizedOperation,
+          };
+        } else {
+          assistantHistoryMessage.operations.push(normalizedOperation);
+        }
+        updateStreamAssistantUI(state, (assistantMessage) => {
+          assistantMessage.setOperations(assistantHistoryMessage.operations, true);
+          assistantMessage.setStreamingStatus(
+            status === "started" ? t("正在执行工具", "Running tools") : t("正在处理结果", "Processing tool results"),
+            "reasoning",
+          );
+          assistantMessage.setActions([]);
+        });
+        window.dispatchEvent(new CustomEvent("aiyolo:chat-operation", {
+          detail: {
+            operation,
+            sessionId: state.sessionID,
+            form: state.ui?.form || currentForm(),
+          },
+        }));
         syncCurrentHistory();
         return;
       }
@@ -5189,6 +5500,7 @@
       label: roleLabel("assistant"),
       content: "",
       reasoning: "",
+      operations: [],
       attachments: [],
     };
 

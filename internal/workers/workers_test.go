@@ -26,6 +26,34 @@ func TestRenderProxyEnvIncludesAuthMaterial(t *testing.T) {
 	}
 }
 
+func TestRenderWorkerInstallProxyEnvUsesHTTPOnlyOnWorkerHost(t *testing.T) {
+	env := RenderWorkerInstallProxyEnv(domain.ProxyProfile{
+		ID:       "worker-0-local",
+		Type:     domain.ProxyTypeHTTP,
+		Endpoint: "http://127.0.0.1:10809",
+	})
+	if env["HTTP_PROXY"] != "http://127.0.0.1:10809" {
+		t.Fatalf("unexpected http proxy env: %q", env["HTTP_PROXY"])
+	}
+	if env["ALL_PROXY"] != "" {
+		t.Fatalf("worker install proxy should not set ALL_PROXY: %q", env["ALL_PROXY"])
+	}
+}
+
+func TestRenderCloudAgentBuildProxyEnvRewritesLoopbackForDockerBuild(t *testing.T) {
+	env := RenderCloudAgentBuildProxyEnv(domain.ProxyProfile{
+		ID:       "worker-0-local",
+		Type:     domain.ProxyTypeHTTP,
+		Endpoint: "http://127.0.0.1:10809",
+	})
+	if env["HTTP_PROXY"] != "http://host.docker.internal:10809" {
+		t.Fatalf("unexpected docker build http proxy env: %q", env["HTTP_PROXY"])
+	}
+	if env["ALL_PROXY"] != "" {
+		t.Fatalf("docker build proxy should not set ALL_PROXY: %q", env["ALL_PROXY"])
+	}
+}
+
 func TestBuildBootstrapPlanMentionsSelectedDisks(t *testing.T) {
 	plan := BuildBootstrapPlan(
 		domain.WorkerServer{ID: "worker-1", SSHHost: "10.0.0.5", SSHUsername: "ubuntu", SSHKeyID: "key-1"},
@@ -46,9 +74,6 @@ func TestBuildBootstrapPlanMentionsSelectedDisks(t *testing.T) {
 	}
 	if !strings.Contains(plan.VarsJSON, `"worker_runtime_service_name": "aiyolo-workerd"`) {
 		t.Fatalf("bootstrap vars missing runtime service name: %s", plan.VarsJSON)
-	}
-	if !strings.Contains(plan.Playbook, "Configure Docker proxy environment") {
-		t.Fatalf("bootstrap playbook missing docker proxy task: %s", plan.Playbook)
 	}
 	if !strings.Contains(plan.Playbook, "Initialize and mount declared worker data disks") || !strings.Contains(plan.Playbook, "Persist Docker daemon data root") || !strings.Contains(plan.Playbook, "Ensure worker runtime service is enabled and restarted") {
 		t.Fatalf("bootstrap playbook missing storage or runtime tasks: %s", plan.Playbook)
@@ -565,6 +590,30 @@ func TestBuildCloudAgentCodexRemoteScriptIncludesResumeAndFlags(t *testing.T) {
 	}
 }
 
+func TestBuildCloudAgentBrowserMCPConfigShellWritesMCPJSON(t *testing.T) {
+	shell := BuildCloudAgentBrowserMCPConfigShell(CloudAgentBrowserMCPConfig{
+		URL:   "https://aiyolo.example.com/console/chat/browser/mcp?session=abc",
+		Token: "aiyolo_browser_mcp:user:abc:999:signature",
+	})
+	if shell == "" {
+		t.Fatal("expected non-empty shell snippet")
+	}
+	for _, expected := range []string{
+		`'/workspace/.mcp.json'`,
+		`"aiyolo-browser"`,
+		`"type": "http"`,
+		`https://aiyolo.example.com/console/chat/browser/mcp?session=abc`,
+		`Bearer aiyolo_browser_mcp:user:abc:999:signature`,
+	} {
+		if !strings.Contains(shell, expected) {
+			t.Fatalf("shell missing %q: %s", expected, shell)
+		}
+	}
+	if BuildCloudAgentBrowserMCPConfigShell(CloudAgentBrowserMCPConfig{}) != "" {
+		t.Fatal("expected empty shell when MCP config is incomplete")
+	}
+}
+
 func TestBuildCloudAgentShellCommandRunsAsNonRootUser(t *testing.T) {
 	script := buildCloudAgentShellCommand("aiyolo-cloud-agent-user", "/workspace", "agent-session-1", "gpt-5.4", "aiyolo_live_current")
 
@@ -744,5 +793,71 @@ func TestBuildCloudAgentRemoteCommandResolvesUbuntuBaseWithoutPatchVersion(t *te
 	}
 	if !strings.Contains(script, `rootfs_index_url + "/SHA256SUMS"`) {
 		t.Fatalf("remote script should fall back to SHA256SUMS when the index page does not list files: %s", script)
+	}
+}
+
+func TestBuildCloudAgentRemoteCommandBuildImageOnly(t *testing.T) {
+	script := buildCloudAgentRemoteCommand(`{"build_image_only":true,"image":"aiyolo/local-cloud-agent:ubuntu-26.04-v4"}`)
+
+	if !strings.Contains(script, `if payload.get("build_image_only"):`) {
+		t.Fatalf("remote script should support build_image_only mode: %s", script)
+	}
+	if !strings.Contains(script, `"reused": reused`) {
+		t.Fatalf("remote script should report whether the image was reused: %s", script)
+	}
+}
+
+func TestNormalizeCloudAgentImageBuildOptionsDefaults(t *testing.T) {
+	options, err := normalizeCloudAgentImageBuildOptions(CloudAgentImageBuildOptions{
+		ASSDownloadURL: "https://files.example.com/linux-amd64/aiyolo-ass",
+		ASSSHA256URL:   "https://files.example.com/linux-amd64/aiyolo-ass.sha256",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Image != defaultCloudAgentImage {
+		t.Fatalf("image=%q", options.Image)
+	}
+	if options.UbuntuSeries != defaultCloudAgentUbuntuSeries {
+		t.Fatalf("ubuntu series=%q", options.UbuntuSeries)
+	}
+}
+
+func TestCloudAgentBuildRevisionFromImageBuildMatchesEnsureOptions(t *testing.T) {
+	imageOptions := CloudAgentImageBuildOptions{
+		UbuntuRelease:  defaultCloudAgentUbuntuRelease,
+		UbuntuSeries:   defaultCloudAgentUbuntuSeries,
+		UbuntuMirror:   defaultCloudAgentUbuntuMirror,
+		ChromeDEBURL:   defaultCloudAgentChromeDEBURL,
+		RootFSIndexURL: defaultCloudAgentRootFSIndexURL,
+		ASSDownloadURL: "https://files.example.com/linux-amd64/aiyolo-ass",
+	}
+	startOptions := CloudAgentStartOptions{
+		UserID:         "user@example.com",
+		APIBaseURL:     "https://aiyolo.quant67.com/v1",
+		APIKey:         "secret",
+		ASSDownloadURL: imageOptions.ASSDownloadURL,
+		ASSSHA256URL:   "https://files.example.com/linux-amd64/aiyolo-ass.sha256",
+		UbuntuRelease:  imageOptions.UbuntuRelease,
+		UbuntuSeries:   imageOptions.UbuntuSeries,
+		UbuntuMirror:   imageOptions.UbuntuMirror,
+		ChromeDEBURL:   imageOptions.ChromeDEBURL,
+		RootFSIndexURL: imageOptions.RootFSIndexURL,
+	}
+	assSHA256 := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	imageRevision := cloudAgentBuildRevisionFromImageBuild(imageOptions, assSHA256)
+	startRevision := cloudAgentBuildRevision(startOptions, cloudAgentBuildContextFiles, assSHA256)
+	if imageRevision != startRevision {
+		t.Fatalf("image revision=%q start revision=%q", imageRevision, startRevision)
+	}
+}
+
+func TestParseCloudAgentImageBuildResponse(t *testing.T) {
+	result, err := parseCloudAgentImageBuildResponse("AIYOLO_PROGRESS\t{\"type\":\"phase\",\"phase\":\"ready\"}\n{\"worker_id\":\"worker-0\",\"image\":\"aiyolo/local-cloud-agent:ubuntu-26.04-v4\",\"ass_sha256\":\"abc\",\"build_revision\":\"sha256:def\",\"reused\":true}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.WorkerID != "worker-0" || !result.Reused || result.BuildRevision != "sha256:def" {
+		t.Fatalf("result=%#v", result)
 	}
 }

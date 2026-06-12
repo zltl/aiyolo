@@ -44,19 +44,21 @@ type consoleChatTarget struct {
 }
 
 type consoleChatStreamEvent struct {
-	Type      string                 `json:"type"`
-	Delta     string                 `json:"delta,omitempty"`
-	Reasoning string                 `json:"reasoning,omitempty"`
-	HTML      string                 `json:"html,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-	Message   *consoleChatAPIMessage `json:"message,omitempty"`
-	Result    *consoleChatAPIResult  `json:"result,omitempty"`
+	Type      string                      `json:"type"`
+	Delta     string                      `json:"delta,omitempty"`
+	Reasoning string                      `json:"reasoning,omitempty"`
+	Operation *consoleChatStreamOperation `json:"operation,omitempty"`
+	HTML      string                      `json:"html,omitempty"`
+	Error     string                      `json:"error,omitempty"`
+	Message   *consoleChatAPIMessage      `json:"message,omitempty"`
+	Result    *consoleChatAPIResult       `json:"result,omitempty"`
 }
 
 type consoleChatAPIMessage struct {
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	Reasoning string `json:"reasoning,omitempty"`
+	Role       string                       `json:"role"`
+	Content    string                       `json:"content"`
+	Reasoning  string                       `json:"reasoning,omitempty"`
+	Operations []consoleChatStreamOperation `json:"operations,omitempty"`
 }
 
 type consoleChatAPIResult struct {

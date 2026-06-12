@@ -9,7 +9,9 @@ VERSION ?= v$(shell date +%Y%m%d-%H%M%S)
 CLOUD_AGENT_USER ?= aiyolo
 CLOUD_AGENT_IMAGE ?= aiyolo/local-cloud-agent:ubuntu-26.04-v4
 
-.PHONY: help fmt tidy test build build-aiyolo-windows build-ass-release build-release-artifacts ass-release publish-release-artifacts bootstrap-local-worker build-cloud-agent-image run-cloud-agent-local run clean
+WORKER_ID ?= worker-0
+
+.PHONY: help fmt tidy test build build-aiyolo-windows build-ass-release build-release-artifacts ass-release publish-release-artifacts bootstrap-local-worker build-cloud-agent-image build-cloud-agent-image-on-worker run-cloud-agent-local run clean
 
 help:
 	@printf '%s\n' \
@@ -25,6 +27,7 @@ help:
 	  '  make publish-release-artifacts Upload release artifacts (VERSION defaults to vYYYYMMDD-HHMMSS)' \
 	  '  make bootstrap-local-worker Bootstrap the current Ubuntu host as a local worker' \
 	  '  make build-cloud-agent-image Build the local Ubuntu 26.04 cloud-agent image with desktop/Chrome/DinD' \
+	  '  make build-cloud-agent-image-on-worker Build the cloud-agent image on WORKER_ID (default worker-0)' \
 	  '  make run-cloud-agent-local Launch a local cloud-agent container for CLOUD_AGENT_USER' \
 	  '  make run               Run gateway' \
 	  '  make clean             Remove build output'
@@ -75,6 +78,10 @@ bootstrap-local-worker:
 
 build-cloud-agent-image:
 	@./scripts/build-cloud-agent-image-ubuntu-26.04.sh
+
+build-cloud-agent-image-on-worker:
+	@printf 'Building cloud agent image on worker=%s\n' '$(WORKER_ID)'
+	@$(GO) run ./cmd/gateway --config $(CONFIG) build-cloud-agent-image-on-worker --worker $(WORKER_ID) --image $(CLOUD_AGENT_IMAGE)
 
 run-cloud-agent-local:
 	@AIYOLO_CLOUD_AGENT_USER_ID='$(CLOUD_AGENT_USER)' AIYOLO_CLOUD_AGENT_IMAGE='$(CLOUD_AGENT_IMAGE)' ./scripts/run-cloud-agent-local.sh

@@ -14,6 +14,15 @@ import urllib.request
 payload = json.loads(__PAYLOAD_JSON__)
 
 
+def build_proxy_env():
+    env = {}
+    for key, value in (payload.get("proxy_env") or {}).items():
+        text = str(value or "").strip()
+        if text:
+            env[key] = text
+    return env
+
+
 def emit_progress(phase, message, **extra):
     event = {"type": "phase", "phase": phase, "message": message}
     event.update(extra)
@@ -190,7 +199,8 @@ def ensure_image(force_rebuild=False):
         return
     emit_progress("build_image", "Building cloud agent image with the latest aiyolo-ass")
     build_env = os.environ.copy()
-    for key, value in (payload.get("proxy_env") or {}).items():
+    proxy_env = build_proxy_env()
+    for key, value in proxy_env.items():
         build_env[key] = value
     temp_root = pathlib.Path(tempfile.mkdtemp(prefix="aiyolo-cloud-agent-build-"))
     try:
@@ -213,14 +223,19 @@ def ensure_image(force_rebuild=False):
             shutil.copyfileobj(response, handle)
         build_args = [
             "docker", "build", "--pull",
+            "--add-host", "host.docker.internal:host-gateway",
+        ]
+        if proxy_env:
+            emit_progress("build_image", "Using worker install proxy for overseas build downloads")
+        build_args.extend([
             "--build-arg", f"UBUNTU_RELEASE={payload['ubuntu_release']}",
             "--build-arg", f"APT_MIRROR={payload['ubuntu_mirror']}",
             "--build-arg", f"CHROME_DEB_URL={payload['chrome_deb_url']}",
             "--build-arg", f"AIYOLO_ASS_SHA256={payload.get('ass_sha256', '')}",
             "--build-arg", f"AIYOLO_CLOUD_AGENT_BUILD_REVISION={payload.get('build_revision', '')}",
-        ]
-        for key in sorted((payload.get("proxy_env") or {}).keys()):
-            build_args.extend(["--build-arg", f"{key}={payload['proxy_env'][key]}"])
+        ])
+        for key in sorted(proxy_env.keys()):
+            build_args.extend(["--build-arg", f"{key}={proxy_env[key]}"])
         build_args.extend(["-t", payload["image"], "-f", str(temp_root / "Dockerfile"), str(temp_root)])
         run_stream(build_args, env=build_env, phase="build_image")
     finally:
@@ -548,6 +563,23 @@ def ensure_container():
 
 if __name__ == "__main__":
     import time
+
+    if payload.get("build_image_only"):
+        reused = False
+        if not payload.get("force_rebuild") and image_ass_sha256_matches():
+            reused = True
+            emit_progress("reuse_image", "Cloud agent image already matches the published aiyolo-ass checksum")
+        else:
+            ensure_image(force_rebuild=bool(payload.get("force_rebuild")))
+        emit_progress("ready", "Cloud agent image is ready on worker", image=payload.get("image", ""), reused=reused)
+        print(json.dumps({
+            "worker_id": payload.get("worker_id", ""),
+            "image": payload.get("image", ""),
+            "ass_sha256": payload.get("ass_sha256", ""),
+            "build_revision": payload.get("build_revision", ""),
+            "reused": reused,
+        }, ensure_ascii=True, sort_keys=True))
+        raise SystemExit(0)
 
     emit_progress("prepare", "Preparing cloud agent workspace")
     ensure_dirs()

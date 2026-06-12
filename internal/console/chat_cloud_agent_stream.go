@@ -39,10 +39,13 @@ type consoleCloudAgentRun struct {
 	account      domain.CloudAgentAccount
 	cloudSession domain.CloudAgentSession
 	request      consoleCloudAgentChatRequest
+	consoleBaseURL string
+	browserMCPToken string
 
 	mu          sync.Mutex
 	content     string
 	reasoning   string
+	operations  []consoleChatStreamOperation
 	result      consoleChatResultView
 	eventError  string
 	lastError   string
@@ -118,6 +121,8 @@ func (run *consoleCloudAgentRun) execute() {
 		Attachments:                  cloneConsoleChatAttachments(run.request.Attachments),
 		ShellActiveTerminalID:        run.request.ShellActiveTerminalID,
 		ShellCurrentWorkingDirectory: run.request.ShellCurrentWorkingDirectory,
+		ConsoleBaseURL:               run.consoleBaseURL,
+		BrowserMCPToken:              run.browserMCPToken,
 		Stream:                       true,
 		OnDelta: func(delta string) error {
 			run.appendDelta(delta)
@@ -125,6 +130,10 @@ func (run *consoleCloudAgentRun) execute() {
 		},
 		OnReasoning: func(reasoning string) error {
 			run.appendReasoning(reasoning)
+			return nil
+		},
+		OnOperation: func(operation consoleChatStreamOperation) error {
+			run.appendOperation(operation)
 			return nil
 		},
 	})
@@ -154,6 +163,84 @@ func (run *consoleCloudAgentRun) appendReasoning(reasoning string) {
 	run.broadcast(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning})
 }
 
+func (run *consoleCloudAgentRun) appendOperation(operation consoleChatStreamOperation) {
+	if strings.TrimSpace(operation.ID) == "" && strings.TrimSpace(operation.Name) == "" {
+		return
+	}
+	run.mergeOperation(operation)
+	run.persistStreamingProgress()
+	run.broadcast(consoleChatStreamEvent{Type: "operation", Operation: &operation})
+	if strings.EqualFold(strings.TrimSpace(operation.Category), "browser") &&
+		strings.EqualFold(strings.TrimSpace(operation.Status), "completed") &&
+		strings.TrimSpace(operation.ScreenshotURL) == "" {
+		go run.captureBrowserOperationScreenshot(operation.ID)
+	}
+}
+
+func (run *consoleCloudAgentRun) mergeOperation(operation consoleChatStreamOperation) {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	index := -1
+	for i, existing := range run.operations {
+		if strings.TrimSpace(existing.ID) == strings.TrimSpace(operation.ID) {
+			index = i
+			break
+		}
+	}
+	if index >= 0 {
+		merged := run.operations[index]
+		if strings.TrimSpace(operation.Name) != "" {
+			merged.Name = operation.Name
+		}
+		if strings.TrimSpace(operation.Status) != "" {
+			merged.Status = operation.Status
+		}
+		if strings.TrimSpace(operation.Detail) != "" {
+			merged.Detail = operation.Detail
+		}
+		if strings.TrimSpace(operation.Category) != "" {
+			merged.Category = operation.Category
+		}
+		if strings.TrimSpace(operation.URL) != "" {
+			merged.URL = operation.URL
+		}
+		if strings.TrimSpace(operation.ScreenshotURL) != "" {
+			merged.ScreenshotURL = operation.ScreenshotURL
+		}
+		run.operations[index] = merged
+		return
+	}
+	run.operations = append(run.operations, operation)
+}
+
+func (run *consoleCloudAgentRun) captureBrowserOperationScreenshot(operationID string) {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return
+	}
+	screenshotURL, err := run.handler.captureBrowserScreenshotURL(context.Background(), run.worker, run.sshKey, run.userID)
+	if err != nil {
+		log.Printf("console cloud agent browser screenshot failed session_id=%s operation_id=%s err=%v", run.sessionID, operationID, err)
+		return
+	}
+	run.mu.Lock()
+	updated := false
+	for i, operation := range run.operations {
+		if strings.TrimSpace(operation.ID) != operationID {
+			continue
+		}
+		operation.ScreenshotURL = screenshotURL
+		run.operations[i] = operation
+		updated = true
+		run.broadcast(consoleChatStreamEvent{Type: "operation", Operation: &run.operations[i]})
+		break
+	}
+	run.mu.Unlock()
+	if updated {
+		run.persistStreamingProgress()
+	}
+}
+
 func (run *consoleCloudAgentRun) persistStreamingStart() error {
 	_, err := run.handler.persistConsoleChatSessionForUser(context.Background(), run.locale, run.userID, run.sessionID, run.publicName, run.systemPrompt, "", nil, cloneConsoleChatMessages(run.baseMessages), consoleChatSessionStatusStreaming, run.requestID, "", "")
 	return err
@@ -163,9 +250,10 @@ func (run *consoleCloudAgentRun) persistStreamingProgress() {
 	run.mu.Lock()
 	content := run.content
 	reasoning := run.reasoning
+	operations := cloneConsoleChatStreamOperations(run.operations)
 	responseID := run.result.ResponseID
 	run.mu.Unlock()
-	messages := consoleChatAppendAssistantProgress(run.locale, run.baseMessages, content, reasoning)
+	messages := consoleChatAppendAssistantProgress(run.locale, run.baseMessages, content, reasoning, operations)
 	if _, err := run.handler.persistConsoleChatSessionForUser(context.Background(), run.locale, run.userID, run.sessionID, run.publicName, run.systemPrompt, "", nil, messages, consoleChatSessionStatusStreaming, run.requestID, responseID, ""); err != nil {
 		log.Printf("console cloud agent stream progress persist failed session_id=%s err=%v", run.sessionID, err)
 	}
@@ -192,7 +280,7 @@ func (run *consoleCloudAgentRun) complete(execution consoleChatExecution, execut
 		if failureDetail == "" {
 			failureDetail = consoleText(run.locale, "Claude Code 执行失败。", "Claude Code execution failed.")
 		}
-		messages := consoleChatAppendResultMessage(run.locale, run.baseMessages, displayed)
+		messages := append(cloneConsoleChatMessages(run.baseMessages), buildConsoleChatMessageWithProgress(run.locale, "assistant", displayed.Output, displayed.Reasoning, run.snapshotOperations()))
 		status := consoleChatSessionStatusForError(displayed)
 		if _, err := run.handler.persistConsoleChatSessionForUser(context.Background(), run.locale, run.userID, run.sessionID, run.publicName, run.systemPrompt, "", nil, messages, status, run.requestID, displayed.ResponseID, failureDetail); err != nil {
 			log.Printf("console cloud agent stream failure persist failed session_id=%s err=%v", run.sessionID, err)
@@ -210,7 +298,7 @@ func (run *consoleCloudAgentRun) complete(execution consoleChatExecution, execut
 		return
 	}
 
-	messages := append(cloneConsoleChatMessages(run.baseMessages), buildConsoleChatMessageWithReasoning(run.locale, "assistant", displayed.Output, displayed.Reasoning))
+	messages := append(cloneConsoleChatMessages(run.baseMessages), buildConsoleChatMessageWithProgress(run.locale, "assistant", displayed.Output, displayed.Reasoning, run.snapshotOperations()))
 	if _, err := run.handler.persistConsoleChatSessionForUser(context.Background(), run.locale, run.userID, run.sessionID, run.publicName, run.systemPrompt, "", nil, messages, consoleChatSessionStatusCompleted, run.requestID, displayed.ResponseID, ""); err != nil {
 		log.Printf("console cloud agent stream completion persist failed session_id=%s err=%v", run.sessionID, err)
 	}
@@ -242,13 +330,14 @@ func (run *consoleCloudAgentRun) subscribe() (consoleCloudAgentRunSnapshot, <-ch
 		}
 		return snapshot, nil, func() {}
 	}
-	if strings.TrimSpace(run.content) != "" || strings.TrimSpace(run.reasoning) != "" {
+	if strings.TrimSpace(run.content) != "" || strings.TrimSpace(run.reasoning) != "" || len(run.operations) > 0 {
 		syncEvent := consoleChatStreamEvent{
 			Type: "sync",
 			Message: &consoleChatAPIMessage{
-				Role:      "assistant",
-				Content:   run.content,
-				Reasoning: run.reasoning,
+				Role:       "assistant",
+				Content:    run.content,
+				Reasoning:  run.reasoning,
+				Operations: cloneConsoleChatStreamOperations(run.operations),
 			},
 		}
 		snapshot.syncEvent = &syncEvent
@@ -288,21 +377,25 @@ func (handler *Handler) startConsoleCloudAgentRun(r *http.Request, state console
 	userID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
 	runKey := consoleCloudAgentRunKey(userID, state.Form.ClientSessionID)
 	run, started := handler.cloudAgentRuns.startOrGet(runKey, func() *consoleCloudAgentRun {
+		consoleBaseURL := consoleChatCloudAgentBaseURL(handler.codexPublicBaseURL(r), worker)
+		_, browserMCPToken := handler.consoleCloudAgentBrowserMCPCodexOptions(r.Context(), userID, consoleBaseURL, state.Form.ClientSessionID)
 		return &consoleCloudAgentRun{
-			handler:      handler,
-			registry:     handler.cloudAgentRuns,
-			key:          runKey,
-			locale:       locale,
-			userID:       userID,
-			sessionID:    state.Form.ClientSessionID,
-			publicName:   state.Form.PublicName,
-			systemPrompt: state.Form.SystemPrompt,
-			requestID:    requestID,
-			baseMessages: append(cloneConsoleChatMessages(history), userMessage),
-			worker:       worker,
-			sshKey:       key,
-			account:      account,
-			cloudSession: cloudSession,
+			handler:         handler,
+			registry:        handler.cloudAgentRuns,
+			key:             runKey,
+			locale:          locale,
+			userID:          userID,
+			sessionID:       state.Form.ClientSessionID,
+			publicName:      state.Form.PublicName,
+			systemPrompt:    state.Form.SystemPrompt,
+			requestID:       requestID,
+			baseMessages:    append(cloneConsoleChatMessages(history), userMessage),
+			worker:          worker,
+			sshKey:          key,
+			account:         account,
+			cloudSession:    cloudSession,
+			consoleBaseURL:  consoleBaseURL,
+			browserMCPToken: browserMCPToken,
 			request: consoleCloudAgentChatRequest{
 				PublicName:                   state.Form.PublicName,
 				PreviousResponseID:           state.LastResponseID,
@@ -439,19 +532,26 @@ func (handler *Handler) consoleCloudAgentStoredResumeEvents(ctx context.Context,
 	}
 }
 
+func (run *consoleCloudAgentRun) snapshotOperations() []consoleChatStreamOperation {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return cloneConsoleChatStreamOperations(run.operations)
+}
+
 func consoleChatLastAssistantStreamMessage(messages []consoleChatMessageView) *consoleChatAPIMessage {
 	for index := len(messages) - 1; index >= 0; index-- {
 		message := messages[index]
 		if normalizeConsoleChatRole(message.Role) != "assistant" {
 			continue
 		}
-		if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.Reasoning) == "" {
+		if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.Reasoning) == "" && len(message.Operations) == 0 {
 			continue
 		}
 		return &consoleChatAPIMessage{
-			Role:      "assistant",
-			Content:   message.Content,
-			Reasoning: message.Reasoning,
+			Role:       "assistant",
+			Content:    message.Content,
+			Reasoning:  message.Reasoning,
+			Operations: cloneConsoleChatStreamOperations(message.Operations),
 		}
 	}
 	return nil
@@ -516,6 +616,9 @@ func (handler *Handler) streamConsoleCloudAgentASSJobResume(r *http.Request, str
 		OnDelta: onDelta,
 		OnReasoning: func(reasoning string) error {
 			return writeStreamEvent(consoleChatStreamEvent{Type: "reasoning", Reasoning: reasoning})
+		},
+		OnOperation: func(operation consoleChatStreamOperation) error {
+			return writeStreamEvent(consoleChatStreamEvent{Type: "operation", Operation: &operation})
 		},
 	}
 	streamErr := workerops.StreamCloudAgentASSJobWithRecovery(r.Context(), worker, key, account, cloudSession, sessionID, func(event workerops.CloudAgentASSJobStreamEvent) error {

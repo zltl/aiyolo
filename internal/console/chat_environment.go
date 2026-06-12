@@ -654,19 +654,22 @@ func (handler *Handler) ensureConsoleChatEnvironmentWithEvents(ctx context.Conte
 	if err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
+	browserMCPURL, browserMCPToken := handler.consoleCloudAgentBrowserMCPStartOptions(ctx, userID, baseURL, state.Form.ClientSessionID)
 	startOptions := workerops.CloudAgentStartOptions{
-		UserID:         userID,
-		AgentType:      account.AgentType,
-		ContainerName:  strings.TrimSpace(account.ContainerName),
-		WorkspacePath:  account.WorkspacePath,
-		APIBaseURL:     strings.TrimRight(baseURL, "/") + "/v1",
-		ConsoleBaseURL: strings.TrimRight(baseURL, "/"),
-		APIKey:         account.Credential,
-		DefaultModel:   account.ModelPublicName,
-		AllowedModels:  allowedModels,
-		OpenURL:        strings.TrimRight(baseURL, "/") + "/console/chat?session=" + url.QueryEscape(state.Form.ClientSessionID),
-		ASSDownloadURL: assDownloadURL,
-		ASSSHA256URL:   assSHA256URL,
+		UserID:          userID,
+		AgentType:       account.AgentType,
+		ContainerName:   strings.TrimSpace(account.ContainerName),
+		WorkspacePath:   account.WorkspacePath,
+		APIBaseURL:      strings.TrimRight(baseURL, "/") + "/v1",
+		ConsoleBaseURL:  strings.TrimRight(baseURL, "/"),
+		APIKey:          account.Credential,
+		DefaultModel:    account.ModelPublicName,
+		AllowedModels:   allowedModels,
+		OpenURL:         strings.TrimRight(baseURL, "/") + "/console/chat?session=" + url.QueryEscape(state.Form.ClientSessionID),
+		ASSDownloadURL:  assDownloadURL,
+		ASSSHA256URL:    assSHA256URL,
+		BrowserMCPURL:   browserMCPURL,
+		BrowserMCPToken: browserMCPToken,
 	}
 	expectedBuildRevision, err := handler.consoleChatCloudAgentExpectedBuildRevision(ctx, assSHA256URL, worker, startOptions)
 	if err != nil {
@@ -678,6 +681,7 @@ func (handler *Handler) ensureConsoleChatEnvironmentWithEvents(ctx context.Conte
 		if account, cloudSession, ok, err := handler.reusableConsoleChatCloudAgentEnvironment(ctx, assSHA256URL, userID, state.Form.ClientSessionID, workerID, state.Form.PublicName, expectedBuildRevision, account, now); err != nil {
 			return consoleChatEnvironmentEnsureResponse{}, err
 		} else if ok {
+			_ = handler.syncConsoleChatBrowserMCPConfig(ctx, worker, key, account, cloudSession, baseURL, userID, state.Form.ClientSessionID)
 			response := consoleChatEnvironmentEnsureResponse{
 				Status:        "ready",
 				SessionID:     state.Form.ClientSessionID,
@@ -769,6 +773,17 @@ func (handler *Handler) ensureConsoleChatEnvironmentWithEvents(ctx context.Conte
 	}); err != nil {
 		return consoleChatEnvironmentEnsureResponse{}, err
 	}
+	cloudSession := domain.CloudAgentSession{
+		ID:            consoleChatCloudAgentSessionID(state.Form.ClientSessionID),
+		UserID:        userID,
+		WorkerID:      workerID,
+		AccountID:     account.ID,
+		AgentType:     account.AgentType,
+		ChatSessionID: state.Form.ClientSessionID,
+		WorkspacePath: account.WorkspacePath,
+		Status:        domain.CloudAgentSessionStatusActive,
+	}
+	_ = handler.syncConsoleChatBrowserMCPConfig(ctx, worker, key, account, cloudSession, baseURL, userID, state.Form.ClientSessionID)
 	notice := handler.requestText(r, "Cloud Agent 已在 "+workerID+" 就绪", "Cloud agent is ready on "+workerID)
 	if assUpgradeNeeded {
 		notice = handler.requestText(r, "Cloud Agent 已更新 aiyolo-ass 并在 "+workerID+" 就绪", "Cloud agent upgraded aiyolo-ass and is ready on "+workerID)

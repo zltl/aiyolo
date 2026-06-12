@@ -11,3 +11,24 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 "${as_root[@]}" install -d -o "$agent_user" -g "$agent_user" -m 0755 "$claude_config_dir"
+
+mcp_url="${AIYOLO_BROWSER_MCP_URL:-}"
+mcp_token="${AIYOLO_BROWSER_MCP_TOKEN:-}"
+if [[ -n "$mcp_url" && -n "$mcp_token" ]]; then
+  mcp_path="${AIYOLO_BROWSER_MCP_CONFIG_PATH:-${agent_home}/.mcp.json}"
+  cat > "$mcp_path" <<AIYOLO_MCP_JSON
+{
+  "mcpServers": {
+    "aiyolo-browser": {
+      "type": "http",
+      "url": "${mcp_url}",
+      "headers": {
+        "Authorization": "Bearer ${mcp_token}"
+      }
+    }
+  }
+}
+AIYOLO_MCP_JSON
+  chown "$agent_user:$agent_user" "$mcp_path"
+  chmod 0644 "$mcp_path"
+fi

@@ -99,6 +99,7 @@ func (handler *Handler) Routes() http.Handler {
 	router.Get("/static/console.css", handler.styles)
 	router.Get("/static/chat.js", handler.chatScript)
 	router.Get("/static/chat-shell.js", handler.chatShellScript)
+	router.Get("/static/chat-browser.js", handler.chatBrowserScript)
 	router.Get("/static/chat-workspace.js", handler.chatWorkspaceScript)
 	router.Handle("/static/vendor/*", handler.vendorAssets())
 	router.Get("/locale", handler.setLocale)
@@ -106,6 +107,8 @@ func (handler *Handler) Routes() http.Handler {
 	router.Post("/login", handler.login)
 	router.Get("/login/{provider}", handler.oauthLogin)
 	router.Get("/oauth/{provider}/callback", handler.oauthCallback)
+	router.Get("/chat/browser/mcp", handler.chatBrowserMCP)
+	router.Post("/chat/browser/mcp", handler.chatBrowserMCP)
 	router.Group(func(protected chi.Router) {
 		protected.Use(handler.requireSession)
 		protected.Get("/", handler.dashboard)
@@ -116,6 +119,15 @@ func (handler *Handler) Routes() http.Handler {
 		protected.Post("/chat/shell/state", handler.saveChatShellState)
 		protected.Get("/chat/shell", handler.chatShellPage)
 		protected.Handle("/chat/shell/ws", http.HandlerFunc(handler.chatShellSocket))
+		protected.Get("/chat/browser/ready", handler.chatBrowserReady)
+		protected.Get("/chat/browser/view", handler.chatBrowserView)
+		protected.Handle("/chat/browser/ws", http.HandlerFunc(handler.chatBrowserSocket))
+		protected.Post("/chat/browser/navigate", handler.chatBrowserNavigate)
+		protected.Get("/chat/browser/cdp/*", handler.chatBrowserCDPProxy)
+		protected.Handle("/chat/browser/cdp/ws", http.HandlerFunc(handler.chatBrowserCDPWebSocket))
+		protected.Post("/chat/browser/screenshot", handler.chatBrowserScreenshot)
+		protected.Get("/chat/browser/mcp/status", handler.chatBrowserMCPStatus)
+		protected.Post("/chat/browser/mcp/config", handler.chatBrowserMCPConfig)
 		protected.Get("/chat/attachments/tree", handler.chatAttachmentTree)
 		protected.Get("/chat/workspace/tree", handler.chatWorkspaceTree)
 		protected.Get("/chat/workspace/listdir", handler.chatWorkspaceListDir)
@@ -781,6 +793,17 @@ func (handler *Handler) chatScript(w http.ResponseWriter, r *http.Request) {
 
 func (handler *Handler) chatShellScript(w http.ResponseWriter, r *http.Request) {
 	script, err := consoleAssets.ReadFile("static/chat-shell.js")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(script)
+}
+
+func (handler *Handler) chatBrowserScript(w http.ResponseWriter, r *http.Request) {
+	script, err := consoleAssets.ReadFile("static/chat-browser.js")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

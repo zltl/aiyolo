@@ -403,12 +403,12 @@ func consoleChatAppendResultMessage(locale string, messages []consoleChatMessage
 	return append(next, buildConsoleChatMessageWithReasoning(locale, apiMessage.Role, apiMessage.Content, apiMessage.Reasoning))
 }
 
-func consoleChatAppendAssistantProgress(locale string, messages []consoleChatMessageView, content string, reasoning string) []consoleChatMessageView {
+func consoleChatAppendAssistantProgress(locale string, messages []consoleChatMessageView, content string, reasoning string, operations []consoleChatStreamOperation) []consoleChatMessageView {
 	next := cloneConsoleChatMessages(messages)
-	if strings.TrimSpace(content) == "" && strings.TrimSpace(reasoning) == "" {
+	if strings.TrimSpace(content) == "" && strings.TrimSpace(reasoning) == "" && len(operations) == 0 {
 		return next
 	}
-	return append(next, buildConsoleChatMessageWithReasoning(locale, "assistant", content, reasoning))
+	return append(next, buildConsoleChatMessageWithProgress(locale, "assistant", content, reasoning, operations))
 }
 
 func consoleChatSessionMessagesPayload(messages []consoleChatMessageView) (string, error) {

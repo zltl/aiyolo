@@ -90,10 +90,11 @@ type consoleChatShellStateRequest struct {
 }
 
 type consoleChatShellState struct {
-	ActiveTerminalID string                     `json:"activeTerminalID,omitempty"`
-	Instances        []consoleChatShellSnapshot `json:"instances"`
-	Hidden           bool                       `json:"hidden"`
-	UpdatedAt        string                     `json:"updatedAt,omitempty"`
+	ActiveTerminalID  string                     `json:"activeTerminalID,omitempty"`
+	Instances         []consoleChatShellSnapshot `json:"instances"`
+	Hidden            bool                       `json:"hidden"`
+	BrowserMCPEnabled *bool                      `json:"browserMCPEnabled,omitempty"`
+	UpdatedAt         string                     `json:"updatedAt,omitempty"`
 }
 
 type consoleChatShellSnapshot struct {
@@ -251,15 +252,16 @@ func normalizeConsoleChatShellState(state consoleChatShellState, chatSessionID s
 		}
 	}
 	return consoleChatShellState{
-		ActiveTerminalID: activeTerminalID,
-		Instances:        instances,
-		Hidden:           state.Hidden,
-		UpdatedAt:        strings.TrimSpace(state.UpdatedAt),
+		ActiveTerminalID:  activeTerminalID,
+		Instances:         instances,
+		Hidden:            state.Hidden,
+		BrowserMCPEnabled: state.BrowserMCPEnabled,
+		UpdatedAt:         strings.TrimSpace(state.UpdatedAt),
 	}
 }
 
 func consoleChatShellStatePayload(state consoleChatShellState) string {
-	if len(state.Instances) == 0 {
+	if len(state.Instances) == 0 && state.BrowserMCPEnabled == nil && !state.Hidden {
 		return ""
 	}
 	payload, err := json.Marshal(state)
@@ -278,11 +280,19 @@ func (handler *Handler) resolveConsoleChatCloudAgentRuntimeTarget(ctx context.Co
 }
 
 func (handler *Handler) resolveConsoleChatCloudAgentTargetWithRuntime(ctx context.Context, r *http.Request, chatSessionID string, ensureRuntime bool) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
+	userID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+	return handler.resolveConsoleChatCloudAgentTargetForUser(ctx, r, userID, chatSessionID, ensureRuntime)
+}
+
+func (handler *Handler) resolveConsoleChatCloudAgentTargetForUser(ctx context.Context, r *http.Request, userID, chatSessionID string, ensureRuntime bool) (domain.WorkerServer, domain.WorkerSSHKey, domain.CloudAgentAccount, domain.CloudAgentSession, error) {
 	chatSessionID = strings.TrimSpace(chatSessionID)
 	if chatSessionID == "" {
 		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "缺少 chat session，无法打开 shell。", "Missing chat session; unable to open the shell."))
 	}
-	userID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, errors.New(handler.requestText(r, "未授权访问。", "Unauthorized."))
+	}
 	cloudSession, err := handler.store.GetCloudAgentSession(ctx, userID, consoleChatCloudAgentSessionID(chatSessionID))
 	if errors.Is(err, storage.ErrNotFound) {
 		return domain.WorkerServer{}, domain.WorkerSSHKey{}, domain.CloudAgentAccount{}, domain.CloudAgentSession{}, fmt.Errorf("%w: %s", storage.ErrNotFound, handler.requestText(r, "当前会话没有可用的 Claude Code。", "The current chat session does not have an active Claude Code environment."))
@@ -362,19 +372,22 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 	}
 
 	chatSessionID := firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(strings.TrimPrefix(cloudSession.ID, "chat-env-")))
+	browserMCPURL, browserMCPToken := handler.consoleCloudAgentBrowserMCPStartOptions(ctx, userID, baseURL, chatSessionID)
 	startOptions := workerops.CloudAgentStartOptions{
-		UserID:         userID,
-		AgentType:      account.AgentType,
-		ContainerName:  strings.TrimSpace(account.ContainerName),
-		WorkspacePath:  account.WorkspacePath,
-		APIBaseURL:     strings.TrimRight(baseURL, "/") + "/v1",
-		ConsoleBaseURL: strings.TrimRight(baseURL, "/"),
-		APIKey:         account.Credential,
-		DefaultModel:   account.ModelPublicName,
-		AllowedModels:  allowedModels,
-		OpenURL:        strings.TrimRight(baseURL, "/") + "/console/chat?session=" + url.QueryEscape(chatSessionID),
-		ASSDownloadURL: assDownloadURL,
-		ASSSHA256URL:   assSHA256URL,
+		UserID:          userID,
+		AgentType:       account.AgentType,
+		ContainerName:   strings.TrimSpace(account.ContainerName),
+		WorkspacePath:   account.WorkspacePath,
+		APIBaseURL:      strings.TrimRight(baseURL, "/") + "/v1",
+		ConsoleBaseURL:  strings.TrimRight(baseURL, "/"),
+		APIKey:          account.Credential,
+		DefaultModel:    account.ModelPublicName,
+		AllowedModels:   allowedModels,
+		OpenURL:         strings.TrimRight(baseURL, "/") + "/console/chat?session=" + url.QueryEscape(chatSessionID),
+		ASSDownloadURL:  assDownloadURL,
+		ASSSHA256URL:    assSHA256URL,
+		BrowserMCPURL:   browserMCPURL,
+		BrowserMCPToken: browserMCPToken,
 	}
 	expectedBuildRevision, err := handler.consoleChatCloudAgentExpectedBuildRevision(ctx, assSHA256URL, worker, startOptions)
 	if err != nil {
@@ -411,6 +424,7 @@ func (handler *Handler) ensureConsoleChatCloudAgentRuntime(ctx context.Context, 
 	if err := handler.store.UpsertCloudAgentSession(ctx, cloudSession); err != nil {
 		return domain.CloudAgentAccount{}, domain.CloudAgentSession{}, err
 	}
+	_ = handler.syncConsoleChatBrowserMCPConfig(ctx, worker, key, account, cloudSession, baseURL, userID, chatSessionID)
 	return account, cloudSession, nil
 }
 
@@ -535,11 +549,13 @@ func (handler *Handler) saveChatShellState(w http.ResponseWriter, r *http.Reques
 	}
 	chatSessionID := firstNonEmpty(strings.TrimSpace(cloudSession.ChatSessionID), strings.TrimSpace(sessionID), strings.TrimSpace(strings.TrimPrefix(cloudSession.ID, "chat-env-")))
 	workspacePath := firstNonEmpty(strings.TrimSpace(cloudSession.WorkspacePath), strings.TrimSpace(account.WorkspacePath), domain.DefaultCloudAgentWorkspacePath)
+	existingState := consoleChatShellStateFromSession(cloudSession, chatSessionID, worker.ID, account.ContainerName, workspacePath)
 	nextState := normalizeConsoleChatShellState(consoleChatShellState{
-		ActiveTerminalID: request.ActiveTerminalID,
-		Instances:        request.Instances,
-		Hidden:           request.Hidden,
-		UpdatedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+		ActiveTerminalID:  request.ActiveTerminalID,
+		Instances:         request.Instances,
+		Hidden:            request.Hidden,
+		BrowserMCPEnabled: existingState.BrowserMCPEnabled,
+		UpdatedAt:         time.Now().UTC().Format(time.RFC3339Nano),
 	}, chatSessionID, worker.ID, account.ContainerName, workspacePath)
 	cloudSession.ShellStateJSON = consoleChatShellStatePayload(nextState)
 	if err := handler.store.UpsertCloudAgentSession(r.Context(), cloudSession); err != nil {

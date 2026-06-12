@@ -120,6 +120,43 @@ func runWorkerCommand(client *ssh.Client, command string) (string, error) {
 }
 
 func RenderProxyEnv(profile domain.ProxyProfile) map[string]string {
+	return renderProxyEnv(profile, proxyEnvDefault)
+}
+
+// RenderWorkerInstallProxyEnv builds proxy env for worker-host install tasks such as
+// bootstrap scripts and apt/curl running directly on the worker.
+func RenderWorkerInstallProxyEnv(profile domain.ProxyProfile) map[string]string {
+	return renderProxyEnv(profile, proxyEnvWorkerInstall)
+}
+
+// RenderCloudAgentBuildProxyEnv builds proxy env for cloud-agent docker build only.
+// Loopback worker proxy endpoints are rewritten to host.docker.internal so build
+// RUN steps can reach the worker's local proxy listener.
+func RenderCloudAgentBuildProxyEnv(profile domain.ProxyProfile) map[string]string {
+	env := renderProxyEnv(profile, proxyEnvWorkerInstall)
+	if len(env) == 0 {
+		return nil
+	}
+	buildEnv := make(map[string]string, 4)
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		value := strings.TrimSpace(env[key])
+		if value == "" {
+			continue
+		}
+		buildEnv[key] = rewriteLoopbackProxyForDockerBuild(value)
+	}
+	if len(buildEnv) == 0 {
+		return nil
+	}
+	return buildEnv
+}
+
+const (
+	proxyEnvDefault       = iota
+	proxyEnvWorkerInstall = iota
+)
+
+func renderProxyEnv(profile domain.ProxyProfile, mode int) map[string]string {
 	normalized, err := domain.NormalizeProxyProfile(domain.ProxyProfile{
 		ID:                       firstNonEmpty(strings.TrimSpace(profile.ID), "worker-proxy"),
 		Name:                     profile.Name,
@@ -148,6 +185,14 @@ func RenderProxyEnv(profile domain.ProxyProfile) map[string]string {
 		}
 	}
 	endpoint := proxyURL.String()
+	if mode == proxyEnvWorkerInstall && normalized.Type == domain.ProxyTypeHTTP {
+		return map[string]string{
+			"HTTP_PROXY":  endpoint,
+			"HTTPS_PROXY": endpoint,
+			"http_proxy":  endpoint,
+			"https_proxy": endpoint,
+		}
+	}
 	return map[string]string{
 		"ALL_PROXY":   endpoint,
 		"HTTP_PROXY":  endpoint,
@@ -156,6 +201,30 @@ func RenderProxyEnv(profile domain.ProxyProfile) map[string]string {
 		"http_proxy":  endpoint,
 		"https_proxy": endpoint,
 	}
+}
+
+func rewriteLoopbackProxyForDockerBuild(proxyURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(proxyURL))
+	if err != nil || parsed.Host == "" {
+		return proxyURL
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return proxyURL
+	}
+	port := parsed.Port()
+	if port == "" {
+		switch parsed.Scheme {
+		case "https":
+			port = "443"
+		case "socks5":
+			port = "1080"
+		default:
+			port = "80"
+		}
+	}
+	parsed.Host = net.JoinHostPort("host.docker.internal", port)
+	return parsed.String()
 }
 
 func dialSSH(worker domain.WorkerServer, key domain.WorkerSSHKey) (*ssh.Client, error) {

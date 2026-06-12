@@ -19,6 +19,8 @@ type CloudAgentCodexOptions struct {
 	InitialPrompt    string
 	Model            string
 	WorkingDirectory string
+	BrowserMCPURL    string
+	BrowserMCPToken  string
 	Stream           bool
 }
 
@@ -153,7 +155,7 @@ func runCloudAgentCodexASSJob(ctx context.Context, worker domain.WorkerServer, k
 	}
 	script := buildCloudAgentCodexASSScript(options)
 	argv := []string{"/bin/bash", "-lc", script}
-	env := buildCloudAgentCodexASSJobEnv(apiKey)
+	env := buildCloudAgentCodexASSJobEnv(apiKey, options)
 	if _, err := StartCloudAgentASSJob(ctx, worker, key, account, cloudSession, jobID, "claude-code", workingDirectory, argv, env, ""); err != nil {
 		return "", err
 	}
@@ -236,6 +238,17 @@ func normalizeCloudAgentWorkingDirectory(value string) string {
 }
 
 func buildCloudAgentCodexRemoteScript(containerName, workspacePath string, apiKey string, options CloudAgentCodexOptions) string {
+	mcpConfigShell := buildCloudAgentBrowserMCPConfigShell(CloudAgentBrowserMCPConfig{
+		URL:   options.BrowserMCPURL,
+		Token: options.BrowserMCPToken,
+	})
+	mcpEnvArgs := ""
+	if url := strings.TrimSpace(options.BrowserMCPURL); url != "" {
+		mcpEnvArgs += fmt.Sprintf("\n  -e AIYOLO_BROWSER_MCP_URL=%s \\", shellQuote(url))
+	}
+	if token := strings.TrimSpace(options.BrowserMCPToken); token != "" {
+		mcpEnvArgs += fmt.Sprintf("\n  -e AIYOLO_BROWSER_MCP_TOKEN=%s \\", shellQuote(token))
+	}
 	return fmt.Sprintf(`set -euo pipefail
 
 container_name=%s
@@ -270,6 +283,7 @@ docker exec -i \
   -e SHELL=/bin/bash \
   -e LANG=C.UTF-8 \
   -e LC_ALL=C.UTF-8 \
+%s
   "$container_name" \
 	bash -s -- <<'CONTAINER_CODEX'
 set -euo pipefail
@@ -280,6 +294,7 @@ initial_prompt=%s
 model=%s
 
 mkdir -p "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+%s
 prompt_to_send="$initial_prompt"
 cmd=(claude -p --output-format stream-json --verbose --dangerously-skip-permissions)
 if [[ -n "$model" ]]; then
@@ -295,5 +310,5 @@ else
 	"${cmd[@]}" "$prompt_to_send"
 fi
 CONTAINER_CODEX
-`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(strings.TrimSpace(apiKey)), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentClaudeConfigDir), shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model))
+`, shellQuote(containerName), shellQuote(workspacePath), shellQuote(strings.TrimSpace(apiKey)), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentHome), shellQuote(defaultCloudAgentUser), shellQuote(defaultCloudAgentClaudeConfigDir), mcpEnvArgs, shellQuote(options.ThreadID), shellQuote(options.Prompt), shellQuote(options.InitialPrompt), shellQuote(options.Model), mcpConfigShell)
 }

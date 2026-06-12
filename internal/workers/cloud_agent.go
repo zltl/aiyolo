@@ -82,6 +82,8 @@ type CloudAgentStartOptions struct {
 	ChromeDEBURL         string
 	ASSDownloadURL       string
 	ASSSHA256URL         string
+	BrowserMCPURL        string
+	BrowserMCPToken      string
 }
 
 type CloudAgentInstance struct {
@@ -146,6 +148,29 @@ type cloudAgentRemotePayload struct {
 	StartedAt            string            `json:"started_at"`
 	APIKey               string            `json:"api_key"`
 	SyncHostnames        []string          `json:"sync_hostnames,omitempty"`
+	BuildImageOnly       bool              `json:"build_image_only,omitempty"`
+	ForceRebuild         bool              `json:"force_rebuild,omitempty"`
+}
+
+type CloudAgentImageBuildOptions struct {
+	Image          string
+	UbuntuRelease  string
+	UbuntuSeries   string
+	UbuntuMirror   string
+	ChromeDEBURL   string
+	RootFSURL      string
+	RootFSIndexURL string
+	ASSDownloadURL string
+	ASSSHA256URL   string
+	ForceRebuild   bool
+}
+
+type CloudAgentImageBuildResult struct {
+	WorkerID      string `json:"worker_id"`
+	Image         string `json:"image"`
+	ASSSHA256     string `json:"ass_sha256"`
+	BuildRevision string `json:"build_revision"`
+	Reused        bool   `json:"reused"`
 }
 
 func EnsureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domain.WorkerSSHKey, proxy domain.ProxyProfile, options CloudAgentStartOptions) (CloudAgentInstance, error) {
@@ -186,11 +211,8 @@ func ensureCloudAgent(ctx context.Context, worker domain.WorkerServer, key domai
 	} else {
 		emitPhase("connect", fmt.Sprintf("Connecting to worker %s over SSH", worker.ID))
 	}
-	proxyEnv := RenderProxyEnv(proxy)
+	proxyEnv := RenderCloudAgentBuildProxyEnv(proxy)
 	containerEnv := cloudAgentContainerEnv(options)
-	for key, value := range proxyEnv {
-		containerEnv[key] = value
-	}
 	emitPhase("resolve_ass", "Resolving published aiyolo-ass checksum")
 	resolveCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -611,6 +633,12 @@ func cloudAgentContainerEnv(options CloudAgentStartOptions) map[string]string {
 	}
 	if strings.TrimSpace(options.DockerRegistryMirror) != "" {
 		env["AIYOLO_DOCKER_REGISTRY_MIRROR"] = strings.TrimSpace(options.DockerRegistryMirror)
+	}
+	if mcpURL := strings.TrimSpace(options.BrowserMCPURL); mcpURL != "" {
+		env["AIYOLO_BROWSER_MCP_URL"] = mcpURL
+	}
+	if mcpToken := strings.TrimSpace(options.BrowserMCPToken); mcpToken != "" {
+		env["AIYOLO_BROWSER_MCP_TOKEN"] = mcpToken
 	}
 	return env
 }

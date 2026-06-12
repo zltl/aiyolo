@@ -26,6 +26,7 @@ func NewRootCommand() *cobra.Command {
 	}
 	AddConfigFlags(cmd.PersistentFlags())
 	cmd.AddCommand(newPublishArtifactsCommand())
+	cmd.AddCommand(newBuildCloudAgentImageOnWorkerCommand())
 	return cmd
 }
 

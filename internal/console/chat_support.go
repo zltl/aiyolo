@@ -131,12 +131,13 @@ type consoleChatAttachmentView struct {
 }
 
 type consoleChatMessageView struct {
-	ID          string                      `json:"id"`
-	Role        string                      `json:"role"`
-	Label       string                      `json:"label"`
-	Content     string                      `json:"content"`
-	Reasoning   string                      `json:"reasoning,omitempty"`
-	Attachments []consoleChatAttachmentView `json:"attachments,omitempty"`
+	ID          string                       `json:"id"`
+	Role        string                       `json:"role"`
+	Label       string                       `json:"label"`
+	Content     string                       `json:"content"`
+	Reasoning   string                       `json:"reasoning,omitempty"`
+	Operations  []consoleChatStreamOperation `json:"operations,omitempty"`
+	Attachments []consoleChatAttachmentView    `json:"attachments,omitempty"`
 }
 
 type consoleChatPromptView struct {
@@ -240,6 +241,14 @@ func (state consoleChatPageState) data() map[string]any {
 		"ChatShellPageURL":            consoleChatShellPagePath,
 		"ChatShellSocketURL":          consoleChatShellSocketPath,
 		"ChatShellStateURL":           consoleChatShellStatePath,
+		"ChatBrowserReadyURL":         consoleChatBrowserReadyPath,
+		"ChatBrowserViewURL":          consoleChatBrowserViewPath,
+		"ChatBrowserNavigateURL":      consoleChatBrowserNavigatePath,
+		"ChatBrowserCDPURL":           consoleChatBrowserCDPBasePath,
+		"ChatBrowserScreenshotURL":    consoleChatBrowserScreenshotPath,
+		"ChatBrowserMCPURL":           consoleChatBrowserMCPPath,
+		"ChatBrowserMCPStatusURL":     consoleChatBrowserMCPStatusPath,
+		"ChatBrowserMCPConfigURL":     consoleChatBrowserMCPConfigPath,
 		"ChatAttachmentTreeURL":       consoleChatAttachmentTreePath,
 		"ChatAttachmentTreeEnabled":   state.AttachmentTreeEnabled,
 		"ChatWorkspaceTreeURL":        consoleChatWorkspaceTreePath,
@@ -386,6 +395,23 @@ func buildConsoleChatMessageWithReasoning(locale, role, content, reasoning strin
 	return message
 }
 
+func buildConsoleChatMessageWithProgress(locale, role, content, reasoning string, operations []consoleChatStreamOperation) consoleChatMessageView {
+	message := buildConsoleChatMessageWithReasoning(locale, role, content, reasoning)
+	if len(operations) > 0 {
+		message.Operations = cloneConsoleChatStreamOperations(operations)
+	}
+	return message
+}
+
+func cloneConsoleChatStreamOperations(operations []consoleChatStreamOperation) []consoleChatStreamOperation {
+	if len(operations) == 0 {
+		return nil
+	}
+	cloned := make([]consoleChatStreamOperation, len(operations))
+	copy(cloned, operations)
+	return cloned
+}
+
 func buildConsoleChatMessageWithAttachments(locale, role, content string, attachments []consoleChatAttachmentView) consoleChatMessageView {
 	role = normalizeConsoleChatRole(role)
 	return consoleChatMessageView{ID: newConsoleID("msg"), Role: role, Label: consoleChatRoleLabel(locale, role), Content: strings.TrimSpace(content), Attachments: cloneConsoleChatAttachments(attachments)}
@@ -466,7 +492,10 @@ func normalizeConsoleChatMessage(locale string, message consoleChatMessageView, 
 	if message.Content != "" {
 		message.Content = rewriteChatAssetMarkdownURLs(cfg, message.Content)
 	}
-	if message.Role == "" || (message.Content == "" && message.Reasoning == "" && len(message.Attachments) == 0) {
+	if len(message.Operations) > 0 {
+		message.Operations = cloneConsoleChatStreamOperations(message.Operations)
+	}
+	if message.Role == "" || (message.Content == "" && message.Reasoning == "" && len(message.Attachments) == 0 && len(message.Operations) == 0) {
 		return consoleChatMessageView{}, false
 	}
 	message.Label = consoleChatRoleLabel(locale, message.Role)
@@ -996,6 +1025,9 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 			handler.renderChat(w, r, state)
 			return
 		}
+		consoleUserID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
+		consoleBaseURL := consoleChatCloudAgentBaseURL(handler.codexPublicBaseURL(r), worker)
+		_, browserMCPToken := handler.consoleCloudAgentBrowserMCPCodexOptions(r.Context(), consoleUserID, consoleBaseURL, state.Form.ClientSessionID)
 		execution, executionErr = handler.runCloudAgentChat(context.WithoutCancel(r.Context()), worker, key, account, cloudSession, consoleCloudAgentChatRequest{
 			SessionID:                    state.Form.ClientSessionID,
 			PublicName:                   state.Form.PublicName,
@@ -1005,6 +1037,8 @@ func (handler *Handler) sendChat(w http.ResponseWriter, r *http.Request) {
 			Attachments:                  state.Form.Attachments,
 			ShellActiveTerminalID:        state.Form.ShellActiveTerminalID,
 			ShellCurrentWorkingDirectory: state.Form.ShellCurrentWorkingDirectory,
+			ConsoleBaseURL:               consoleBaseURL,
+			BrowserMCPToken:              browserMCPToken,
 		})
 	} else {
 		target, errorMessage := handler.resolveConsoleChatTarget(r.Context(), r, state.Form.PublicName)

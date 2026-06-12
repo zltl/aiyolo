@@ -199,7 +199,7 @@ func BuildBootstrapPlan(worker domain.WorkerServer, disks []domain.WorkerDataDis
 		}
 		return disks[i].DevicePath < disks[j].DevicePath
 	})
-	proxyEnv := RenderProxyEnv(proxy)
+	proxyEnv := RenderWorkerInstallProxyEnv(proxy)
 	playbook := mustReadAnsibleAsset("worker-bootstrap.yml")
 	inventory := renderBootstrapInventory(worker)
 	varsJSON := renderBootstrapVarsJSON(worker, disks, proxyEnv)

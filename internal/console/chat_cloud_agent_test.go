@@ -9,17 +9,19 @@ import (
 	"github.com/zltl/aiyolo/internal/storage"
 )
 
-func TestConsoleCloudAgentCurrentPromptIsInteractive(t *testing.T) {
+func TestConsoleCloudAgentCurrentPromptSendsOnlyLatestUserMessage(t *testing.T) {
 	prompt := consoleCloudAgentCurrentPrompt("请修改这里，但不确定用哪个方案", nil)
-
-	for _, expected := range []string{
-		"interactive collaboration, not a one-shot completion",
-		"ask a concise clarification question and stop",
-		"The user will answer in the AIYolo chat input",
-		"Latest user message:\n请修改这里，但不确定用哪个方案",
+	if prompt != "请修改这里，但不确定用哪个方案" {
+		t.Fatalf("resume cloud agent prompt = %q, want only the latest user message", prompt)
+	}
+	for _, unexpected := range []string{
+		"interactive AIYolo chat session",
+		"one-shot",
+		"ask a concise clarification question",
+		"Latest user message:",
 	} {
-		if !strings.Contains(prompt, expected) {
-			t.Fatalf("cloud agent prompt is missing %q: %s", expected, prompt)
+		if strings.Contains(prompt, unexpected) {
+			t.Fatalf("resume cloud agent prompt should not include %q: %s", unexpected, prompt)
 		}
 	}
 }
@@ -31,7 +33,9 @@ func TestConsoleCloudAgentInitialPromptUsesClaudeSessionState(t *testing.T) {
 	}, "目标文件是 README.md", nil)
 
 	for _, expected := range []string{
-		"interactive collaboration, not a one-shot completion",
+		"interactive AIYolo chat session in Claude Code, not a one-shot task",
+		"ask a concise clarification question and stop",
+		"The user will reply in the AIYolo chat input",
 		"Latest user message:\n目标文件是 README.md",
 	} {
 		if !strings.Contains(prompt, expected) {

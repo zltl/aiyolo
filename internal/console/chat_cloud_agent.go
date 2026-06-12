@@ -22,14 +22,18 @@ type consoleCloudAgentChatRequest struct {
 	Attachments                  []consoleChatAttachmentView
 	ShellActiveTerminalID        string
 	ShellCurrentWorkingDirectory string
+	ConsoleBaseURL               string
+	BrowserMCPToken              string
 	Stream                       bool
 	OnDelta                      func(string) error
 	OnReasoning                  func(string) error
+	OnOperation                  func(consoleChatStreamOperation) error
 }
 
 type consoleCloudAgentStreamHandlers struct {
 	OnDelta     func(string) error
 	OnReasoning func(string) error
+	OnOperation func(consoleChatStreamOperation) error
 }
 
 type consoleCloudAgentStreamParser struct {
@@ -55,6 +59,7 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 	handlers := consoleCloudAgentStreamHandlers{
 		OnDelta:     request.OnDelta,
 		OnReasoning: request.OnReasoning,
+		OnOperation: request.OnOperation,
 	}
 	output, err := workerops.RunCloudAgentCodex(ctx, worker, key, account, cloudSession, workerops.CloudAgentCodexOptions{
 		JobID:            strings.TrimSpace(request.SessionID),
@@ -63,6 +68,8 @@ func runConsoleCloudAgentChat(ctx context.Context, worker domain.WorkerServer, k
 		InitialPrompt:    consoleCloudAgentInitialPrompt(request.History, request.UserInput, request.Attachments),
 		Model:            publicName,
 		WorkingDirectory: consoleCloudAgentWorkingDirectory(account, cloudSession, request.ShellActiveTerminalID, request.ShellCurrentWorkingDirectory),
+		BrowserMCPURL:    consoleBrowserMCPURL(request.ConsoleBaseURL, request.SessionID),
+		BrowserMCPToken:  strings.TrimSpace(request.BrowserMCPToken),
 		Stream:           request.Stream,
 	}, func(chunk []byte) error {
 		if !request.Stream {
@@ -159,23 +166,22 @@ func consoleCloudAgentWorkingDirectory(account domain.CloudAgentAccount, cloudSe
 }
 
 func consoleCloudAgentCurrentPrompt(userInput string, attachments []consoleChatAttachmentView) string {
-	sections := consoleCloudAgentInteractivePromptSections()
+	return strings.TrimSpace(consoleCloudAgentMessageBody(userInput, attachments))
+}
+
+func consoleCloudAgentInitialPrompt(_ []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) string {
+	sections := consoleCloudAgentFirstTurnPromptSections()
 	if latest := consoleCloudAgentMessageBody(userInput, attachments); latest != "" {
 		sections = append(sections, "Latest user message:\n"+latest)
 	}
 	return strings.TrimSpace(strings.Join(sections, "\n\n"))
 }
 
-func consoleCloudAgentInitialPrompt(history []consoleChatMessageView, userInput string, attachments []consoleChatAttachmentView) string {
-	return consoleCloudAgentCurrentPrompt(userInput, attachments)
-}
-
-func consoleCloudAgentInteractivePromptSections() []string {
+func consoleCloudAgentFirstTurnPromptSections() []string {
 	return []string{
-		"Continue this AIYolo chat session inside Claude Code as an interactive collaboration, not a one-shot completion.",
-		"Work on the latest user message in the current workspace when you have enough information.",
-		"If the request is ambiguous, missing a decision, requires credentials, or could reasonably branch into different implementations, ask a concise clarification question and stop. The user will answer in the AIYolo chat input, and the next turn will resume this same Claude Code session.",
-		"Do not invent missing requirements or mark the task complete while you are waiting for the user's answer.",
+		"This is an interactive AIYolo chat session in Claude Code, not a one-shot task.",
+		"If the request is ambiguous, missing a decision, requires credentials, or could branch into different implementations, ask a concise clarification question and stop. The user will reply in the AIYolo chat input, and the next turn will resume this same Claude Code session.",
+		"Do not invent missing requirements or mark the task complete while waiting for the user's answer.",
 	}
 }
 
@@ -482,10 +488,8 @@ func (parser *consoleCloudAgentStreamParser) consumeClaudeAssistantMessage(messa
 				}
 			}
 		case "tool_use":
-			if text := parser.claudeToolUseStep(block); text != "" {
-				if err := parser.appendReasoning(text, handlers); err != nil {
-					return err
-				}
+			if err := parser.emitClaudeToolUse(block, handlers); err != nil {
+				return err
 			}
 		case "thinking", "reasoning":
 			if text := firstNonEmpty(stringValue(block["thinking"]), stringValue(block["reasoning"]), stringValue(block["text"])); text != "" {
@@ -506,10 +510,8 @@ func (parser *consoleCloudAgentStreamParser) consumeClaudeUserMessage(message ma
 		if strings.ToLower(strings.TrimSpace(stringValue(block["type"]))) != "tool_result" {
 			continue
 		}
-		if text := parser.claudeToolResultStep(block); text != "" {
-			if err := parser.appendReasoning(text, handlers); err != nil {
-				return err
-			}
+		if err := parser.emitClaudeToolResult(block, handlers); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -536,6 +538,30 @@ func claudeContentBlocks(value any) []map[string]any {
 	default:
 		return nil
 	}
+}
+
+func (parser *consoleCloudAgentStreamParser) emitClaudeToolUse(block map[string]any, handlers consoleCloudAgentStreamHandlers) error {
+	if text := parser.claudeToolUseStep(block); text != "" {
+		if err := parser.appendReasoning(text, handlers); err != nil {
+			return err
+		}
+	}
+	if handlers.OnOperation != nil {
+		return handlers.OnOperation(consoleCloudAgentBuildToolUseOperation(block))
+	}
+	return nil
+}
+
+func (parser *consoleCloudAgentStreamParser) emitClaudeToolResult(block map[string]any, handlers consoleCloudAgentStreamHandlers) error {
+	if text := parser.claudeToolResultStep(block); text != "" {
+		if err := parser.appendReasoning(text, handlers); err != nil {
+			return err
+		}
+	}
+	if handlers.OnOperation != nil {
+		return handlers.OnOperation(consoleCloudAgentBuildToolResultOperation(block, parser.toolNames))
+	}
+	return nil
 }
 
 func (parser *consoleCloudAgentStreamParser) claudeToolUseStep(block map[string]any) string {

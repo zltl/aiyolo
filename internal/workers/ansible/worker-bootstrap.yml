@@ -108,30 +108,6 @@
       changed_when: "'0 upgraded, 0 newly installed, 0 to remove' not in (docker_package_install.stdout | default(''))"
       environment: "{{ worker_environment }}"
 
-    - name: Ensure Docker systemd override directory exists
-      ansible.builtin.file:
-        path: /etc/systemd/system/docker.service.d
-        state: directory
-        mode: "0755"
-      when: worker_proxy_env | default({}) | length > 0
-
-    - name: Configure Docker proxy environment
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/docker.service.d/http-proxy.conf
-        mode: "0644"
-        content: |
-          [Service]
-          {% for key in docker_proxy_env_keys | default([]) %}
-          Environment="{{ key }}={{ worker_proxy_env[key] }}"
-          {% endfor %}
-      when: worker_proxy_env | default({}) | length > 0
-
-    - name: Remove Docker proxy environment override for direct access
-      ansible.builtin.file:
-        path: /etc/systemd/system/docker.service.d/http-proxy.conf
-        state: absent
-      when: worker_proxy_env | default({}) | length == 0
-
     - name: Initialize and mount declared worker data disks
       ansible.builtin.include_tasks: tasks/setup-disk.yml
       loop: "{{ worker_data_disks | default([]) }}"

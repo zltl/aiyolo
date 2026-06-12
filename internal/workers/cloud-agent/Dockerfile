@@ -9,6 +9,8 @@ ARG AIYOLO_ASS_SHA256=
 ARG AIYOLO_CLOUD_AGENT_BUILD_REVISION=dev
 ARG NODE_VERSION=20.20.2
 ARG CLAUDE_CODE_VERSION=latest
+ARG HTTP_PROXY=
+ARG HTTPS_PROXY=
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
@@ -56,8 +58,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && install -d -m 0755 /etc/aiyolo /etc/sudoers.d /usr/local/bin /opt \
  && printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${AIYOLO_AGENT_USER}" >/etc/sudoers.d/aiyolo \
  && chmod 0440 /etc/sudoers.d/aiyolo \
- && if [ -x /usr/bin/fdfind ]; then ln -sf /usr/bin/fdfind /usr/local/bin/fd; fi \
- && wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
+ && if [ -x /usr/bin/fdfind ]; then ln -sf /usr/bin/fdfind /usr/local/bin/fd; fi
+
+RUN HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY}" \
+    http_proxy="${HTTP_PROXY}" https_proxy="${HTTPS_PROXY}" \
+    wget -nv --tries=3 --timeout=30 -O /tmp/google-chrome.deb "${CHROME_DEB_URL}" \
  && apt-get install -y /tmp/google-chrome.deb \
  && rm -f /tmp/google-chrome.deb \
  && curl -fsSL --retry 5 --connect-timeout 30 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" -o /tmp/node.tar.gz \
