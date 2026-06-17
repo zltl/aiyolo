@@ -938,7 +938,7 @@ func (handler *Handler) chatPageState(ctx context.Context, r *http.Request) (con
 	state.Form.Environment = normalizeConsoleChatEnvironmentValue(state.Form.Environment, state.EnvironmentOptions)
 	if resolution, err := handler.resolveConsoleChatAllowedModels(ctx, userID, state.Form.Environment); err != nil {
 		return consoleChatPageState{}, err
-	} else if !resolution.Unrestricted {
+	} else if len(resolution.Models) > 0 {
 		state.Routes = consoleChatFilterRoutesByAllowedModels(state.Routes, resolution.Models)
 	}
 	if state.Form.PublicName == "" && len(state.Routes) > 0 {

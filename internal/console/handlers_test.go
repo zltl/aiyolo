@@ -1850,6 +1850,63 @@ func TestConsoleChatSessionSavePreservesUpdatedAtWithoutMessageActivity(t *testi
 	}
 }
 
+func TestConsoleChatSessionSaveKeepsRicherExistingMessages(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertConsoleChatSession(ctx, domain.ConsoleChatSession{
+		UserID:       "admin@example.com",
+		ID:           "session-rich",
+		Title:        "Recovered thread",
+		PublicName:   "gpt-5.4",
+		Status:       "completed",
+		MessagesJSON: `[{"id":"u1","role":"user","content":"hello"},{"id":"a1","role":"assistant","content":"Recovered output"}]`,
+		MessageCount: 2,
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := app.Config{HTTPAddr: ":0", SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password", ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second}
+	server := httptest.NewServer(app.NewServer(cfg, store).Handler())
+	defer server.Close()
+
+	client, err := loggedInConsoleClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := `{"id":"session-rich","title":"Recovered thread","customTitle":true,"publicName":"gpt-5.4","systemPrompt":"","draft":"","messages":[{"id":"u1","role":"user","content":"hello"}]}`
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/console/chat/session", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("save session status=%d body=%s", response.StatusCode, body)
+	}
+
+	session, err := store.GetConsoleChatSession(ctx, "admin@example.com", "session-rich")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(session.MessagesJSON, "Recovered output") {
+		t.Fatalf("assistant reply was overwritten by stale client save: %s", session.MessagesJSON)
+	}
+}
+
 func TestConsoleChatPageOmitsAdvancedSettings(t *testing.T) {
 	store := storage.NewMemoryStore()
 	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {

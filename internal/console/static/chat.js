@@ -356,7 +356,7 @@
     const nextSession = normalizeSession({
       ...existing,
       ...metadata,
-      messages: history.filter(Boolean),
+      messages: preferRicherSessionMessages(existing.messages, history.filter(Boolean)),
       status: String(metadata.status || existing.status || "streaming").trim(),
       updatedAt: nowISO(),
     }, form, routes, existing);
@@ -398,8 +398,9 @@
       roleLabel("assistant"),
       state.assistantHistoryMessage.content || "",
       form.dataset.chatStreamingLabel || "Streaming",
-      [],
+      state.assistantHistoryMessage.attachments || [],
       state.assistantHistoryMessage.reasoning || "",
+      state.assistantHistoryMessage.operations || [],
     );
     thread.appendChild(assistantNode.article);
     scrollThread(thread);
@@ -3332,6 +3333,26 @@
 
   const sessionIsStreaming = (session) => String(session?.status || "").trim() === "streaming";
 
+  const messageHasSubstantiveContent = (message) => {
+    if (!message || typeof message !== "object") {
+      return false;
+    }
+    return String(message.content || "").trim() !== ""
+      || String(message.reasoning || "").trim() !== ""
+      || (Array.isArray(message.operations) && message.operations.length > 0)
+      || (Array.isArray(message.attachments) && message.attachments.length > 0);
+  };
+
+  const sessionMessagesList = (session) => (
+    Array.isArray(session?.messages) ? session.messages.map(normalizeMessage).filter(Boolean) : []
+  );
+
+  const sessionEndsWithAssistantReply = (session) => {
+    const messages = sessionMessagesList(session);
+    const lastMessage = messages[messages.length - 1];
+    return lastMessage?.role === "assistant" && messageHasSubstantiveContent(lastMessage);
+  };
+
   const sessionIsRecoverableCloudAgentStream = (session) => {
     if (!session || !isCloudAgentEnvironment(session.environment)) {
       return false;
@@ -3340,10 +3361,25 @@
     if (status === "completed" || status === "failed") {
       return false;
     }
+    if (sessionEndsWithAssistantReply(session)) {
+      return false;
+    }
     if (status === "streaming" || status === "interrupted") {
       return true;
     }
-    const messages = Array.isArray(session.messages) ? session.messages : [];
+    const messages = sessionMessagesList(session);
+    const lastMessage = messages[messages.length - 1];
+    return lastMessage?.role === "user";
+  };
+
+  const shouldResumeCloudAgentStreamOnColdLoad = (session) => {
+    if (!sessionIsRecoverableCloudAgentStream(session)) {
+      return false;
+    }
+    if (isSessionStreamActive(session?.id)) {
+      return true;
+    }
+    const messages = sessionMessagesList(session);
     const lastMessage = messages[messages.length - 1];
     return lastMessage?.role === "user";
   };
@@ -3356,6 +3392,73 @@
   const sessionMessageSignature = (messages) => JSON.stringify(
     Array.isArray(messages) ? messages.map(normalizeMessage).filter(Boolean) : [],
   );
+
+  const preferRicherSessionMessages = (existingMessages, incomingMessages, preferIncomingOnTie = false) => {
+    const existing = Array.isArray(existingMessages)
+      ? existingMessages.map(normalizeMessage).filter(Boolean)
+      : [];
+    const incoming = Array.isArray(incomingMessages)
+      ? incomingMessages.map(normalizeMessage).filter(Boolean)
+      : [];
+    if (incoming.length === 0) {
+      return existing;
+    }
+    if (existing.length === 0) {
+      return incoming;
+    }
+    if (existing.length > incoming.length) {
+      return existing;
+    }
+    if (incoming.length > existing.length) {
+      return incoming;
+    }
+    const existingSignature = sessionMessageSignature(existing);
+    const incomingSignature = sessionMessageSignature(incoming);
+    if (incomingSignature.length > existingSignature.length) {
+      return incoming;
+    }
+    if (preferIncomingOnTie && incomingSignature.length >= existingSignature.length) {
+      return incoming;
+    }
+    return existing;
+  };
+
+  const readMessagesFromRenderedThread = (root) => {
+    const thread = root?.querySelector("[data-chat-scroll]");
+    if (!thread) {
+      return [];
+    }
+    const messages = [];
+    thread.querySelectorAll(".chat-message").forEach((article) => {
+      let role = "assistant";
+      if (article.classList.contains("is-user")) {
+        role = "user";
+      } else if (article.classList.contains("is-system")) {
+        role = "system";
+      }
+      const copy = article.querySelector(".chat-message-copy");
+      const reasoning = article.querySelector(".chat-reasoning-copy");
+      const content = copy instanceof HTMLElement && !copy.hidden
+        ? String(copy.textContent || "").trim()
+        : "";
+      const reasoningText = reasoning instanceof HTMLElement
+        ? String(reasoning.textContent || "").trim()
+        : "";
+      if (!content && !reasoningText) {
+        return;
+      }
+      messages.push({
+        id: makeID("msg"),
+        role,
+        label: roleLabel(role),
+        content,
+        reasoning: reasoningText,
+        operations: [],
+        attachments: [],
+      });
+    });
+    return messages.map(normalizeMessage).filter(Boolean);
+  };
 
   const sessionHasMessageActivity = (existingSession, messages) => {
     const nextSignature = sessionMessageSignature(messages);
@@ -3431,6 +3534,7 @@
     if (!existing) {
       return;
     }
+    const serverMessages = Array.isArray(serverSession.messages) ? serverSession.messages : [];
     const merged = {
       ...existing,
       title: String(serverSession.title || existing.title || "").trim(),
@@ -3438,10 +3542,14 @@
       status: String(serverSession.status || existing.status || "").trim(),
       lastError: String(serverSession.lastError || existing.lastError || "").trim(),
       updatedAt: String(serverSession.updatedAt || existing.updatedAt || "").trim() || existing.updatedAt,
+      messages: preferRicherSessionMessages(existing.messages, serverMessages),
     };
     store = upsertSession(store, merged);
     saveStore(store);
     renderSessionList(root, store);
+    if (readClientSessionID(form) === sessionID) {
+      writeHiddenJSON(form, "chat_history_json", merged.messages);
+    }
   };
 
   const saveSessionToServer = async (session) => {
@@ -3536,10 +3644,13 @@
     updatedAt: nowISO(),
   }, form, routes);
 
-  const captureSessionFromDOM = (form, store, routes) => {
+  const captureSessionFromDOM = (form, store, routes, options = {}) => {
     const existingSession = store.sessions.find((session) => session.id === readClientSessionID(form)) || null;
     const draftField = form.querySelector("#chat-draft");
-    const messages = readHiddenJSON(form, "chat_history_json", []).map(normalizeMessage).filter(Boolean);
+    const domMessages = readHiddenJSON(form, "chat_history_json", []);
+    const renderedMessages = options.root ? readMessagesFromRenderedThread(options.root) : [];
+    let messages = preferRicherSessionMessages(existingSession?.messages, domMessages, true);
+    messages = preferRicherSessionMessages(messages, renderedMessages, true);
     const createdAt = existingSession?.createdAt || nowISO();
     const updatedAt = sessionHasMessageActivity(existingSession, messages)
       ? nowISO()
@@ -4032,18 +4143,30 @@
     return empty;
   };
 
-  const renderThread = (root, messages, route) => {
+  const renderThread = (root, messages, route, options = {}) => {
     const thread = root.querySelector("[data-chat-scroll]");
     if (!thread) {
       return;
     }
+    const nextMessages = Array.isArray(messages) ? messages.map(normalizeMessage).filter(Boolean) : [];
+    if (options.preserveRicherRendered !== false) {
+      const renderedMessages = readMessagesFromRenderedThread(root);
+      if (renderedMessages.length > nextMessages.length) {
+        return;
+      }
+      if (renderedMessages.length > 0
+        && renderedMessages.length === nextMessages.length
+        && sessionMessageSignature(renderedMessages).length > sessionMessageSignature(nextMessages).length) {
+        return;
+      }
+    }
     thread.replaceChildren();
-    if (!messages.length) {
+    if (!nextMessages.length) {
       thread.appendChild(buildEmptyState(route));
       syncLucideIcons();
       return;
     }
-    messages.forEach((message) => {
+    nextMessages.forEach((message) => {
       const node = buildMessageNode(message.role, message.label || roleLabel(message.role), message.content, "", message.attachments || [], message.reasoning || "", message.operations || []);
       thread.appendChild(node.article);
     });
@@ -4165,11 +4288,19 @@
     }
   };
 
-  const applySession = (root, session, routes) => {
+  const applySession = (root, session, routes, options = {}) => {
     const form = currentForm();
     if (!form) {
       return;
     }
+    const renderedMessages = options.coldLoad ? readMessagesFromRenderedThread(root) : [];
+    let resolvedMessages = session.messages;
+    if (options.coldLoad) {
+      resolvedMessages = preferRicherSessionMessages(session.messages, renderedMessages, true);
+    }
+    session = resolvedMessages === session.messages
+      ? session
+      : { ...session, messages: resolvedMessages };
     writeClientSessionID(form, session.id);
     setSelectedModel(form, session.publicName);
     setSelectedEnvironment(form, session.environment);
@@ -4188,7 +4319,17 @@
     writeHiddenJSON(form, "chat_history_json", session.messages);
     writeHiddenJSON(form, "chat_draft_attachments_json", session.draftAttachments);
     renderDraftAttachments(root, session.draftAttachments);
-    renderThread(root, session.messages, routes.get(session.publicName) || null);
+    renderThread(root, session.messages, routes.get(session.publicName) || null, {
+      preserveRicherRendered: options.coldLoad,
+    });
+    if (options.coldLoad) {
+      const renderedMessages = readMessagesFromRenderedThread(root);
+      const syncedMessages = preferRicherSessionMessages(session.messages, renderedMessages, true);
+      if (sessionMessageSignature(syncedMessages) !== sessionMessageSignature(session.messages)) {
+        session = { ...session, messages: syncedMessages };
+        writeHiddenJSON(form, "chat_history_json", session.messages);
+      }
+    }
     renderThreadSummary(root, session.messages);
     setAttachmentStatus(root, "", false);
     hideResultMeta(root);
@@ -4205,7 +4346,7 @@
     scrollThread(root.querySelector("[data-chat-scroll]"));
     emitChatState({ source: "apply-session", session });
     syncFormStreamingUI(form);
-    void bootstrapActiveSessionConnections(form, session);
+    void bootstrapActiveSessionConnections(form, session, options);
   };
 
   const renderSessionList = (root, store) => {
@@ -4385,8 +4526,11 @@
     await runSessionStreamFetchLoop(state, form, { resumeOnly: true });
   };
 
-  const bootstrapActiveSessionConnections = async (form, session) => {
+  const bootstrapActiveSessionConnections = async (form, session, options = {}) => {
     if (!(form instanceof HTMLFormElement) || !session) {
+      return;
+    }
+    if (options.coldLoad && !shouldResumeCloudAgentStreamOnColdLoad(session)) {
       return;
     }
     const environment = currentSelectedEnvironment(form);
@@ -4593,12 +4737,17 @@
     setSidebarCollapsed(form, sidebarCollapsed == null ? true : sidebarCollapsed);
     const routes = routeMap(form);
     let store = normalizeStore(loadStore(), form, routes);
-    const serverSession = captureSessionFromDOM(form, store, routes);
+    const serverSession = captureSessionFromDOM(form, store, routes, { root });
     const shouldMergeServer = (preferServerState || !store.sessions.length || readClientSessionID(form) !== "")
       && isPersistedSession(serverSession);
     if (shouldMergeServer) {
-      store = upsertSession(store, serverSession);
-      store.activeSessionId = serverSession.id;
+      const existingServerSession = store.sessions.find((session) => session.id === serverSession.id) || null;
+      const mergedServerSession = {
+        ...serverSession,
+        messages: preferRicherSessionMessages(existingServerSession?.messages, serverSession.messages, true),
+      };
+      store = upsertSession(store, mergedServerSession);
+      store.activeSessionId = mergedServerSession.id;
       saveStore(store, false);
     }
     if (!store.sessions.some((session) => session.id === store.activeSessionId)) {
@@ -4607,7 +4756,7 @@
     let active = store.sessions.find((session) => session.id === store.activeSessionId) || store.sessions[0] || serverSession;
     ({ store, active } = reconcileActiveSessionEnvironmentFromDOM(store, active, form, routes));
     renderSessionList(root, store);
-    applySession(root, active, routes);
+    applySession(root, active, routes, { coldLoad: true });
   };
 
   const applyStoredSessions = () => {

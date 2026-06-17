@@ -435,6 +435,35 @@ func consoleChatSessionHasMessageActivity(locale string, existingJSON string, ne
 	return consoleChatSessionCanonicalMessagesJSON(locale, existingJSON, cfg) != consoleChatSessionCanonicalMessagesJSON(locale, nextJSON, cfg)
 }
 
+func consoleChatSessionMessagePayloadSize(messages []consoleChatMessageView) int {
+	payload, err := consoleChatSessionMessagesPayload(messages)
+	if err != nil {
+		return 0
+	}
+	return len(payload)
+}
+
+func consoleChatPreferRicherSessionMessages(locale string, existingJSON string, incoming []consoleChatMessageView, cfg artifacts.Config) []consoleChatMessageView {
+	existing := decodeConsoleChatSessionMessages(locale, existingJSON, cfg)
+	incoming = normalizeConsoleChatSessionMessages(locale, incoming, cfg)
+	if len(incoming) == 0 {
+		return existing
+	}
+	if len(existing) == 0 {
+		return incoming
+	}
+	if len(existing) > len(incoming) {
+		return existing
+	}
+	if len(incoming) > len(existing) {
+		return incoming
+	}
+	if consoleChatSessionMessagePayloadSize(incoming) > consoleChatSessionMessagePayloadSize(existing) {
+		return incoming
+	}
+	return existing
+}
+
 func (handler *Handler) persistConsoleChatSession(ctx context.Context, r *http.Request, sessionID string, publicName string, systemPrompt string, draft string, draftAttachments []consoleChatAttachmentView, messages []consoleChatMessageView, status string, requestID string, responseID string, lastError string) (domain.ConsoleChatSession, error) {
 	locale := resolveConsoleLocale(r)
 	userID := currentConsoleSessionSubject(r, handler.cfg.SecretKey)
@@ -448,11 +477,11 @@ func (handler *Handler) persistConsoleChatSessionForUser(ctx context.Context, lo
 	}
 	userID = strings.TrimSpace(userID)
 	normalizedDraftAttachments := normalizeConsoleChatSessionAttachments(handler.cfg.ChatAttachments, cloneConsoleChatAttachments(draftAttachments))
-	normalizedMessages := normalizeConsoleChatSessionMessages(locale, cloneConsoleChatMessages(messages), handler.cfg.ChatAttachments)
 	existing, err := handler.store.GetConsoleChatSession(ctx, userID, sessionID)
 	if err != nil && err != storage.ErrNotFound {
 		return domain.ConsoleChatSession{}, err
 	}
+	normalizedMessages := consoleChatPreferRicherSessionMessages(locale, existing.MessagesJSON, messages, handler.cfg.ChatAttachments)
 	messagesJSON, err := consoleChatSessionMessagesPayload(normalizedMessages)
 	if err != nil {
 		return domain.ConsoleChatSession{}, err
@@ -537,10 +566,7 @@ func (handler *Handler) saveChatSession(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	messages := payload.Messages
-	if len(messages) == 0 {
-		messages = decodeConsoleChatSessionMessages(locale, existing.MessagesJSON, handler.cfg.ChatAttachments)
-	}
+	messages := consoleChatPreferRicherSessionMessages(locale, existing.MessagesJSON, payload.Messages, handler.cfg.ChatAttachments)
 	messagesJSON, err := consoleChatSessionMessagesPayload(messages)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

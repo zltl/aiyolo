@@ -2,6 +2,8 @@ package console
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -290,5 +292,35 @@ func TestConsoleChatFilterRoutesByAllowedModelsMatchesShortPublicNames(t *testin
 	filtered := consoleChatFilterRoutesByAllowedModels(routes, []string{"gpt-5.4"})
 	if len(filtered) != 1 || filtered[0].PublicName != "gpt-5.4" {
 		t.Fatalf("expected short alias to match routed model, got %+v", filtered)
+	}
+}
+
+func TestChatPageStateKeepsRoutesWithoutUserAPIKeys(t *testing.T) {
+	store := storage.NewMemoryStore()
+	if err := store.SeedDefaults(context.Background(), storage.SeedData{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.UpsertProvider(ctx, domain.Provider{ID: "openrouter", Name: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1", Protocol: domain.ProtocolOpenAI, MasterKey: "sk-chat-test", Status: domain.StatusEnabled, TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertModelRoute(ctx, domain.ModelRoute{PublicName: "gpt-5.4", ProviderID: "openrouter", UpstreamModel: "openai/gpt-5.4", Protocol: domain.ProtocolOpenAI, Enabled: true, Priority: 1, Weight: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewHandler(Config{SecretKey: "test-secret", AdminEmail: "admin@example.com", AdminPassword: "password"}, store)
+	recorder := httptest.NewRecorder()
+	setSessionCookie(recorder, "admin@example.com", handler.cfg.SecretKey)
+	request := httptest.NewRequest(http.MethodGet, "/console/chat", nil)
+	for _, cookie := range recorder.Result().Cookies() {
+		request.AddCookie(cookie)
+	}
+
+	state, err := handler.chatPageState(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Routes) != 1 || state.Routes[0].PublicName != "gpt-5.4" {
+		t.Fatalf("expected routes without user api keys, got %+v", state.Routes)
 	}
 }
